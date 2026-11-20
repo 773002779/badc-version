@@ -73,7 +73,37 @@ public interface PipelineRepository {
     /** {@code PENDING/RUNNING → status} for the instance, setting {@code end_at}. */
     boolean finishInstance(long instanceId, InstanceStatus status, Instant now);
 
+    /**
+     * The build coordinates of an instance: the deployment unit, the CODING plan (the unit's
+     * enabled {@code BUILD} binding), the item's read-only source branch and the commit to
+     * build. Unresolvable parts are {@code 0}/blank instead of failing the pipeline; the
+     * handler reports them on the task row.
+     */
+    BuildContext buildContextOf(long instanceId);
+
+    /**
+     * Marks a task {@code WAITING_EXTERNAL} with the engine identifiers and its build
+     * deadline. Only a non-terminal row is changed, so a duplicate trigger cannot regress a
+     * completion; the first trigger also fills {@code started_at}.
+     *
+     * @return {@code true} when the row was updated
+     */
+    boolean markTaskWaitingExternal(long taskId, String externalId, String externalUrl,
+                                    Instant deadlineAt, Instant now);
+
+    /**
+     * Records the image an instance built: {@code image_digest} (when supplied) and the built
+     * {@code commit_sha}. The digest is the input of the production same-image check (J27).
+     *
+     * @return {@code true} when the instance row was updated
+     */
+    boolean recordBuiltImage(long instanceId, String imageDigest, String commitSha);
+
     /** Who owns the instance for lock and state purposes. */
     record InstanceContext(long instanceId, long orderId, long unitId) {
+    }
+
+    /** Build trigger coordinates; see {@link #buildContextOf(long)}. */
+    record BuildContext(long unitId, String planId, String branch, String commitSha) {
     }
 }

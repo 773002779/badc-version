@@ -88,4 +88,18 @@ public final class NodeHandlerRegistry {
         Objects.requireNonNull(node, "node must not be null");
         require(node.nodeType()).start(instance);
     }
+
+    /**
+     * Delivers a committed task completion to the handler of its node, if one is registered.
+     * Unlike {@link #onNodeEnter}, a missing handler is not an error: the completion is still
+     * persisted and the orchestrator advances the node on its own.
+     */
+    public void onTaskCompleted(PipelineInstance instance, NodeTask completed) {
+        Objects.requireNonNull(instance, "instance must not be null");
+        Objects.requireNonNull(completed, "completed task must not be null");
+        NodeHandler handler = handler(completed.nodeType());
+        if (handler != null) {
+            handler.onTaskCompleted(instance, completed);
+        }
+    }
 }

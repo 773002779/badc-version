@@ -11,6 +11,8 @@ import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineNode;
 import com.sf.release.domain.pipeline.TaskType;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
+import com.sf.release.domain.resource.TaskKind;
+import com.sf.release.infra.repo.po.CodingTaskBindingPO;
 import com.sf.release.infra.repo.po.NodeTaskPO;
 import com.sf.release.infra.repo.po.PipelineInstancePO;
 import com.sf.release.infra.repo.po.PipelineNodePO;
@@ -36,23 +38,27 @@ public class MybatisPipelineRepository implements PipelineRepository {
         NodeTaskStatus.TIMEOUT.name(), NodeTaskStatus.SKIPPED.name());
     private static final int MAX_SUMMARY_LENGTH = 500;
     private static final int MAX_DIGEST_LENGTH = 80;
+    private static final int MAX_COMMIT_SHA_LENGTH = 40;
 
     private final PipelineInstanceMapper instanceMapper;
     private final PipelineNodeMapper nodeMapper;
     private final NodeTaskMapper taskMapper;
     private final ReleaseOrderMapper orderMapper;
     private final ReleaseItemMapper itemMapper;
+    private final CodingTaskBindingMapper bindingMapper;
 
     public MybatisPipelineRepository(PipelineInstanceMapper instanceMapper,
                                      PipelineNodeMapper nodeMapper,
                                      NodeTaskMapper taskMapper,
                                      ReleaseOrderMapper orderMapper,
-                                     ReleaseItemMapper itemMapper) {
+                                     ReleaseItemMapper itemMapper,
+                                     CodingTaskBindingMapper bindingMapper) {
         this.instanceMapper = instanceMapper;
         this.nodeMapper = nodeMapper;
         this.taskMapper = taskMapper;
         this.orderMapper = orderMapper;
         this.itemMapper = itemMapper;
+        this.bindingMapper = bindingMapper;
     }
 
     @Override
@@ -193,6 +199,80 @@ public class MybatisPipelineRepository implements PipelineRepository {
                 InstanceStatus.RUNNING.name())
             .set(PipelineInstancePO::getStatus, status.name())
             .set(PipelineInstancePO::getEndAt, now)) == 1;
+    }
+
+    @Override
+    public BuildContext buildContextOf(long instanceId) {
+        PipelineInstancePO instance = instanceMapper.selectById(instanceId);
+        if (instance == null || instance.getOrderId() == null || instance.getOrderId() <= 0) {
+            return new BuildContext(0L, null, null, null);
+        }
+        ReleaseOrderPO order = orderMapper.selectById(instance.getOrderId());
+        if (order == null || order.getItemId() == null) {
+            return new BuildContext(0L, null, null, null);
+        }
+        ReleaseItemPO item = itemMapper.selectById(order.getItemId());
+        if (item == null) {
+            return new BuildContext(0L, null, null, null);
+        }
+        long unitId = item.getUnitId() == null ? 0L : item.getUnitId();
+        CodingTaskBindingPO binding = unitId <= 0 ? null : bindingMapper.selectOne(
+            Wrappers.<CodingTaskBindingPO>lambdaQuery()
+                .eq(CodingTaskBindingPO::getUnitId, unitId)
+                .eq(CodingTaskBindingPO::getTaskKind, TaskKind.BUILD.name())
+                .eq(CodingTaskBindingPO::getEnabled, true));
+        // The enabled BUILD binding is authoritative; the item's snapshot is the fallback
+        // when the binding was removed or disabled after the item was created.
+        String planId = binding == null ? null : trimToNull(binding.getTaskId());
+        if (planId == null) {
+            planId = trimToNull(item.getBuildPlanId());
+        }
+        String commitSha = trimToNull(item.getBaseCommit());
+        if (commitSha == null) {
+            commitSha = trimToNull(instance.getCommitSha());
+        }
+        return new BuildContext(unitId, planId, trimToNull(item.getSourceBranch()), commitSha);
+    }
+
+    @Override
+    public boolean markTaskWaitingExternal(long taskId, String externalId, String externalUrl,
+                                           Instant deadlineAt, Instant now) {
+        return taskMapper.update(null, Wrappers.<NodeTaskPO>lambdaUpdate()
+            .eq(NodeTaskPO::getId, taskId)
+            .in(NodeTaskPO::getStatus, NodeTaskStatus.PENDING.name(),
+                NodeTaskStatus.RUNNING.name())
+            .set(NodeTaskPO::getStatus, NodeTaskStatus.WAITING_EXTERNAL.name())
+            .set(NodeTaskPO::getExternalId, externalId)
+            .set(NodeTaskPO::getExternalUrl, externalUrl)
+            .set(NodeTaskPO::getDeadlineAt, deadlineAt)
+            .set(NodeTaskPO::getStartedAt, now)) == 1;
+    }
+
+    @Override
+    public boolean recordBuiltImage(long instanceId, String imageDigest, String commitSha) {
+        String digest = trimToNull(imageDigest);
+        String commit = trimToNull(commitSha);
+        if (digest == null && commit == null) {
+            return false;
+        }
+        LambdaUpdateWrapper<PipelineInstancePO> update =
+            Wrappers.<PipelineInstancePO>lambdaUpdate()
+                .eq(PipelineInstancePO::getId, instanceId);
+        if (digest != null) {
+            update.set(PipelineInstancePO::getImageDigest, truncate(digest, MAX_DIGEST_LENGTH));
+        }
+        if (commit != null) {
+            update.set(PipelineInstancePO::getCommitSha, truncate(commit, MAX_COMMIT_SHA_LENGTH));
+        }
+        return instanceMapper.update(null, update) == 1;
+    }
+
+    private static String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private static String truncate(String value, int maxLength) {

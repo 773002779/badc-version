@@ -13,8 +13,8 @@ package com.sf.release.domain.pipeline;
  * orchestrator's transaction, and it must not call {@link PipelineOrchestrator#advance(long)}
  * synchronously from the same thread (the instance lock is still held).
  *
- * <p>Phase 1 has no handler in this task: Task 12 registers the build handler, Task 13 the
- * test-deploy handler. The orchestrator never skips a node without one — see
+ * <p>Task 12 provides the build handler, Task 13 the test-deploy handler. The orchestrator
+ * never skips a node without one — see
  * {@link NodeHandlerRegistry#onNodeEnter(PipelineInstance, PipelineNode)}.
  */
 public interface NodeHandler {
@@ -28,4 +28,19 @@ public interface NodeHandler {
      * recoverable failure is possible).
      */
     void start(PipelineInstance instance);
+
+    /**
+     * Called by the orchestrator <em>after</em> a terminal task completion of this handler's
+     * node has committed, so a handler can start the next task of its chain. The hook must not
+     * open a long transaction around an engine call (the orchestrator's instance lock is held
+     * and the completion already committed) and it must never call
+     * {@link PipelineOrchestrator#advance(long)}: the orchestrator's advance runs right after
+     * this hook returns, and a re-entrant call is ignored on purpose.
+     *
+     * <p>The default is a no-op, so handlers without a chain need not implement it. An
+     * exception thrown here is logged by the orchestrator and does not hide a task failure the
+     * handler already persisted.
+     */
+    default void onTaskCompleted(PipelineInstance instance, NodeTask completed) {
+    }
 }

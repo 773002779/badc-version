@@ -55,6 +55,13 @@ import java.util.Set;
  *   <li>A handler that throws after its node entry was committed fails the node and the instance
  *       in a new short transaction, with an explicit reason; the rollback guarantee of the entry
  *       is replaced by that failure path.</li>
+ *   <li>A committed terminal task completion is dispatched to its node handler's
+ *       {@link NodeHandler#onTaskCompleted} hook <em>before</em> {@link #advance(long)}, so a
+ *       chained step (for example {@code CODE_CHECK → PKG_BUILD}) exists as
+ *       {@code WAITING_EXTERNAL} when the node completion is evaluated; a handler failure
+ *       recorded as a failed task is then seen by the normal failure path. The hook and the
+ *       node handler run under a re-entrancy guard: an {@code advance} called from inside a
+ *       handler is ignored instead of re-entering the instance lock.</li>
  * </ol>
  */
 public final class PipelineOrchestrator {
@@ -78,6 +85,13 @@ public final class PipelineOrchestrator {
     private final TransactionRunner transactionRunner;
     private final NodeHandlerRegistry handlerRegistry;
     private final PipelineEventBus eventBus;
+
+    /**
+     * Set while a {@link NodeHandler} runs on this thread. The instance lock is held by the
+     * orchestrator during the node entry, so a handler that calls {@link #advance(long)} would
+     * recurse into the same lock; such a call is ignored with a warning instead.
+     */
+    private final ThreadLocal<Boolean> handlerRunning = ThreadLocal.withInitial(() -> false);
 
     public PipelineOrchestrator(PipelineRepository repository,
                                 NodeTaskCompletionService completionService,
@@ -112,7 +126,40 @@ public final class PipelineOrchestrator {
         NodeTaskCompletionService.Completion completion = transactionRunner.inTransaction(
             () -> completionService.apply(taskId, status, digest, message));
         if (completion.terminal()) {
+            if (completion.changed()) {
+                // After the commit: the handler may start the next task of its chain, and the
+                // advance below then sees a node that is not complete yet (or the failure the
+                // handler persisted).
+                notifyHandlerTaskCompleted(completion.instanceId(), taskId);
+            }
             advance(completion.instanceId());
+        }
+    }
+
+    /**
+     * Dispatches one committed completion to its node handler. A handler exception is logged
+     * and swallowed here: the handler is expected to persist a task failure itself (for
+     * example an engine exception), and the following {@link #advance(long)} then runs the
+     * normal node/instance failure path. The guard prevents a handler from calling
+     * {@code advance} synchronously.
+     */
+    private void notifyHandlerTaskCompleted(long instanceId, long taskId) {
+        PipelineInstance instance = repository.loadInstance(instanceId);
+        NodeTask completed = repository.loadTask(taskId);
+        if (instance == null || completed == null) {
+            log.warn("task completion not dispatched: instanceId={}, taskId={}, found={}",
+                instanceId, taskId, instance != null && completed != null);
+            return;
+        }
+        boolean nested = Boolean.TRUE.equals(handlerRunning.get());
+        handlerRunning.set(true);
+        try {
+            handlerRegistry.onTaskCompleted(instance, completed);
+        } catch (RuntimeException ex) {
+            log.warn("node handler completion callback failed: instanceId={}, taskId={},"
+                + " taskType={}", instanceId, taskId, completed.taskType(), ex);
+        } finally {
+            restoreHandlerGuard(nested);
         }
     }
 
@@ -122,6 +169,11 @@ public final class PipelineOrchestrator {
      * handler is invoked after that transaction commits but still inside the instance lock.
      */
     public void advance(long instanceId) {
+        if (Boolean.TRUE.equals(handlerRunning.get())) {
+            log.warn("re-entrant advance ignored while a node handler is running: instanceId={}",
+                instanceId);
+            return;
+        }
         for (int attempt = 1; attempt <= ADVANCE_LOCK_ATTEMPTS; attempt++) {
             if (pipelineLock.acquire(instanceId)) {
                 try {
@@ -296,15 +348,36 @@ public final class PipelineOrchestrator {
      */
     private void runAfterCommit(AdvanceOutcome outcome) {
         if (outcome.enteredInstance() != null) {
+            RuntimeException handlerFailure = null;
+            boolean nested = Boolean.TRUE.equals(handlerRunning.get());
+            handlerRunning.set(true);
             try {
                 handlerRegistry.onNodeEnter(outcome.enteredInstance(), outcome.enteredNode());
             } catch (RuntimeException ex) {
-                failHandlerEntry(outcome, ex);
+                handlerFailure = ex;
+            } finally {
+                restoreHandlerGuard(nested);
+            }
+            if (handlerFailure != null) {
+                failHandlerEntry(outcome, handlerFailure);
                 return;
             }
         }
         if (outcome.terminal()) {
             releaseUnitLock(outcome.instanceId(), outcome.unitId());
+        }
+    }
+
+    /**
+     * Restores the re-entrancy flag after a handler call. A nested handler call (a stub engine
+     * that reports a completion synchronously) must not clear the flag of its caller, otherwise
+     * the outer handler could still recurse into {@link #advance(long)}.
+     */
+    private void restoreHandlerGuard(boolean nested) {
+        if (nested) {
+            handlerRunning.set(true);
+        } else {
+            handlerRunning.remove();
         }
     }
 
