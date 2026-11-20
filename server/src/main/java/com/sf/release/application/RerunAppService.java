@@ -136,14 +136,15 @@ public class RerunAppService {
 
         // Without a baseline commit the decision is always a conservative full rerun (the planner
         // reports degraded), so there is no reason to call the engine first.
-        String headSha = item.baseCommit() == null
-            ? null : commitProbe.headSha(item.unitId(), item.sourceBranch());
-        RerunPlan plan = rerunPlanner.decide(item, headSha, previous);
+        String observedHead = item.baseCommit() == null
+            ? null : trimToNull(commitProbe.headSha(item.unitId(), item.sourceBranch()));
+        RerunPlan plan = rerunPlanner.decide(item, observedHead, previous);
 
         boolean reusableImage = previous != null && previous.imageDigest() != null
             && !previous.imageDigest().isBlank();
         boolean full = plan.full() || plan.fromNode() == NodeType.BUILD || !reusableImage;
-        boolean revoke = plan.full() || plan.revokeTestPass() || !reusableImage;
+        boolean hasTestPass = item.lastTestPassBy() != null || item.lastTestPassAt() != null;
+        boolean revoke = hasTestPass && (plan.revokeTestPass() || !reusableImage);
         // A full rebuild always starts at BUILD; a resume starts at the planned node.
         NodeType fromNode = full ? NodeType.BUILD : plan.fromNode();
         if (revoke && !confirmRevokeTestPass) {
@@ -160,7 +161,7 @@ public class RerunAppService {
         }
         try {
             RerunResult result = transactionTemplate.execute(tx -> rerunInTransaction(
-                itemId, order, previous, plan, full, revoke, fromNode));
+                itemId, order, previous, plan, full, revoke, fromNode, observedHead));
             return Objects.requireNonNull(result, "rerun result");
         } catch (PublishAppService.LockLostException ex) {
             unitLockService.release(unitId, UnitLockService.UNBOUND_INSTANCE_ID);
@@ -175,7 +176,8 @@ public class RerunAppService {
 
     private RerunResult rerunInTransaction(long itemId, ReleaseOrder order,
                                            PipelineInstance previous, RerunPlan plan,
-                                           boolean full, boolean revoke, NodeType fromNode) {
+                                           boolean full, boolean revoke, NodeType fromNode,
+                                           String observedHead) {
         ReleaseItem current = loadItem(itemId);
         requireRerunnable(current);
         ItemEvent event = full ? ItemEvent.RERUN_FULL : ItemEvent.RERUN;
@@ -192,6 +194,11 @@ public class RerunAppService {
             update.set(ReleaseItemPO::getLastTestPassBy, null)
                 .set(ReleaseItemPO::getLastTestPassAt, null);
         }
+        if (full && observedHead != null) {
+            // A full rebuild starts from the observed head; without this the old baseline would
+            // keep every later rerun full forever.
+            update.set(ReleaseItemPO::getBaseCommit, observedHead);
+        }
         int rows = itemMapper.update(null, update);
         if (rows != 1) {
             throw new BizException(BizError.STATE_NOT_ALLOWED, "变更项已被并发重新发布",
@@ -202,7 +209,7 @@ public class RerunAppService {
         String commitSha = full || previous == null ? null : previous.commitSha();
         TriggerType triggerType = full ? TriggerType.RERUN_FULL : TriggerType.RERUN_FROM_NODE;
         PipelineInstance instance = publishAppService.createRerunInstance(order, current,
-            current.unitId(), triggerType, fromNode, imageDigest, commitSha);
+            current.unitId(), triggerType, fromNode, imageDigest, commitSha, previous);
 
         if (revoke) {
             // The item update above cleared the pass; record the acting user for the audit trail.
@@ -245,6 +252,14 @@ public class RerunAppService {
                 Map.of("itemId", itemId));
         }
         return po.toDomain();
+    }
+
+    private static String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     /**

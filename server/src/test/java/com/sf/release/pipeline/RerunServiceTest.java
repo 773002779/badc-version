@@ -96,6 +96,7 @@ class RerunServiceTest {
         givenBinding(unitId, "PROD_DEPLOY", "P-PROD-T15");
         givenDe(unitId, "TEST", "t15-sit", 0);
         givenDe(unitId, "PROD", "t15-prod", 1);
+        givenDe(unitId, "PROD", "t15-prod-b", 2);
         itemId = itemService.create(taskId,
             new CreateItemCmd(unitId, BRANCH, "重新发布判定", PLAN_DATE));
     }
@@ -244,6 +245,87 @@ class RerunServiceTest {
         assertThat(count("pipeline_instance")).isEqualTo(2);
         assertThat(lockInstanceId()).isEqualTo(newInstance);
         assertThat(publishNoOf(newInstance)).isEqualTo(published.publishNo());
+        assertThat(baseCommit())
+            .as("a full rebuild advances the baseline to the observed head")
+            .isEqualTo(OTHER);
+    }
+
+    @Test
+    void rerun_without_a_test_pass_requires_no_confirmation_and_reports_no_revocation() {
+        PublishResult published = publishService.publish(itemId);
+        long oldInstance = instanceId(published.pipelineNo());
+        failLastInstance(oldInstance, "BUILD");
+        jdbc.update("UPDATE release_item SET last_test_pass_by = NULL,"
+            + " last_test_pass_at = NULL WHERE id = ?", itemId);
+        when(commitProbe.headSha(unitId, BRANCH)).thenReturn(BASE);
+
+        RerunResult result = rerunService.rerun(itemId, false);
+
+        assertThat(result.full()).isTrue();
+        assertThat(result.revokedTestPass())
+            .as("there was no test pass to revoke").isFalse();
+        assertThat(lastTestPassBy()).isNull();
+        assertThat(jdbc.queryForObject(
+            "SELECT last_test_pass_at FROM release_item WHERE id = ?", Instant.class, itemId))
+            .isNull();
+        assertThat(itemStatus()).isEqualTo("BUILDING");
+    }
+
+    @Test
+    void changed_commit_without_a_test_pass_does_not_require_confirmation() {
+        PublishResult published = publishService.publish(itemId);
+        long oldInstance = instanceId(published.pipelineNo());
+        failLastInstance(oldInstance, "TEST_DEPLOY");
+        jdbc.update("UPDATE release_item SET last_test_pass_by = NULL,"
+            + " last_test_pass_at = NULL WHERE id = ?", itemId);
+        when(commitProbe.headSha(unitId, BRANCH)).thenReturn(OTHER);
+        when(commitProbe.hasChangesUnder(unitId, BRANCH, MODULE, BASE)).thenReturn(true);
+
+        RerunResult result = rerunService.rerun(itemId, false);
+
+        assertThat(result.full()).isTrue();
+        assertThat(result.revokedTestPass()).isFalse();
+        assertThat(instance(instanceId(result.pipelineNo())).get("trigger_type"))
+            .isEqualTo("RERUN_FULL");
+        assertThat(baseCommit()).isEqualTo(OTHER);
+    }
+
+    @Test
+    void production_resume_skips_batches_that_already_succeeded() {
+        PublishResult published = publishService.publish(itemId);
+        long oldInstance = instanceId(published.pipelineNo());
+        failProductionBatches(oldInstance, "SUCCESS", "FAILED");
+        when(commitProbe.headSha(unitId, BRANCH)).thenReturn(BASE);
+
+        RerunResult result = rerunService.rerun(itemId, false);
+
+        assertThat(result.full()).isFalse();
+        assertThat(result.revokedTestPass()).isFalse();
+        long newInstance = instanceId(result.pipelineNo());
+        assertThat(instance(newInstance).get("current_node")).isEqualTo("PROD_DEPLOY");
+        assertThat(instance(newInstance).get("trigger_type")).isEqualTo("RERUN_FROM_NODE");
+        assertThat(productionBatches(newInstance))
+            .as("batch 1 succeeded and must not be redeployed")
+            .containsExactly("1:SKIPPED", "2:PENDING");
+    }
+
+    @Test
+    void full_rerun_keeps_all_production_batches_pending() {
+        PublishResult published = publishService.publish(itemId);
+        long oldInstance = instanceId(published.pipelineNo());
+        failProductionBatches(oldInstance, "SUCCESS", "FAILED");
+        when(commitProbe.headSha(unitId, BRANCH)).thenReturn(OTHER);
+        when(commitProbe.hasChangesUnder(unitId, BRANCH, MODULE, BASE)).thenReturn(true);
+
+        RerunResult result = rerunService.rerun(itemId, true);
+
+        assertThat(result.full()).isTrue();
+        long newInstance = instanceId(result.pipelineNo());
+        assertThat(instance(newInstance).get("current_node")).isEqualTo("BUILD");
+        assertThat(productionBatches(newInstance))
+            .as("a full rebuild deploys every batch again")
+            .containsExactly("1:PENDING", "2:PENDING");
+        assertThat(baseCommit()).isEqualTo(OTHER);
     }
 
     @Test
@@ -341,6 +423,28 @@ class RerunServiceTest {
         assertThat(unitLockService.release(unitId, instanceId)).isTrue();
     }
 
+    /**
+     * Turns the initial instance into a failed production deployment: earlier nodes succeeded,
+     * {@code PROD_DEPLOY} failed, batch 1 has the first given status and batch 2 the second.
+     */
+    private void failProductionBatches(long instanceId, String batch1Status,
+                                       String batch2Status) {
+        jdbc.update("UPDATE pipeline_node SET status = 'SUCCESS' WHERE instance_id = ?"
+            + " AND node_type IN ('BUILD', 'TEST_DEPLOY', 'VERIFY')", instanceId);
+        jdbc.update("UPDATE pipeline_node SET status = 'FAILED' WHERE instance_id = ?"
+            + " AND node_type = 'PROD_DEPLOY'", instanceId);
+        jdbc.update("UPDATE pipeline_instance SET status = 'FAILED', image_digest = ?,"
+            + " commit_sha = ? WHERE id = ?", OLD_DIGEST, BASE, instanceId);
+        jdbc.update("UPDATE release_item SET status = 'FAILED', base_commit = ?,"
+            + " last_test_pass_by = ?, last_test_pass_at = NOW(3) WHERE id = ?",
+            BASE, TESTER, itemId);
+        jdbc.update("UPDATE node_task SET status = ? WHERE instance_id = ?"
+            + " AND node_type = 'PROD_DEPLOY' AND batch_no = 1", batch1Status, instanceId);
+        jdbc.update("UPDATE node_task SET status = ? WHERE instance_id = ?"
+            + " AND node_type = 'PROD_DEPLOY' AND batch_no = 2", batch2Status, instanceId);
+        assertThat(unitLockService.release(unitId, instanceId)).isTrue();
+    }
+
     private int count(String table) {
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class);
         return count == null ? 0 : count;
@@ -359,6 +463,19 @@ class RerunServiceTest {
     private String itemStatus() {
         return jdbc.queryForObject("SELECT status FROM release_item WHERE id = ?",
             String.class, itemId);
+    }
+
+    private String baseCommit() {
+        return jdbc.queryForObject("SELECT base_commit FROM release_item WHERE id = ?",
+            String.class, itemId);
+    }
+
+    /** One {@code batch:status} line per production deploy task, ordered by batch. */
+    private List<String> productionBatches(long instanceId) {
+        return jdbc.queryForList(
+            "SELECT CONCAT(batch_no, ':', status) FROM node_task WHERE instance_id = ?"
+                + " AND node_type = 'PROD_DEPLOY' ORDER BY batch_no, target_id",
+            String.class, instanceId);
     }
 
     private String lastTestPassBy() {

@@ -80,8 +80,9 @@ public final class RerunPlanner {
         Objects.requireNonNull(item, "item must not be null");
         String base = trimToNull(item.baseCommit());
         String head = trimToNull(headSha);
+        String modulePath = trimToNull(item.modulePath());
 
-        if (head != null && head.equals(base)) {
+        if (head != null && base != null && head.equalsIgnoreCase(base)) {
             // Exactly the commit the item was built from: reuse the image and every check.
             return resumeFromNode(lastInstance);
         }
@@ -89,10 +90,10 @@ public final class RerunPlanner {
             // No observed head: the platform cannot prove the commit is unchanged.
             return fullRerun(true);
         }
-        if (item.modulePath() != null && base != null) {
+        if (modulePath != null && base != null) {
             boolean changed = commitProbe.hasChangesUnder(
                 item.unitId() == null ? 0L : item.unitId(), item.sourceBranch(),
-                item.modulePath(), base);
+                modulePath, base);
             if (!changed) {
                 // Another module of the same repository changed; this item's output did not.
                 return resumeFromNode(lastInstance);

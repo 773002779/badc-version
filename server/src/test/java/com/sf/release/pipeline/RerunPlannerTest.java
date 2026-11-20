@@ -154,6 +154,31 @@ class RerunPlannerTest {
     }
 
     @Test
+    void commit_comparison_ignores_sha_case() {
+        RerunPlanner planner = plannerFor(nodes(
+            NodeStatus.SUCCESS, NodeStatus.FAILED, NodeStatus.SKIPPED, NodeStatus.SKIPPED));
+
+        RerunPlan plan = planner.decide(item("A".repeat(40), MODULE), BASE);
+
+        assertThat(plan.full()).isFalse();
+        assertThat(plan.fromNode()).isEqualTo(NodeType.TEST_DEPLOY);
+        assertThat(plan.revokeTestPass()).isFalse();
+        assertThat(probe.changeCalls).isZero();
+    }
+
+    @Test
+    void blank_module_path_is_treated_as_absent_and_degrades() {
+        RerunPlanner planner = plannerFor(nodes(
+            NodeStatus.SUCCESS, NodeStatus.FAILED, NodeStatus.SKIPPED, NodeStatus.SKIPPED));
+
+        RerunPlan plan = planner.decide(item(BASE, "   "), OTHER);
+
+        assertThat(plan.full()).isTrue();
+        assertThat(plan.degraded()).isTrue();
+        assertThat(probe.changeCalls).isZero();
+    }
+
+    @Test
     void an_item_without_a_previous_execution_resumes_at_build() {
         RerunPlanner planner = new RerunPlanner(probe, itemId -> null);
 

@@ -10,9 +10,13 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -113,12 +117,15 @@ public final class PipelineFactory {
      * {@code SKIPPED} together with their tasks, because a rerun from a failed node reuses the
      * previous execution's work instead of repeating it. The caller passes the previous image
      * digest and commit for a from-node rerun (they are the input of the test/production
-     * deploy), and {@code null} for a full rerun.
+     * deploy), and {@code null} for a full rerun. When the resume point is {@code PROD_DEPLOY},
+     * the previous execution's successful production batches are carried over as {@code SKIPPED}
+     * tasks, so already deployed batches are not deployed again (requirements §4.5/J17); only the
+     * failed batch and the later batches stay {@code PENDING}.
      */
     public static PipelineInstance createRerun(ReleaseOrder order, ReleaseItem item,
                                                List<EnvDe> envDes, TriggerType triggerType,
                                                NodeType fromNode, String imageDigest,
-                                               String commitSha) {
+                                               String commitSha, PipelineInstance previous) {
         Objects.requireNonNull(fromNode, "fromNode must not be null");
         PipelineInstance base = createOnline(order, item, envDes);
         PipelineNode start = base.node(fromNode);
@@ -126,9 +133,17 @@ public final class PipelineFactory {
             throw new IllegalArgumentException(
                 "the online pipeline has no node " + fromNode);
         }
+        Set<Integer> completedBatches = fromNode == NodeType.PROD_DEPLOY && previous != null
+            ? completedProductionBatches(previous) : Set.of();
         List<PipelineNode> nodes = new ArrayList<>(base.nodes().size());
         for (PipelineNode node : base.nodes()) {
-            nodes.add(node.seq() < start.seq() ? skipped(node, fromNode, base.createdAt()) : node);
+            if (node.seq() < start.seq()) {
+                nodes.add(skipped(node, fromNode, base.createdAt()));
+            } else if (node.nodeType() == NodeType.PROD_DEPLOY && !completedBatches.isEmpty()) {
+                nodes.add(skipCompletedBatches(node, completedBatches, base.createdAt()));
+            } else {
+                nodes.add(node);
+            }
         }
         return new PipelineInstance(null, base.orderId(), base.pipelineNo(), ExecType.ONLINE,
             triggerType, fromNode, InstanceStatus.PENDING, imageDigest, commitSha,
@@ -141,12 +156,67 @@ public final class PipelineFactory {
      */
     private static PipelineNode skipped(PipelineNode node, NodeType fromNode, Instant now) {
         List<NodeTask> tasks = node.tasks().stream()
-            .map(task -> new NodeTask(null, null, task.nodeType(), task.taskType(),
-                task.batchNo(), task.targetId(), NodeTaskStatus.SKIPPED, 0, null, null,
-                "重新发布从 " + fromNode + " 开始，跳过该节点", null, null, now, null))
+            .map(task -> skippedTask(task, "重新发布从 " + fromNode + " 开始，跳过该节点", now))
             .toList();
         return new PipelineNode(null, null, node.nodeType(), node.seq(), NodeStatus.SKIPPED,
             null, now, tasks);
+    }
+
+    /** The node stays current; only the batches that already succeeded are marked skipped. */
+    private static PipelineNode skipCompletedBatches(PipelineNode node,
+                                                      Set<Integer> completedBatches,
+                                                      Instant now) {
+        List<NodeTask> tasks = node.tasks().stream()
+            .map(task -> completedBatches.contains(task.batchNo())
+                ? skippedTask(task, "上一轮该批次已成功，重新发布不重复部署", now)
+                : task)
+            .toList();
+        return new PipelineNode(node.id(), node.instanceId(), node.nodeType(), node.seq(),
+            node.status(), node.startedAt(), node.finishedAt(), tasks);
+    }
+
+    private static NodeTask skippedTask(NodeTask task, String summary, Instant now) {
+        return new NodeTask(null, null, task.nodeType(), task.taskType(), task.batchNo(),
+            task.targetId(), NodeTaskStatus.SKIPPED, 0, null, null, summary, null, null, now,
+            null);
+    }
+
+    /**
+     * Production batches whose latest attempt of every deploy task is {@code SUCCESS} (a latest
+     * {@code SKIPPED} is neutral, mirroring the orchestrator's completion fold). A batch with a
+     * failed/incomplete latest task is not returned, so the whole batch is retried.
+     */
+    private static Set<Integer> completedProductionBatches(PipelineInstance previous) {
+        PipelineNode node = previous.node(NodeType.PROD_DEPLOY);
+        if (node == null) {
+            return Set.of();
+        }
+        Map<DeployKey, NodeTask> latest = new LinkedHashMap<>();
+        for (NodeTask task : node.tasks()) {
+            if (task.taskType() != TaskType.DEPLOY) {
+                continue;
+            }
+            DeployKey key = new DeployKey(task.batchNo(), task.targetId());
+            NodeTask candidate = latest.get(key);
+            if (candidate == null || task.attempt() > candidate.attempt()) {
+                latest.put(key, task);
+            }
+        }
+        Set<Integer> succeeded = new HashSet<>();
+        Set<Integer> notSucceeded = new HashSet<>();
+        for (NodeTask task : latest.values()) {
+            if (task.status() == NodeTaskStatus.SUCCESS) {
+                succeeded.add(task.batchNo());
+            } else if (task.status() != NodeTaskStatus.SKIPPED) {
+                notSucceeded.add(task.batchNo());
+            }
+        }
+        succeeded.removeAll(notSucceeded);
+        return succeeded;
+    }
+
+    /** Latest-attempt identity of one production deploy task. */
+    private record DeployKey(int batchNo, long targetId) {
     }
 
     /** {@code PROD}, {@code DR} and {@code BLUE} DEs are deployed by the PROD_DEPLOY node. */

@@ -6,14 +6,20 @@ import com.sf.release.application.PublishAppService;
 import com.sf.release.application.PublishAppService.PublishResult;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.domain.engine.EngineException;
+import com.sf.release.domain.pipeline.port.GitCommitProbe;
 import com.sf.release.infra.lock.UnitLockService;
 import com.sf.release.infra.repo.DeployUnitLockMapper;
 import com.sf.release.infra.security.TestUserContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
@@ -34,6 +40,8 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Publishing an online 变更项 against the real test schema (Flyway migrate, MySQL 8):
@@ -44,13 +52,18 @@ import static org.assertj.core.api.Assertions.catchThrowable;
  * {@code PENDING -PUBLISH-> BUILDING} through the Task 8 state machine.
  *
  * <p>Lock tests use the default in-memory {@code DistributedLock} (no Redis is available on
- * this host); the {@code deploy_unit_lock} row is the DB backstop.
+ * this host); the {@code deploy_unit_lock} row is the DB backstop. The dedicated context property
+ * keeps this class from reusing the rerun tests' cached context: their fixtures recreate the same
+ * unit ids under a cleaned schema, and the in-memory lock map is not part of the DB reset.
  */
-@SpringBootTest
+@SpringBootTest(properties = "release.publish-probe=fresh-context")
 @ActiveProfiles("test")
+@ExtendWith(OutputCaptureExtension.class)
 class PublishServiceTest {
 
     private static final String OWNER = "01388007";
+    private static final String BRANCH = "release/202611";
+    private static final String BASE_COMMIT = "c".repeat(40);
     private static final LocalDate PLAN_DATE = LocalDate.of(2026, 11, 25);
     private static final int PARAM_INVALID_CODE = 40000;
     private static final int STATE_NOT_ALLOWED_CODE = 40001;
@@ -62,6 +75,7 @@ class PublishServiceTest {
     @Autowired UnitLockService unitLockService;
     @Autowired DeployUnitLockMapper lockMapper;
     @Autowired JdbcTemplate jdbc;
+    @MockBean GitCommitProbe commitProbe;
 
     private long subsystemId;
     private long taskId;
@@ -155,6 +169,45 @@ class PublishServiceTest {
         assertThat(Duration.between(Instant.now(), expireAt))
             .as("the unit lease is four hours from the publish")
             .isBetween(Duration.ofHours(3).plusMinutes(55), Duration.ofHours(4).plusMinutes(5));
+    }
+
+    @Test
+    void publish_records_the_probed_branch_head_as_the_rerun_baseline() {
+        when(commitProbe.headSha(unitId, BRANCH)).thenReturn("  " + BASE_COMMIT + "  ");
+
+        publishService.publish(itemId);
+
+        assertThat(baseCommit())
+            .as("the baseline is the trimmed observed HEAD, not an instance commit")
+            .isEqualTo(BASE_COMMIT);
+        verify(commitProbe).headSha(unitId, BRANCH);
+    }
+
+    @Test
+    void probe_failure_keeps_base_commit_null_and_does_not_block_publish(
+            CapturedOutput output) {
+        when(commitProbe.headSha(unitId, BRANCH))
+            .thenThrow(EngineException.unavailable("git probe unavailable"));
+
+        PublishResult result = publishService.publish(itemId);
+
+        assertThat(result.pipelineNo()).isNotBlank();
+        assertThat(itemStatus()).isEqualTo("BUILDING");
+        assertThat(baseCommit()).isNull();
+        assertThat(output.getAll())
+            .as("the degradation must be visible in the log, not silent")
+            .contains("base_commit stays NULL");
+    }
+
+    @Test
+    void blank_head_keeps_base_commit_null_and_does_not_block_publish(CapturedOutput output) {
+        when(commitProbe.headSha(unitId, BRANCH)).thenReturn("   ");
+
+        publishService.publish(itemId);
+
+        assertThat(itemStatus()).isEqualTo("BUILDING");
+        assertThat(baseCommit()).isNull();
+        assertThat(output.getAll()).contains("base_commit stays NULL");
     }
 
     @Test
@@ -468,6 +521,11 @@ class PublishServiceTest {
 
     private String itemStatus() {
         return jdbc.queryForObject("SELECT status FROM release_item WHERE id = ?",
+            String.class, itemId);
+    }
+
+    private String baseCommit() {
+        return jdbc.queryForObject("SELECT base_commit FROM release_item WHERE id = ?",
             String.class, itemId);
     }
 

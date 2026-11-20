@@ -1,5 +1,6 @@
 package com.sf.release.application;
 
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
@@ -10,6 +11,7 @@ import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineNode;
 import com.sf.release.domain.pipeline.ReleaseOrder;
 import com.sf.release.domain.pipeline.TriggerType;
+import com.sf.release.domain.pipeline.port.GitCommitProbe;
 import com.sf.release.domain.resource.EnvDe;
 import com.sf.release.domain.resource.UnitType;
 import com.sf.release.domain.task.ItemEvent;
@@ -89,6 +91,7 @@ public class PublishAppService {
     private final NodeTaskMapper taskMapper;
     private final UnitAppService unitAppService;
     private final UnitLockService unitLockService;
+    private final GitCommitProbe commitProbe;
     private final TransactionTemplate transactionTemplate;
 
     public PublishAppService(ReleaseItemMapper itemMapper,
@@ -99,6 +102,7 @@ public class PublishAppService {
                              NodeTaskMapper taskMapper,
                              UnitAppService unitAppService,
                              UnitLockService unitLockService,
+                             GitCommitProbe commitProbe,
                              PlatformTransactionManager transactionManager) {
         this.itemMapper = itemMapper;
         this.envDeMapper = envDeMapper;
@@ -108,6 +112,7 @@ public class PublishAppService {
         this.taskMapper = taskMapper;
         this.unitAppService = unitAppService;
         this.unitLockService = unitLockService;
+        this.commitProbe = commitProbe;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -151,13 +156,20 @@ public class PublishAppService {
     private PublishResult publishInTransaction(long itemId, long unitId) {
         ReleaseItem current = loadItem(itemId);
         ItemStatus next = ItemStateMachine.transit(current, ItemEvent.PUBLISH);
+        String baseCommit = observeBaseCommit(current);
         Instant now = Instant.now();
-        int rows = itemMapper.update(null, Wrappers.<ReleaseItemPO>lambdaUpdate()
+        LambdaUpdateWrapper<ReleaseItemPO> update = Wrappers.<ReleaseItemPO>lambdaUpdate()
             .eq(ReleaseItemPO::getId, itemId)
             .eq(ReleaseItemPO::getRowVersion, current.rowVersion())
             .set(ReleaseItemPO::getStatus, next.name())
             .set(ReleaseItemPO::getRowVersion, current.rowVersion() + 1)
-            .set(ReleaseItemPO::getUpdatedAt, now));
+            .set(ReleaseItemPO::getUpdatedAt, now);
+        if (baseCommit != null) {
+            // The baseline the next rerun compares against. Best-effort: an unobservable head is
+            // left NULL and only degrades that rerun (see observeBaseCommit).
+            update.set(ReleaseItemPO::getBaseCommit, baseCommit);
+        }
+        int rows = itemMapper.update(null, update);
         if (rows != 1) {
             throw new BizException(BizError.STATE_NOT_ALLOWED, "变更项已被并发发布",
                 Map.of("itemId", itemId, "currentStatus", current.status().name()));
@@ -188,10 +200,11 @@ public class PublishAppService {
      */
     PipelineInstance createRerunInstance(ReleaseOrder order, ReleaseItem item, long unitId,
                                                 TriggerType triggerType, NodeType fromNode,
-                                                String imageDigest, String commitSha) {
+                                                String imageDigest, String commitSha,
+                                                PipelineInstance previous) {
         List<EnvDe> envDes = loadEnvDes(unitId);
         PipelineInstance instance = PipelineFactory.createRerun(order, item, envDes,
-            triggerType, fromNode, imageDigest, commitSha);
+            triggerType, fromNode, imageDigest, commitSha, previous);
         persistInstance(instance, unitId, item.id());
         log.info("rerun pipeline created: itemId={}, unitId={}, publishNo={}, pipelineNo={},"
                 + " triggerType={}, fromNode={}, imageDigest={}",
@@ -246,6 +259,43 @@ public class PublishAppService {
             payload.put("acquiredAt", holder.acquiredAt());
         }
         return new BizException(BizError.UNIT_LOCKED, "部署单元已被占用", payload);
+    }
+
+    /**
+     * Observes the branch head for the item's {@code base_commit} baseline. Best-effort on
+     * purpose: a missing CODING connection, a probe failure or an unreported head must not block
+     * a release. The item stays with a NULL baseline, the publish continues, and the next rerun
+     * is conservatively full+degraded (requirements §4.5).
+     */
+    private String observeBaseCommit(ReleaseItem item) {
+        try {
+            String head = trimToNull(commitProbe.headSha(item.unitId(), item.sourceBranch()));
+            if (head == null) {
+                log.warn("could not observe the branch head commit; base_commit stays NULL:"
+                        + " itemId={}, unitId={}, branch={}",
+                    item.id(), item.unitId(), item.sourceBranch());
+            }
+            return head;
+        } catch (RuntimeException ex) {
+            log.warn("could not observe the branch head commit; base_commit stays NULL:"
+                    + " itemId={}, unitId={}, branch={}, reason={}",
+                item.id(), item.unitId(), item.sourceBranch(), messageOf(ex));
+            return null;
+        }
+    }
+
+    private static String messageOf(RuntimeException ex) {
+        String message = ex.getMessage();
+        return message == null || message.isBlank()
+            ? ex.getClass().getSimpleName() : message;
+    }
+
+    private static String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private ReleaseItem loadItem(long itemId) {
