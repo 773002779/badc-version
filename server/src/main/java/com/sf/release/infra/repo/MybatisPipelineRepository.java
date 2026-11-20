@@ -1,0 +1,201 @@
+package com.sf.release.infra.repo;
+
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.domain.pipeline.InstanceStatus;
+import com.sf.release.domain.pipeline.NodeStatus;
+import com.sf.release.domain.pipeline.NodeTask;
+import com.sf.release.domain.pipeline.NodeTaskStatus;
+import com.sf.release.domain.pipeline.NodeType;
+import com.sf.release.domain.pipeline.PipelineInstance;
+import com.sf.release.domain.pipeline.PipelineNode;
+import com.sf.release.domain.pipeline.TaskType;
+import com.sf.release.domain.pipeline.port.PipelineRepository;
+import com.sf.release.infra.repo.po.NodeTaskPO;
+import com.sf.release.infra.repo.po.PipelineInstancePO;
+import com.sf.release.infra.repo.po.PipelineNodePO;
+import com.sf.release.infra.repo.po.ReleaseItemPO;
+import com.sf.release.infra.repo.po.ReleaseOrderPO;
+import org.springframework.stereotype.Repository;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * MyBatis-Plus implementation of the pipeline persistence port. Every state change is a status
+ * compare-and-set, which is the DB-level idempotency the orchestrator relies on (tech design
+ * §4.3).
+ */
+@Repository
+public class MybatisPipelineRepository implements PipelineRepository {
+
+    private static final List<String> TERMINAL_TASK_STATUSES = List.of(
+        NodeTaskStatus.SUCCESS.name(), NodeTaskStatus.FAILED.name(),
+        NodeTaskStatus.TIMEOUT.name(), NodeTaskStatus.SKIPPED.name());
+    private static final int MAX_SUMMARY_LENGTH = 500;
+    private static final int MAX_DIGEST_LENGTH = 80;
+
+    private final PipelineInstanceMapper instanceMapper;
+    private final PipelineNodeMapper nodeMapper;
+    private final NodeTaskMapper taskMapper;
+    private final ReleaseOrderMapper orderMapper;
+    private final ReleaseItemMapper itemMapper;
+
+    public MybatisPipelineRepository(PipelineInstanceMapper instanceMapper,
+                                     PipelineNodeMapper nodeMapper,
+                                     NodeTaskMapper taskMapper,
+                                     ReleaseOrderMapper orderMapper,
+                                     ReleaseItemMapper itemMapper) {
+        this.instanceMapper = instanceMapper;
+        this.nodeMapper = nodeMapper;
+        this.taskMapper = taskMapper;
+        this.orderMapper = orderMapper;
+        this.itemMapper = itemMapper;
+    }
+
+    @Override
+    public PipelineInstance loadInstance(long instanceId) {
+        PipelineInstancePO instance = instanceMapper.selectById(instanceId);
+        if (instance == null) {
+            return null;
+        }
+        List<PipelineNode> nodes = new ArrayList<>();
+        for (PipelineNodePO node : nodeMapper.selectList(
+                Wrappers.<PipelineNodePO>lambdaQuery()
+                    .eq(PipelineNodePO::getInstanceId, instanceId)
+                    .orderByAsc(PipelineNodePO::getSeqNo))) {
+            List<NodeTask> tasks = taskMapper.selectList(
+                    Wrappers.<NodeTaskPO>lambdaQuery()
+                        .eq(NodeTaskPO::getInstanceId, instanceId)
+                        .eq(NodeTaskPO::getNodeType, node.getNodeType())
+                        .orderByAsc(NodeTaskPO::getId))
+                .stream()
+                .map(NodeTaskPO::toDomain)
+                .toList();
+            nodes.add(node.toDomain(tasks));
+        }
+        return instance.toDomain(nodes);
+    }
+
+    @Override
+    public NodeTask loadTask(long taskId) {
+        NodeTaskPO task = taskMapper.selectById(taskId);
+        return task == null ? null : task.toDomain();
+    }
+
+    @Override
+    public InstanceContext contextOf(long instanceId) {
+        PipelineInstancePO instance = instanceMapper.selectById(instanceId);
+        if (instance == null || instance.getOrderId() == null || instance.getOrderId() <= 0) {
+            return new InstanceContext(instanceId, 0L, 0L);
+        }
+        long orderId = instance.getOrderId();
+        ReleaseOrderPO order = orderMapper.selectById(orderId);
+        if (order == null || order.getItemId() == null) {
+            return new InstanceContext(instanceId, orderId, 0L);
+        }
+        ReleaseItemPO item = itemMapper.selectById(order.getItemId());
+        long unitId = item == null || item.getUnitId() == null ? 0L : item.getUnitId();
+        return new InstanceContext(instanceId, orderId, unitId);
+    }
+
+    @Override
+    public boolean completeTask(long taskId, NodeTaskStatus status, String digest, String message,
+                                Instant now) {
+        NodeTask task = loadTask(taskId);
+        if (task == null) {
+            return false;
+        }
+        boolean terminal = TERMINAL_TASK_STATUSES.contains(status.name());
+        LambdaUpdateWrapper<NodeTaskPO> update = Wrappers.<NodeTaskPO>lambdaUpdate()
+            .eq(NodeTaskPO::getId, taskId)
+            .notIn(NodeTaskPO::getStatus, TERMINAL_TASK_STATUSES)
+            .set(NodeTaskPO::getStatus, status.name());
+        if (terminal) {
+            update.set(NodeTaskPO::getFinishedAt, now);
+            if (task.startedAt() != null) {
+                update.set(NodeTaskPO::getDurationMs,
+                    Math.max(0L, Duration.between(task.startedAt(), now).toMillis()));
+            }
+        } else if (task.startedAt() == null) {
+            update.set(NodeTaskPO::getStartedAt, now);
+        }
+        if (message != null && !message.isBlank()) {
+            update.set(NodeTaskPO::getResultSummary, truncate(message, MAX_SUMMARY_LENGTH));
+        }
+        int rows = taskMapper.update(null, update);
+
+        if (rows == 1 && status == NodeTaskStatus.SUCCESS
+                && task.taskType() == TaskType.IMG_BUILD
+                && digest != null && !digest.isBlank()) {
+            instanceMapper.update(null, Wrappers.<PipelineInstancePO>lambdaUpdate()
+                .eq(PipelineInstancePO::getId, task.instanceId())
+                .set(PipelineInstancePO::getImageDigest,
+                    truncate(digest.trim(), MAX_DIGEST_LENGTH)));
+        }
+        return rows == 1;
+    }
+
+    @Override
+    public boolean startInstance(long instanceId, NodeType nodeType, Instant now) {
+        return instanceMapper.update(null, Wrappers.<PipelineInstancePO>lambdaUpdate()
+            .eq(PipelineInstancePO::getId, instanceId)
+            .eq(PipelineInstancePO::getStatus, InstanceStatus.PENDING.name())
+            .set(PipelineInstancePO::getStatus, InstanceStatus.RUNNING.name())
+            .set(PipelineInstancePO::getStartAt, now)
+            .set(PipelineInstancePO::getCurrentNode, nodeType.name())) == 1;
+    }
+
+    @Override
+    public boolean moveToNode(long instanceId, NodeType fromNode, NodeType toNode) {
+        return instanceMapper.update(null, Wrappers.<PipelineInstancePO>lambdaUpdate()
+            .eq(PipelineInstancePO::getId, instanceId)
+            .eq(PipelineInstancePO::getStatus, InstanceStatus.RUNNING.name())
+            .eq(PipelineInstancePO::getCurrentNode, fromNode.name())
+            .set(PipelineInstancePO::getCurrentNode, toNode.name())) == 1;
+    }
+
+    @Override
+    public boolean startNode(long nodeId, Instant now) {
+        return nodeMapper.update(null, Wrappers.<PipelineNodePO>lambdaUpdate()
+            .eq(PipelineNodePO::getId, nodeId)
+            .eq(PipelineNodePO::getStatus, NodeStatus.PENDING.name())
+            .set(PipelineNodePO::getStatus, NodeStatus.RUNNING.name())
+            .set(PipelineNodePO::getStartedAt, now)) == 1;
+    }
+
+    @Override
+    public boolean finishNodeIfComplete(long nodeId, Instant now) {
+        return nodeMapper.completeIfAllTasksSucceeded(nodeId, now) == 1;
+    }
+
+    @Override
+    public boolean finishNode(long nodeId, NodeStatus status, Instant now) {
+        return nodeMapper.update(null, Wrappers.<PipelineNodePO>lambdaUpdate()
+            .eq(PipelineNodePO::getId, nodeId)
+            .eq(PipelineNodePO::getStatus, NodeStatus.RUNNING.name())
+            .set(PipelineNodePO::getStatus, status.name())
+            .set(PipelineNodePO::getFinishedAt, now)) == 1;
+    }
+
+    @Override
+    public boolean skipPendingTasks(long instanceId, NodeType nodeType, Instant now) {
+        return taskMapper.skipPending(instanceId, nodeType.name(), now) >= 1;
+    }
+
+    @Override
+    public boolean finishInstance(long instanceId, InstanceStatus status, Instant now) {
+        return instanceMapper.update(null, Wrappers.<PipelineInstancePO>lambdaUpdate()
+            .eq(PipelineInstancePO::getId, instanceId)
+            .in(PipelineInstancePO::getStatus, InstanceStatus.PENDING.name(),
+                InstanceStatus.RUNNING.name())
+            .set(PipelineInstancePO::getStatus, status.name())
+            .set(PipelineInstancePO::getEndAt, now)) == 1;
+    }
+
+    private static String truncate(String value, int maxLength) {
+        return value.length() <= maxLength ? value : value.substring(0, maxLength);
+    }
+}

@@ -3,6 +3,7 @@ package com.sf.release.infra.lock;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.sf.release.domain.pipeline.InstanceStatus;
 import com.sf.release.domain.pipeline.port.DistributedLock;
+import com.sf.release.domain.pipeline.port.UnitLease;
 import com.sf.release.infra.repo.DeployUnitLockMapper;
 import com.sf.release.infra.repo.PipelineInstanceMapper;
 import com.sf.release.infra.repo.po.DeployUnitLockPO;
@@ -44,7 +45,7 @@ import java.util.Objects;
  * was actually deleted — a caller can never free a new holder's lock on the "lock lost" path.
  */
 @Service
-public class UnitLockService {
+public class UnitLockService implements UnitLease {
 
     private static final Logger log = LoggerFactory.getLogger(UnitLockService.class);
 
@@ -152,6 +153,7 @@ public class UnitLockService {
      * @return {@code true} when the row still belongs to {@code instanceId} and both levels
      *     were extended; {@code false} when the lock was lost or the row belongs to somebody else
      */
+    @Override
     public boolean renew(long unitId, long instanceId) {
         DeployUnitLockPO row = lockMapper.selectById(unitId);
         if (row == null || row.getInstanceId() == null
