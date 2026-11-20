@@ -16,4 +16,8 @@ class ArchitectureTest {
         noClasses().that().resideInAPackage("..domain..")
             .should().dependOnClassesThat().resideInAnyPackage(
                 "org.springframework.web..", "org.springframework.stereotype..");
+
+    @ArchTest static final ArchRule web_may_only_depend_on_application_and_common =
+        noClasses().that().resideInAPackage("..web..")
+            .should().dependOnClassesThat().resideInAnyPackage("..infra..", "..domain..");
 }
