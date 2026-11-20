@@ -45,6 +45,23 @@ public class InMemoryDistributedLock implements DistributedLock {
     }
 
     @Override
+    public boolean renew(String key, Duration ttl) {
+        Objects.requireNonNull(key, "key must not be null");
+        requirePositive(ttl);
+        Instant now = Instant.now();
+        Instant expiresAt = now.plus(ttl);
+        boolean[] renewed = {false};
+        leases.computeIfPresent(key, (ignored, current) -> {
+            if (!current.isAfter(now)) {
+                return current;
+            }
+            renewed[0] = true;
+            return expiresAt;
+        });
+        return renewed[0];
+    }
+
+    @Override
     public void unlock(String key) {
         Objects.requireNonNull(key, "key must not be null");
         leases.remove(key);

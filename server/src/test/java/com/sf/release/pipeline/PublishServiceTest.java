@@ -17,6 +17,9 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
+import java.sql.Timestamp;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
@@ -30,6 +33,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
  * Publishing an online 变更项 against the real test schema (Flyway migrate, MySQL 8):
@@ -147,7 +151,10 @@ class PublishServiceTest {
             "SELECT * FROM deploy_unit_lock WHERE unit_id = ?", unitId);
         assertThat(((Number) lock.get("instance_id")).longValue()).isEqualTo(instanceId);
         assertThat(lock.get("acquired_at")).isNotNull();
-        assertThat(lock.get("expire_at")).isNotNull();
+        Instant expireAt = lockExpireAt();
+        assertThat(Duration.between(Instant.now(), expireAt))
+            .as("the unit lease is four hours from the publish")
+            .isBetween(Duration.ofHours(3).plusMinutes(55), Duration.ofHours(4).plusMinutes(5));
     }
 
     @Test
@@ -255,9 +262,13 @@ class PublishServiceTest {
         assertThat(failed.get(0)).isInstanceOf(BizException.class);
         BizException loser = (BizException) failed.get(0);
         assertThat(loser.getError())
-            .isIn(BizError.STATE_NOT_ALLOWED, BizError.UNIT_LOCKED);
-        assertThat(loser.getError().getCode())
-            .isIn(STATE_NOT_ALLOWED_CODE, UNIT_LOCKED_CODE);
+            .as("the loser always loses on the unit lock, never on a post-commit status read")
+            .isEqualTo(BizError.UNIT_LOCKED);
+        assertThat(loser.getError().getCode()).isEqualTo(UNIT_LOCKED_CODE);
+        assertThat(loser.getPayload()).isInstanceOf(Map.class);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> loserPayload = (Map<String, Object>) loser.getPayload();
+        assertThat(loserPayload).containsEntry("unitId", unitId);
 
         assertThat(count("release_order")).isEqualTo(1);
         assertThat(count("pipeline_instance")).isEqualTo(1);
@@ -299,45 +310,100 @@ class PublishServiceTest {
             .as("the same unit cannot be acquired twice")
             .isFalse();
 
-        assertThatThrownBy(() -> publishService.publish(itemId))
-            .isInstanceOf(BizException.class)
-            .extracting("error").isEqualTo(BizError.UNIT_LOCKED)
-            .satisfies(error -> assertThat(((BizError) error).getCode())
-                .isEqualTo(UNIT_LOCKED_CODE));
+        Throwable thrown = catchThrowable(() -> publishService.publish(itemId));
+        assertThat(thrown).isInstanceOf(BizException.class);
+        BizException locked = (BizException) thrown;
+        assertThat(locked.getError()).isEqualTo(BizError.UNIT_LOCKED);
+        assertThat(locked.getError().getCode()).isEqualTo(UNIT_LOCKED_CODE);
+        assertThat(locked.getPayload()).isInstanceOf(Map.class);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payload = (Map<String, Object>) locked.getPayload();
+        assertThat(payload).containsEntry("unitId", unitId).containsEntry("instanceId", 999L);
+        assertThat(payload.get("acquiredAt")).isNotNull();
         assertThat(count("release_order")).isZero();
         assertThat(count("pipeline_instance")).isZero();
         assertThat(itemStatus()).isEqualTo("PENDING");
 
-        // forceExpire is the test seam for a lock row whose expire_at has passed.
+        // forceExpire is the test seam for a lock row whose expire_at has passed; the owner
+        // instance is unknown (no pipeline_instance row 999), so it is reclaimable.
         assertThat(lockMapper.forceExpire(unitId)).isEqualTo(1);
         assertThat(unitLockService.acquire(unitId, 1000L))
-            .as("an expired row can be reclaimed")
+            .as("an expired row with an unknown owner can be reclaimed")
             .isTrue();
-        assertThat(jdbc.queryForObject(
-            "SELECT instance_id FROM deploy_unit_lock WHERE unit_id = ?", Long.class, unitId))
-            .isEqualTo(1000L);
+        assertThat(lockInstanceId()).isEqualTo(1000L);
 
-        unitLockService.release(unitId);
+        assertThat(unitLockService.release(unitId, 1000L)).isTrue();
         assertThat(publishService.publish(itemId).pipelineNo()).isNotBlank();
         assertThat(count("release_order")).isEqualTo(1);
         assertThat(count("pipeline_instance")).isEqualTo(1);
     }
 
     @Test
-    void release_removes_the_db_row_and_frees_the_lock() {
+    void release_removes_only_the_owners_db_row_and_free_lock() {
         assertThat(unitLockService.acquire(unitId, 77L)).isTrue();
         assertThat(count("deploy_unit_lock")).isEqualTo(1);
 
-        unitLockService.release(unitId);
+        assertThat(unitLockService.release(unitId, 78L))
+            .as("a non-owner must not delete the holder's row")
+            .isFalse();
+        assertThat(count("deploy_unit_lock")).isEqualTo(1);
+        assertThat(unitLockService.acquire(unitId, 99L)).isFalse();
 
+        assertThat(unitLockService.release(unitId, 77L)).isTrue();
         assertThat(count("deploy_unit_lock")).isZero();
         assertThat(unitLockService.acquire(unitId, 78L))
             .as("the distributed lock must be freed together with the DB row")
             .isTrue();
-        assertThat(jdbc.queryForObject(
-            "SELECT instance_id FROM deploy_unit_lock WHERE unit_id = ?", Long.class, unitId))
-            .isEqualTo(78L);
-        unitLockService.release(unitId);
+        assertThat(lockInstanceId()).isEqualTo(78L);
+        assertThat(unitLockService.release(unitId, 78L)).isTrue();
+    }
+
+    @Test
+    void renew_extends_the_lease_only_for_the_owner() {
+        long liveInstance = givenInstance("PL-T9-RENEW", "RUNNING");
+        assertThat(unitLockService.acquire(unitId, liveInstance)).isTrue();
+        Instant before = lockExpireAt();
+
+        assertThat(unitLockService.renew(unitId, liveInstance)).isTrue();
+        Instant after = lockExpireAt();
+        assertThat(after).isAfter(before);
+        assertThat(Duration.between(Instant.now(), after))
+            .isBetween(Duration.ofHours(3).plusMinutes(55), Duration.ofHours(4).plusMinutes(5));
+
+        assertThat(unitLockService.renew(unitId, liveInstance + 1))
+            .as("a different instance cannot renew the lease")
+            .isFalse();
+        assertThat(lockInstanceId()).isEqualTo(liveInstance);
+    }
+
+    @Test
+    void expired_lock_of_a_live_instance_is_renewed_not_reclaimed() {
+        long liveInstance = givenInstance("PL-T9-LIVE", "RUNNING");
+        assertThat(unitLockService.acquire(unitId, liveInstance)).isTrue();
+        assertThat(lockMapper.forceExpire(unitId)).isEqualTo(1);
+        Instant expired = lockExpireAt();
+
+        assertThat(unitLockService.acquire(unitId, 1000L))
+            .as("a running pipeline keeps the unit: acquire renews instead of stealing")
+            .isFalse();
+        Instant renewed = lockExpireAt();
+        assertThat(renewed).isAfter(expired);
+        assertThat(Duration.between(Instant.now(), renewed))
+            .isBetween(Duration.ofHours(3).plusMinutes(55), Duration.ofHours(4).plusMinutes(5));
+        assertThat(lockInstanceId()).isEqualTo(liveInstance);
+        assertThat(count("release_order")).isZero();
+    }
+
+    @Test
+    void expired_lock_of_a_terminal_instance_is_reclaimed() {
+        long doneInstance = givenInstance("PL-T9-DONE", "DONE");
+        assertThat(unitLockService.acquire(unitId, doneInstance)).isTrue();
+        assertThat(lockMapper.forceExpire(unitId)).isEqualTo(1);
+
+        assertThat(unitLockService.acquire(unitId, 1000L))
+            .as("a terminal owner cannot keep the unit")
+            .isTrue();
+        assertThat(lockInstanceId()).isEqualTo(1000L);
     }
 
     @Test
@@ -345,18 +411,25 @@ class PublishServiceTest {
         publishService.publish(itemId);
 
         assertThatThrownBy(() -> publishService.publish(itemId))
-            .as("the item is BUILDING: the status check rejects the second click")
+            .as("the first publish still holds the unit lock")
             .isInstanceOf(BizException.class)
-            .extracting("error").isEqualTo(BizError.STATE_NOT_ALLOWED);
+            .extracting("error").isEqualTo(BizError.UNIT_LOCKED)
+            .satisfies(error -> assertThat(((BizError) error).getCode())
+                .isEqualTo(UNIT_LOCKED_CODE));
 
-        // Even if the lock is gone (for example it expired), the item is BUILDING and the
-        // state machine refuses a second PUBLISH.
-        unitLockService.release(unitId);
+        long holder = lockInstanceId();
+        assertThat(holder).isPositive();
+        assertThat(unitLockService.release(unitId, holder)).isTrue();
+
+        // With the lock gone, the state machine still refuses a second PUBLISH from BUILDING.
         assertThatThrownBy(() -> publishService.publish(itemId))
             .isInstanceOf(BizException.class)
             .extracting("error").isEqualTo(BizError.STATE_NOT_ALLOWED)
             .satisfies(error -> assertThat(((BizError) error).getCode())
                 .isEqualTo(STATE_NOT_ALLOWED_CODE));
+        assertThat(count("deploy_unit_lock"))
+            .as("the failed publish releases its own reservation")
+            .isZero();
 
         assertThat(count("release_order")).isEqualTo(1);
         assertThat(count("pipeline_instance")).isEqualTo(1);
@@ -415,6 +488,18 @@ class PublishServiceTest {
         return typed;
     }
 
+    private long lockInstanceId() {
+        Long id = jdbc.queryForObject(
+            "SELECT instance_id FROM deploy_unit_lock WHERE unit_id = ?", Long.class, unitId);
+        return id == null ? -1L : id;
+    }
+
+    private Instant lockExpireAt() {
+        Timestamp expireAt = jdbc.queryForObject(
+            "SELECT expire_at FROM deploy_unit_lock WHERE unit_id = ?", Timestamp.class, unitId);
+        return expireAt == null ? null : expireAt.toInstant();
+    }
+
     private void givenUser(String userId) {
         jdbc.update("INSERT INTO app_user (id, name, status, created_at) VALUES (?, ?, 'ACTIVE', NOW(3))",
             userId, "用户" + userId);
@@ -466,6 +551,17 @@ class PublishServiceTest {
             unit, envKind, name, batchNo);
         Long id = jdbc.queryForObject(
             "SELECT id FROM env_de WHERE unit_id = ? AND de_name = ?", Long.class, unit, name);
+        return id == null ? 0L : id;
+    }
+
+    /** Inserts a bare pipeline instance row so a lock row can name a live/terminal owner. */
+    private long givenInstance(String pipelineNo, String status) {
+        jdbc.update("INSERT INTO pipeline_instance (order_id, pipeline_no, exec_type, trigger_type,"
+                + " current_node, status, created_at)"
+                + " VALUES (0, ?, 'ONLINE', 'INITIAL', 'BUILD', ?, NOW(3))",
+            pipelineNo, status);
+        Long id = jdbc.queryForObject(
+            "SELECT id FROM pipeline_instance WHERE pipeline_no = ?", Long.class, pipelineNo);
         return id == null ? 0L : id;
     }
 }

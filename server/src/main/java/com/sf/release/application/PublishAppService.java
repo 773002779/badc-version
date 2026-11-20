@@ -38,6 +38,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -53,16 +54,17 @@ import java.util.UUID;
  * <p><strong>Why the lock comes first.</strong> The unit lock is the mutual exclusion of the
  * whole publish: two clicks (or two nodes) must not create two orders. The winner holds the
  * lease and the {@code deploy_unit_lock} row until the instance reaches a terminal state; the
- * loser gets {@link BizError#UNIT_LOCKED} (40006). The item status is checked before the lock
- * so a second publish of an already {@code BUILDING} item fails with 40001 without touching
- * the lock, and the status transition itself is still re-applied inside the transaction with
- * a {@code row_version} CAS.
+ * loser gets {@link BizError#UNIT_LOCKED} (40006). Because the item status is only checked
+ * inside the locked transaction (through the state machine and a {@code row_version} CAS), a
+ * concurrent double publish loses deterministically on the lock, while a later publish of an
+ * already {@code BUILDING} item (lock gone) fails with 40001 and releases its own reservation.
  *
  * <p><strong>One transaction.</strong> The order, instance, nodes and tasks are inserted in a
  * single {@link TransactionTemplate} transaction together with the item transition, so a
  * failure leaves no half-published pipeline. The lock row is inserted <em>before</em> that
  * transaction (it must be visible to concurrent publishers) and is bound to the new instance
- * id inside it; if the transaction fails the lock is released.
+ * id inside it. Any other failure releases the sentinel reservation; a failure of the bind
+ * itself means the lock was lost, so no release is attempted at all.
  *
  * <p><strong>Scope.</strong> Only online deployment-unit items are published here. The daily
  * pipeline, the second-party library pipeline and reruns belong to later tasks.
@@ -122,19 +124,23 @@ public class PublishAppService {
                 "二方库发布流水线不在本期范围", Map.of("itemId", itemId, "type", item.type().name()));
         }
         unitAppService.assertPublishable(item.unitId());
-        assertItemCanBePublished(item);
 
         long unitId = item.unitId();
         if (!unitLockService.acquire(unitId, UnitLockService.UNBOUND_INSTANCE_ID)) {
-            throw new BizException(BizError.UNIT_LOCKED, "部署单元已被占用",
-                Map.of("unitId", unitId, "itemId", itemId));
+            throw unitLocked(unitId, itemId);
         }
         try {
             PublishResult result = transactionTemplate.execute(
                 tx -> publishInTransaction(itemId, unitId));
             return Objects.requireNonNull(result, "publish result");
+        } catch (LockLostException ex) {
+            // The lock row is no longer ours (bindInstance reported it lost). Releasing here
+            // could delete a new holder's row/key, so the release call is skipped entirely.
+            throw ex.failure();
         } catch (RuntimeException ex) {
-            unitLockService.release(unitId);
+            // On any other failure the transaction rolled back, including the bindInstance
+            // update, so the row still belongs to the reserved sentinel.
+            unitLockService.release(unitId, UnitLockService.UNBOUND_INSTANCE_ID);
             throw ex;
         }
     }
@@ -172,8 +178,8 @@ public class PublishAppService {
         instanceMapper.insert(instancePo);
         long instanceId = instancePo.getId();
         if (!unitLockService.bindInstance(unitId, instanceId)) {
-            throw new BizException(BizError.UNIT_LOCKED, "发布过程中部署单元锁丢失",
-                Map.of("unitId", unitId, "itemId", itemId));
+            throw new LockLostException(new BizException(BizError.UNIT_LOCKED,
+                "发布过程中部署单元锁丢失", Map.of("unitId", unitId, "itemId", itemId)));
         }
 
         for (PipelineNode node : instance.nodes()) {
@@ -189,9 +195,23 @@ public class PublishAppService {
         return new PublishResult(persistedOrder.publishNo(), instance.pipelineNo());
     }
 
-    /** Applies the state machine to the loaded item; an illegal PUBLISH surfaces as 40001. */
-    private static void assertItemCanBePublished(ReleaseItem item) {
-        ItemStateMachine.transit(item, ItemEvent.PUBLISH);
+    /**
+     * Builds the 40006 business error with the observed holder when there is one. A holder is
+     * "known" by its instance id only after {@code bindInstance}; the acquisition time is
+     * always part of the row.
+     */
+    private BizException unitLocked(long unitId, long itemId) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("unitId", unitId);
+        payload.put("itemId", itemId);
+        UnitLockService.LockHolder holder = unitLockService.holder(unitId);
+        if (holder != null && holder.instanceId() > 0) {
+            payload.put("instanceId", holder.instanceId());
+        }
+        if (holder != null && holder.acquiredAt() != null) {
+            payload.put("acquiredAt", holder.acquiredAt());
+        }
+        return new BizException(BizError.UNIT_LOCKED, "部署单元已被占用", payload);
     }
 
     private ReleaseItem loadItem(long itemId) {
@@ -212,5 +232,23 @@ public class PublishAppService {
 
     /** What the caller needs after publishing: the order number and the instance number. */
     public record PublishResult(String publishNo, String pipelineNo) {
+    }
+
+    /**
+     * Internal marker: {@code bindInstance} found the lock row gone, so the "lock lost" path
+     * must not release anything (the row now belongs to somebody else, or to nobody).
+     */
+    private static final class LockLostException extends RuntimeException {
+
+        private final BizException failure;
+
+        private LockLostException(BizException failure) {
+            super(failure.getMessage(), failure);
+            this.failure = failure;
+        }
+
+        private BizException failure() {
+            return failure;
+        }
     }
 }

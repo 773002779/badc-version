@@ -22,6 +22,18 @@ public interface DistributedLock {
      */
     boolean tryLock(String key, Duration ttl);
 
+    /**
+     * Extends the lease of a held {@code key} to {@code ttl} from now.
+     *
+     * <p>Renewal is <strong>not</strong> owner-thread restricted, like {@link #unlock}: a
+     * pipeline advances on webhook/scheduler threads, so the caller that renews may not be the
+     * thread that acquired the key. The decision to renew at all is the caller's
+     * authorisation, backed by the {@code deploy_unit_lock} row where one exists.
+     *
+     * @return {@code true} when the key existed and its lease was extended
+     */
+    boolean renew(String key, Duration ttl);
+
     /** Releases {@code key}. A key that is not held is left untouched. */
     void unlock(String key);
 }
