@@ -227,11 +227,20 @@ public class MybatisPipelineRepository implements PipelineRepository {
         if (planId == null) {
             planId = trimToNull(item.getBuildPlanId());
         }
-        String commitSha = trimToNull(item.getBaseCommit());
-        if (commitSha == null) {
-            commitSha = trimToNull(instance.getCommitSha());
-        }
+        String commitSha = trimToNull(instance.getCommitSha());
         return new BuildContext(unitId, planId, trimToNull(item.getSourceBranch()), commitSha);
+    }
+
+    @Override
+    public boolean recordCommit(long instanceId, String commitSha) {
+        String commit = trimToNull(commitSha);
+        if (commit == null) {
+            return false;
+        }
+        return instanceMapper.update(null, Wrappers.<PipelineInstancePO>lambdaUpdate()
+            .eq(PipelineInstancePO::getId, instanceId)
+            .set(PipelineInstancePO::getCommitSha,
+                truncate(commit, MAX_COMMIT_SHA_LENGTH))) == 1;
     }
 
     @Override
@@ -252,18 +261,16 @@ public class MybatisPipelineRepository implements PipelineRepository {
     public boolean recordBuiltImage(long instanceId, String imageDigest, String commitSha) {
         String digest = trimToNull(imageDigest);
         String commit = trimToNull(commitSha);
-        if (digest == null && commit == null) {
-            return false;
-        }
         LambdaUpdateWrapper<PipelineInstancePO> update =
             Wrappers.<PipelineInstancePO>lambdaUpdate()
                 .eq(PipelineInstancePO::getId, instanceId);
         if (digest != null) {
             update.set(PipelineInstancePO::getImageDigest, truncate(digest, MAX_DIGEST_LENGTH));
         }
-        if (commit != null) {
-            update.set(PipelineInstancePO::getCommitSha, truncate(commit, MAX_COMMIT_SHA_LENGTH));
-        }
+        // Explicitly write the commit, including NULL: the engine reported "no commit" and a
+        // stale value must not survive as if it belonged to this image.
+        update.set(PipelineInstancePO::getCommitSha,
+            commit == null ? null : truncate(commit, MAX_COMMIT_SHA_LENGTH));
         return instanceMapper.update(null, update) == 1;
     }
 

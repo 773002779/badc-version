@@ -105,6 +105,48 @@ class CodingEngineTest {
     }
 
     @Test
+    void trigger_build_maps_the_optional_response_commit() {
+        server.enqueue(new MockResponse().setBody(
+            "{\"Response\":{\"Data\":{\"JobId\":\"j-1\","
+                + "\"CommitSha\":\"9f2a1c3d4e5f60718293a4b5c6d7e8f901234567\"}}}"));
+
+        TriggerResult result = engine().triggerBuild(buildCmd());
+
+        assertThat(result.externalId()).isEqualTo("j-1");
+        assertThat(result.commitSha()).isEqualTo("9f2a1c3d4e5f60718293a4b5c6d7e8f901234567");
+    }
+
+    @Test
+    void trigger_build_without_a_response_commit_leaves_it_null() {
+        server.enqueue(new MockResponse()
+            .setBody("{\"Response\":{\"Data\":{\"JobId\":\"j-2\"}}}"));
+
+        TriggerResult result = engine().triggerBuild(buildCmd());
+
+        assertThat(result.externalId()).isEqualTo("j-2");
+        assertThat(result.commitSha())
+            .as("no value is fabricated when the engine does not report one")
+            .isNull();
+    }
+
+    @Test
+    void build_trigger_without_a_known_commit_uses_the_branch_head_body() throws Exception {
+        server.enqueue(new MockResponse()
+            .setBody("{\"Response\":{\"Data\":{\"JobId\":\"j-3\"}}}"));
+        BuildCmd withoutCommit = new BuildCmd(88L, "P-BUILD", "feature/x", null, "PL-1", 0);
+
+        TriggerResult result = engine().triggerBuild(withoutCommit);
+
+        assertThat(result.externalId()).isEqualTo("j-3");
+        String body = server.takeRequest().getBody().readUtf8();
+        assertThat(body)
+            .as("with no known commit the engine resolves the branch head")
+            .doesNotContain("CommitSha")
+            .contains("\"Branch\":\"feature/x\"")
+            .contains("\"TaskId\":\"P-BUILD\"");
+    }
+
+    @Test
     void trigger_deploy_posts_de_env_and_image_variables() throws Exception {
         server.enqueue(new MockResponse()
             .setBody("{\"Data\":{\"DeployId\":\"d-456\"}}"));
@@ -375,6 +417,12 @@ class CodingEngineTest {
             .isEqualTo("/open-api/build/start");
         assertThat(properties.getEndpoints().get("build.start").getResponseId())
             .isEqualTo("$.Response.Data.JobId");
+        assertThat(properties.getEndpoints().get("build.start").getResponseCommit())
+            .isEqualTo("$.Response.Data.CommitSha");
+        assertThat(properties.getEndpoints().get("build.start").getBodyWithoutCommit())
+            .isNotNull()
+            .doesNotContain("CommitSha")
+            .contains("\"Branch\":\"{branch}\"");
         assertThat(properties.getEndpoints().get("build.query").getUrl())
             .isEqualTo("/open-api/build/{externalId}");
         assertThat(properties.getEndpoints().get("deploy.query").getUrl())

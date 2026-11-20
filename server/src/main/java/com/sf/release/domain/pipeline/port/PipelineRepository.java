@@ -75,11 +75,18 @@ public interface PipelineRepository {
 
     /**
      * The build coordinates of an instance: the deployment unit, the CODING plan (the unit's
-     * enabled {@code BUILD} binding), the item's read-only source branch and the commit to
-     * build. Unresolvable parts are {@code 0}/blank instead of failing the pipeline; the
-     * handler reports them on the task row.
+     * enabled {@code BUILD} binding), the item's read-only source branch and the commit the
+     * pipeline already knows. The commit is never the item's pre-build {@code base_commit};
+     * it is {@code null} until an engine trigger reports one (the engine then builds the
+     * branch head). Unresolvable parts are {@code 0}/blank instead of failing the pipeline.
      */
     BuildContext buildContextOf(long instanceId);
+
+    /**
+     * Records the commit an engine trigger reported for this instance, so later steps of the
+     * chain build the same commit. Only a reported (non-blank) commit is written.
+     */
+    boolean recordCommit(long instanceId, String commitSha);
 
     /**
      * Marks a task {@code WAITING_EXTERNAL} with the engine identifiers and its build
@@ -93,7 +100,9 @@ public interface PipelineRepository {
 
     /**
      * Records the image an instance built: {@code image_digest} (when supplied) and the built
-     * {@code commit_sha}. The digest is the input of the production same-image check (J27).
+     * {@code commit_sha}. A {@code null} commit explicitly clears the column (the engine
+     * reported no commit; the platform must not fabricate one). The digest is the input of the
+     * production same-image check (J27).
      *
      * @return {@code true} when the instance row was updated
      */

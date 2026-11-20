@@ -36,7 +36,14 @@ coding:
       method: POST
       url: "/open-api/build/start"
       body: '{"TaskId":"{taskId}","UnitId":{unitId},"Branch":"{branch}","CommitSha":"{commitSha}","PipelineNo":"{pipelineNo}","Attempt":{attempt}}'
+      # Used when the pipeline does not know a commit yet (the first build step): the engine
+      # builds the branch head. Remove this key to make the regular body (with CommitSha)
+      # mandatory for every trigger.
+      bodyWithoutCommit: '{"TaskId":"{taskId}","UnitId":{unitId},"Branch":"{branch}","PipelineNo":"{pipelineNo}","Attempt":{attempt}}'
       responseId: "$.Response.Data.JobId"
+      # The commit the build actually checks out; absent in responses that have no such field,
+      # in which case pipeline_instance.commit_sha stays NULL (no fabricated value).
+      responseCommit: "$.Response.Data.CommitSha"
       # responseUrl: "$.Response.Data.WebUrl"   # optional jump URL, unknown from the docs
 
     "[build.query]":

@@ -12,11 +12,15 @@ import com.sf.release.domain.engine.JobKind;
 import com.sf.release.domain.engine.TriggerResult;
 import com.sf.release.domain.pipeline.NodeHandler;
 import com.sf.release.domain.pipeline.NodeHandlerRegistry;
+import com.sf.release.domain.pipeline.NodeTask;
+import com.sf.release.domain.pipeline.NodeTaskCompletionService;
 import com.sf.release.domain.pipeline.NodeTaskStatus;
 import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.TaskType;
+import com.sf.release.domain.pipeline.event.InstanceFinishedEvent;
+import com.sf.release.domain.pipeline.event.NodeTaskCompletedEvent;
 import com.sf.release.domain.pipeline.handler.BuildNodeHandler;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.pipeline.port.TransactionRunner;
@@ -24,8 +28,15 @@ import com.sf.release.infra.security.TestUserContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.event.EventListener;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
@@ -34,6 +45,9 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -45,17 +59,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  * the following step is started when the previous one reports {@code SUCCESS} through the
  * orchestrator's completion callback and {@link NodeHandler#onTaskCompleted}. Every step
  * stays {@code WAITING_EXTERNAL} while the engine runs. A successful {@code IMG_BUILD}
- * persists the image digest and the built commit on the instance (production same-image
- * check J27).
+ * persists the image digest and the engine-reported commit (never the item's pre-build
+ * baseline) for the production same-image check (J27).
  */
 @SpringBootTest
 @ActiveProfiles("test")
+@ExtendWith(OutputCaptureExtension.class)
+@Import(BuildNodeHandlerTest.EventRecorderConfig.class)
 class BuildNodeHandlerTest {
 
     private static final String OWNER = "01388007";
     private static final LocalDate PLAN_DATE = LocalDate.of(2026, 11, 25);
     private static final String BRANCH = "release/202611";
-    private static final String COMMIT = "9f2a1c3d4e5f60718293a4b5c6d7e8f901234567";
+    private static final String BASELINE_COMMIT = "1111111111111111111111111111111111111111";
+    private static final String REPORTED_COMMIT = "9f2a1c3d4e5f60718293a4b5c6d7e8f901234567";
     private static final String PLAN_ID = "P-BUILD-QUOTA";
     private static final String DIGEST = "sha256:cd";
 
@@ -65,7 +82,9 @@ class BuildNodeHandlerTest {
     @Autowired NodeHandlerRegistry handlers;
     @Autowired PipelineRepository repository;
     @Autowired TransactionRunner transactionRunner;
+    @Autowired NodeTaskCompletionService completionService;
     @Autowired JdbcTemplate jdbc;
+    @Autowired EventRecorder recorder;
 
     private StubEngine engine;
     private long instanceId;
@@ -98,7 +117,8 @@ class BuildNodeHandlerTest {
         givenBinding(unitId, "TEST_DEPLOY", "P-TEST-QUOTA");
         givenBinding(unitId, "PROD_DEPLOY", "P-PROD-QUOTA");
         itemId = itemService.create(taskId, new CreateItemCmd(unitId, BRANCH, "配额优化", PLAN_DATE));
-        jdbc.update("UPDATE release_item SET base_commit = ? WHERE id = ?", COMMIT, itemId);
+        // The item baseline is deliberately set: it must never become the built commit.
+        jdbc.update("UPDATE release_item SET base_commit = ? WHERE id = ?", BASELINE_COMMIT, itemId);
 
         PublishAppService.PublishResult published = publishService.publish(itemId);
         pipelineNo = published.pipelineNo();
@@ -106,8 +126,10 @@ class BuildNodeHandlerTest {
             "SELECT id FROM pipeline_instance WHERE pipeline_no = ?", Long.class, pipelineNo);
 
         engine = new StubEngine();
+        recorder.clear();
         handlers.clear();
-        handlers.register(new BuildNodeHandler(engine, repository, transactionRunner));
+        handlers.register(new BuildNodeHandler(engine, repository, transactionRunner,
+            completionService));
         handlers.register(noop(NodeType.TEST_DEPLOY));
         handlers.register(noop(NodeType.VERIFY));
         handlers.register(noop(NodeType.PROD_DEPLOY));
@@ -122,7 +144,7 @@ class BuildNodeHandlerTest {
     // ------------------------------------------------------------------ sequential chain
 
     @Test
-    void entering_build_starts_only_code_check_with_the_bound_plan_branch_and_commit() {
+    void entering_build_starts_only_code_check_with_the_bound_plan_branch_and_known_commit() {
         orchestrator.advance(instanceId);
 
         assertThat(engine.triggeredTypes()).containsExactly(TaskType.CODE_CHECK);
@@ -130,7 +152,9 @@ class BuildNodeHandlerTest {
         assertThat(cmd.unitId()).isEqualTo(unitId);
         assertThat(cmd.taskId()).as("the enabled BUILD binding is the CODING plan").isEqualTo(PLAN_ID);
         assertThat(cmd.branch()).isEqualTo(BRANCH);
-        assertThat(cmd.commitSha()).isEqualTo(COMMIT);
+        assertThat(cmd.commitSha())
+            .as("the pre-build base_commit is never passed as the built commit")
+            .isNull();
         assertThat(cmd.pipelineNo()).isEqualTo(pipelineNo);
         assertThat(cmd.attempt()).isZero();
 
@@ -189,18 +213,73 @@ class BuildNodeHandlerTest {
             .containsExactly(TaskType.CODE_CHECK, TaskType.PKG_BUILD);
     }
 
-    // ------------------------------------------------------------------ artifacts
+    @Test
+    void synchronous_completion_inside_the_trigger_still_advances_the_node_exactly_once() {
+        engine.synchronousCompletion = type -> orchestrator.onTaskCompleted(taskId(type),
+            NodeTaskStatus.SUCCESS, type == TaskType.IMG_BUILD ? DIGEST : null, null);
+        AtomicInteger testDeployStarts = new AtomicInteger();
+        handlers.clear();
+        handlers.register(new BuildNodeHandler(engine, repository, transactionRunner,
+            completionService));
+        handlers.register(counting(NodeType.TEST_DEPLOY, testDeployStarts));
+        handlers.register(noop(NodeType.VERIFY));
+        handlers.register(noop(NodeType.PROD_DEPLOY));
+
+        orchestrator.advance(instanceId);
+
+        assertThat(engine.triggeredTypes())
+            .containsExactly(TaskType.CODE_CHECK, TaskType.PKG_BUILD, TaskType.IMG_BUILD);
+        assertThat(taskStatus(TaskType.CODE_CHECK)).isEqualTo("SUCCESS");
+        assertThat(taskStatus(TaskType.PKG_BUILD)).isEqualTo("SUCCESS");
+        assertThat(taskStatus(TaskType.IMG_BUILD)).isEqualTo("SUCCESS");
+        assertThat(nodeStatus(NodeType.BUILD)).isEqualTo("SUCCESS");
+        assertThat(testDeployStarts.get())
+            .as("the deferred advance runs after the instance lock is released, exactly once")
+            .isEqualTo(1);
+        assertThat(currentNode()).isEqualTo("TEST_DEPLOY");
+        assertThat(instanceStatus()).isEqualTo("RUNNING");
+    }
+
+    // ------------------------------------------------------------------ artifacts and commits
 
     @Test
-    void image_build_success_persists_digest_and_commit_for_the_same_image_check() {
+    void image_success_persists_the_reported_commit_and_reuses_it_for_later_steps() {
+        engine.reportedCommit = REPORTED_COMMIT;
+
+        orchestrator.advance(instanceId);
+        assertThat(instanceCommitSha())
+            .as("a reported trigger commit is persisted so later steps build the same SHA")
+            .isEqualTo(REPORTED_COMMIT);
+        assertThat(engine.calls.get(0).cmd().commitSha())
+            .as("the first step has no known commit: the engine builds the branch head")
+            .isNull();
+
+        orchestrator.onTaskCompleted(taskId(TaskType.CODE_CHECK), NodeTaskStatus.SUCCESS, null, null);
+        orchestrator.onTaskCompleted(taskId(TaskType.PKG_BUILD), NodeTaskStatus.SUCCESS, null, null);
+        assertThat(engine.calls.get(1).cmd().commitSha()).isEqualTo(REPORTED_COMMIT);
+        assertThat(engine.calls.get(2).cmd().commitSha()).isEqualTo(REPORTED_COMMIT);
+
+        orchestrator.onTaskCompleted(taskId(TaskType.IMG_BUILD), NodeTaskStatus.SUCCESS, DIGEST, null);
+
+        assertThat(instanceImageDigest()).isEqualTo(DIGEST);
+        assertThat(instanceCommitSha()).isEqualTo(REPORTED_COMMIT);
+        assertThat(nodeStatus(NodeType.BUILD)).isEqualTo("SUCCESS");
+        assertThat(currentNode()).isEqualTo("TEST_DEPLOY");
+    }
+
+    @Test
+    void image_success_without_a_reported_commit_keeps_it_null_and_warns(CapturedOutput output) {
         runChainUntilImageBuild();
 
         orchestrator.onTaskCompleted(taskId(TaskType.IMG_BUILD), NodeTaskStatus.SUCCESS, DIGEST, null);
 
         assertThat(instanceImageDigest()).isEqualTo(DIGEST);
-        assertThat(instanceCommitSha()).isEqualTo(COMMIT);
-        assertThat(nodeStatus(NodeType.BUILD)).isEqualTo("SUCCESS");
-        assertThat(currentNode()).isEqualTo("TEST_DEPLOY");
+        assertThat(instanceCommitSha())
+            .as("no commit is fabricated from the item baseline")
+            .isNull();
+        assertThat(output.getAll())
+            .contains("no commit")
+            .contains("instanceId=" + instanceId);
     }
 
     // ------------------------------------------------------------------ failures
@@ -223,8 +302,9 @@ class BuildNodeHandlerTest {
     }
 
     @Test
-    void engine_unavailable_fails_the_task_and_does_not_start_the_next_step() {
+    void engine_unavailable_fails_the_task_publishes_the_event_and_does_not_start_the_next_step() {
         engine.failWith(TaskType.CODE_CHECK, EngineException.unavailable("coding 500"));
+        long codeCheck = taskId(TaskType.CODE_CHECK);
 
         orchestrator.advance(instanceId);
 
@@ -232,6 +312,14 @@ class BuildNodeHandlerTest {
         assertThat(resultSummary(TaskType.CODE_CHECK))
             .contains("ENGINE_UNAVAILABLE")
             .contains("coding 500");
+        assertThat(recorder.taskCompleted)
+            .as("the trigger failure goes through the completion service, not a silent write")
+            .filteredOn(event -> event.taskId() == codeCheck)
+            .hasSize(1)
+            .allSatisfy(event -> {
+                assertThat(event.status()).isEqualTo(NodeTaskStatus.FAILED);
+                assertThat(event.message()).contains("ENGINE_UNAVAILABLE");
+            });
         assertThat(engine.triggeredTypes())
             .as("the engine failure must not start PKG_BUILD")
             .containsExactly(TaskType.CODE_CHECK);
@@ -259,6 +347,61 @@ class BuildNodeHandlerTest {
         assertThat(instanceStatus()).isEqualTo("FAILED");
     }
 
+    @Test
+    void a_throwing_completion_hook_fails_the_node_and_instance_instead_of_being_swallowed() {
+        orchestrator.advance(instanceId);
+        long codeCheck = taskId(TaskType.CODE_CHECK);
+        handlers.clear();
+        handlers.register(new NodeHandler() {
+            @Override
+            public NodeType nodeType() {
+                return NodeType.BUILD;
+            }
+
+            @Override
+            public void start(PipelineInstance instance) {
+                // Not used: the node was already entered.
+            }
+
+            @Override
+            public void onTaskCompleted(PipelineInstance instance, NodeTask completed) {
+                throw new IllegalStateException("callback boom");
+            }
+        });
+
+        orchestrator.onTaskCompleted(codeCheck, NodeTaskStatus.SUCCESS, null, null);
+
+        assertThat(nodeStatus(NodeType.BUILD)).isEqualTo("FAILED");
+        assertThat(instanceStatus()).isEqualTo("FAILED");
+        assertThat(recorder.instanceFinished)
+            .anySatisfy(event -> assertThat(event.reason()).contains("callback boom"));
+    }
+
+    // ------------------------------------------------------------------ retries
+
+    @Test
+    void a_manual_retry_row_starts_the_latest_attempt_not_the_superseded_failed_row() {
+        long failedAttempt = taskId(TaskType.CODE_CHECK);
+        jdbc.update("UPDATE node_task SET status = 'FAILED', finished_at = NOW(3),"
+            + " result_summary = 'superseded' WHERE id = ?", failedAttempt);
+        jdbc.update("INSERT INTO node_task (instance_id, node_type, task_type, batch_no,"
+            + " target_id, status, attempt)"
+            + " SELECT instance_id, node_type, task_type, batch_no, target_id, 'PENDING', 1"
+            + " FROM node_task WHERE id = ?", failedAttempt);
+        long retriedAttempt = jdbc.queryForObject(
+            "SELECT id FROM node_task WHERE instance_id = ? AND node_type = 'BUILD'"
+                + " AND task_type = 'CODE_CHECK' AND attempt = 1", Long.class, instanceId);
+
+        orchestrator.advance(instanceId);
+
+        assertThat(engine.triggeredTypes()).containsExactly(TaskType.CODE_CHECK);
+        assertThat(engine.calls.get(0).cmd().attempt()).isEqualTo(1);
+        assertThat(taskStatus(retriedAttempt)).isEqualTo("WAITING_EXTERNAL");
+        assertThat(taskStatus(failedAttempt))
+            .as("the retained old attempt row is left intact")
+            .isEqualTo("FAILED");
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private void runChainUntilImageBuild() {
@@ -276,8 +419,12 @@ class BuildNodeHandlerTest {
     }
 
     private String taskStatus(TaskType type) {
+        return taskStatus(taskId(type));
+    }
+
+    private String taskStatus(long taskId) {
         return jdbc.queryForObject("SELECT status FROM node_task WHERE id = ?", String.class,
-            taskId(type));
+            taskId);
     }
 
     private String externalId(TaskType type) {
@@ -390,6 +537,20 @@ class BuildNodeHandlerTest {
         };
     }
 
+    private static NodeHandler counting(NodeType type, AtomicInteger starts) {
+        return new NodeHandler() {
+            @Override
+            public NodeType nodeType() {
+                return type;
+            }
+
+            @Override
+            public void start(PipelineInstance instance) {
+                starts.incrementAndGet();
+            }
+        };
+    }
+
     /** Stub engine: labels each trigger by its position in the fixed BUILD chain. */
     private static final class StubEngine implements CicdEngine {
 
@@ -398,6 +559,8 @@ class BuildNodeHandlerTest {
 
         private final List<Call> calls = new ArrayList<>();
         private final Map<TaskType, RuntimeException> failures = new EnumMap<>(TaskType.class);
+        private String reportedCommit;
+        private Consumer<TaskType> synchronousCompletion;
 
         @Override
         public String name() {
@@ -413,7 +576,12 @@ class BuildNodeHandlerTest {
                 throw failure;
             }
             int seq = calls.size();
-            return new TriggerResult("ext-" + seq, "https://coding.example/job/" + seq);
+            TriggerResult result = new TriggerResult("ext-" + seq,
+                "https://coding.example/job/" + seq, reportedCommit);
+            if (synchronousCompletion != null) {
+                synchronousCompletion.accept(type);
+            }
+            return result;
         }
 
         @Override
@@ -446,6 +614,37 @@ class BuildNodeHandlerTest {
 
         /** One trigger and the command the handler built. */
         record Call(TaskType type, BuildCmd cmd) {
+        }
+    }
+
+    /** Records the domain events republished by the Spring event bus. */
+    static final class EventRecorder {
+
+        final List<NodeTaskCompletedEvent> taskCompleted = new CopyOnWriteArrayList<>();
+        final List<InstanceFinishedEvent> instanceFinished = new CopyOnWriteArrayList<>();
+
+        @EventListener
+        void onTaskCompleted(NodeTaskCompletedEvent event) {
+            taskCompleted.add(event);
+        }
+
+        @EventListener
+        void onInstanceFinished(InstanceFinishedEvent event) {
+            instanceFinished.add(event);
+        }
+
+        void clear() {
+            taskCompleted.clear();
+            instanceFinished.clear();
+        }
+    }
+
+    @TestConfiguration
+    static class EventRecorderConfig {
+
+        @Bean
+        EventRecorder eventRecorder() {
+            return new EventRecorder();
         }
     }
 }

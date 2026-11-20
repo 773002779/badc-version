@@ -45,6 +45,14 @@ public class EndpointTemplateResolver {
      *                         a placeholder has no value
      */
     public ResolvedCall resolve(String action, Map<String, String> vars) {
+        return resolve(action, vars, null);
+    }
+
+    /**
+     * Renders one configured action with an optional request-body override (for example the
+     * branch-head body of a build trigger whose commit is not known yet).
+     */
+    public ResolvedCall resolve(String action, Map<String, String> vars, String bodyOverride) {
         CodingProperties.Endpoint endpoint = properties.getEndpoints().get(action);
         if (endpoint == null) {
             throw EngineException.unavailable(
@@ -54,9 +62,10 @@ public class EndpointTemplateResolver {
         String urlTemplate = requireText(endpoint.getUrl(),
             "端点 action=" + action + " 缺少 url 配置");
         String url = render(action, urlTemplate, vars, Encoding.PATH);
-        String body = endpoint.getBody() == null
+        String bodyTemplate = bodyOverride == null ? endpoint.getBody() : bodyOverride;
+        String body = bodyTemplate == null
             ? null
-            : render(action, endpoint.getBody(), vars, Encoding.JSON);
+            : render(action, bodyTemplate, vars, Encoding.JSON);
         Map<String, String> headers = new LinkedHashMap<>();
         if (endpoint.getHeaders() != null) {
             endpoint.getHeaders().forEach((name, template) -> {
@@ -93,10 +102,12 @@ public class EndpointTemplateResolver {
             case "method" -> endpoint.setMethod(value);
             case "url" -> endpoint.setUrl(value);
             case "body" -> endpoint.setBody(value);
+            case "bodyWithoutCommit" -> endpoint.setBodyWithoutCommit(value);
             case "responseId" -> endpoint.setResponseId(value);
             case "responseStatus" -> endpoint.setResponseStatus(value);
             case "responseDigest" -> endpoint.setResponseDigest(value);
             case "responseUrl" -> endpoint.setResponseUrl(value);
+            case "responseCommit" -> endpoint.setResponseCommit(value);
             default -> throw EngineException.unavailable(
                 "端点字段不可覆盖：" + field + "（action=" + action + "）");
         }

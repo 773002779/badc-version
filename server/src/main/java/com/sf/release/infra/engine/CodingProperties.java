@@ -46,11 +46,13 @@ public class CodingProperties {
         private String method = "GET";
         private String url;
         private String body;
+        private String bodyWithoutCommit;
         private Map<String, String> headers = new LinkedHashMap<>();
         private String responseId;
         private String responseStatus;
         private String responseDigest;
         private String responseUrl;
+        private String responseCommit;
 
         public String getMethod() {
             return method;
@@ -75,6 +77,20 @@ public class CodingProperties {
 
         public void setBody(String body) {
             this.body = body;
+        }
+
+        /**
+         * Optional request body used instead of {@link #body} when the action has no known
+         * commit (a build trigger whose pipeline has not learned a commit yet). It must omit
+         * the commit field; the engine then builds the branch head. When {@code null}, the
+         * regular body is used.
+         */
+        public String getBodyWithoutCommit() {
+            return bodyWithoutCommit;
+        }
+
+        public void setBodyWithoutCommit(String bodyWithoutCommit) {
+            this.bodyWithoutCommit = bodyWithoutCommit;
         }
 
         /** Extra request headers, also rendered from {@code {var}} placeholders. */
@@ -117,6 +133,19 @@ public class CodingProperties {
 
         public void setResponseUrl(String responseUrl) {
             this.responseUrl = responseUrl;
+        }
+
+        /**
+         * Optional JSONPath of the commit the triggered build actually uses. A trigger response
+         * without it yields a {@code null} {@code TriggerResult.commitSha}; the platform then
+         * keeps {@code pipeline_instance.commit_sha} null instead of inventing a value.
+         */
+        public String getResponseCommit() {
+            return responseCommit;
+        }
+
+        public void setResponseCommit(String responseCommit) {
+            this.responseCommit = responseCommit;
         }
     }
 }

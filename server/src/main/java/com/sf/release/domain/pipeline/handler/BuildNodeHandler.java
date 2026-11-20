@@ -6,6 +6,7 @@ import com.sf.release.domain.engine.EngineException;
 import com.sf.release.domain.engine.TriggerResult;
 import com.sf.release.domain.pipeline.NodeHandler;
 import com.sf.release.domain.pipeline.NodeTask;
+import com.sf.release.domain.pipeline.NodeTaskCompletionService;
 import com.sf.release.domain.pipeline.NodeTaskStatus;
 import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
@@ -26,30 +27,35 @@ import java.util.Objects;
  * {@code CODE_CHECK → PKG_BUILD → IMG_BUILD} (tech design §5.1/§6.3).
  *
  * <p><strong>One trigger per entry.</strong> {@link #start(PipelineInstance)} starts only the
- * first pending step of the chain, or nothing when a step is already
- * {@code WAITING_EXTERNAL}/{@code RUNNING} (a re-entry after a recoverable failure must not
- * trigger a second engine job). Each step calls {@link CicdEngine#triggerBuild(BuildCmd)},
- * stores {@code external_id}/{@code external_url}, sets the task {@code WAITING_EXTERNAL} with
- * a 60-minute deadline and returns immediately. The next step starts from
- * {@link #onTaskCompleted(PipelineInstance, NodeTask)} when the previous step reports
- * {@code SUCCESS}, so a long-running engine job never blocks a thread here.
+ * first startable step of the chain (the latest attempt per task type, never a superseded
+ * failed row), or nothing when a step is already {@code WAITING_EXTERNAL}/{@code RUNNING} (a
+ * re-entry after a recoverable failure must not trigger a second engine job). Each step calls
+ * {@link CicdEngine#triggerBuild(BuildCmd)}, stores {@code external_id}/{@code external_url},
+ * sets the task {@code WAITING_EXTERNAL} with a 60-minute deadline and returns immediately.
+ * The next step starts from {@link #onTaskCompleted(PipelineInstance, NodeTask)} when the
+ * previous step reports {@code SUCCESS}, so a long-running engine job never blocks a thread.
+ *
+ * <p><strong>Commit provenance.</strong> The command carries the item's read-only
+ * {@code source_branch} and the commit the pipeline already knows (initially {@code null}: the
+ * engine builds the branch head). It never carries the item's pre-build {@code base_commit}.
+ * When a trigger response reports a commit, that commit is persisted on the instance and used
+ * by the remaining steps, so all three steps build the same SHA. A successful
+ * {@code IMG_BUILD} persists {@code image_digest} (already written by the completion service)
+ * and the reported {@code commit_sha}; when no commit was ever reported it stays {@code NULL}
+ * and a WARN names the instance — no value is fabricated.
  *
  * <p><strong>Persistence boundaries.</strong> No pipeline row lock is held while the engine
  * call runs: the command is resolved first, the HTTP call happens outside a transaction, and
- * the status write then uses a short {@link TransactionRunner} transaction. The orchestrator's
- * completion transaction is already committed when the hook runs, so the handler reads the
- * already-persisted completion state.
+ * the status/commit write then uses a short {@link TransactionRunner} transaction. The
+ * orchestrator's completion transaction is already committed when the hook runs, so the
+ * handler reads the already-persisted completion state.
  *
  * <p><strong>Failures.</strong> An {@link EngineException} marks the current task
- * {@code FAILED} with {@code ENGINE_UNAVAILABLE}/{@code ENGINE_TIMEOUT} and the engine message
- * in {@code result_summary}, then propagates: the orchestrator's failure path fails the node
- * and the instance (this handler never duplicates that). A {@code FAILED}/{@code TIMEOUT}
+ * {@code FAILED} through {@link NodeTaskCompletionService} (so the normal completion event is
+ * published) with {@code ENGINE_UNAVAILABLE}/{@code ENGINE_TIMEOUT} and the engine message in
+ * {@code result_summary}, then propagates: the orchestrator's failure path fails the node and
+ * the instance (this handler never duplicates that). A {@code FAILED}/{@code TIMEOUT}
  * completion is not retried and never starts the next step.
- *
- * <p><strong>Artifacts.</strong> A successful {@code IMG_BUILD} persists
- * {@code pipeline_instance.image_digest} (already written by the completion service) and
- * {@code commit_sha} in one short transaction; the digest is the input of the production
- * same-image check (J27).
  */
 public final class BuildNodeHandler implements NodeHandler {
 
@@ -65,13 +71,17 @@ public final class BuildNodeHandler implements NodeHandler {
     private final CicdEngine engine;
     private final PipelineRepository repository;
     private final TransactionRunner transactionRunner;
+    private final NodeTaskCompletionService completionService;
 
     public BuildNodeHandler(CicdEngine engine, PipelineRepository repository,
-                            TransactionRunner transactionRunner) {
+                            TransactionRunner transactionRunner,
+                            NodeTaskCompletionService completionService) {
         this.engine = Objects.requireNonNull(engine, "engine must not be null");
         this.repository = Objects.requireNonNull(repository, "repository must not be null");
         this.transactionRunner = Objects.requireNonNull(transactionRunner,
             "transactionRunner must not be null");
+        this.completionService = Objects.requireNonNull(completionService,
+            "completionService must not be null");
     }
 
     @Override
@@ -122,8 +132,8 @@ public final class BuildNodeHandler implements NodeHandler {
 
     /**
      * Resolves the command, calls the engine <em>outside</em> any transaction, then persists
-     * the external identifiers and the {@code WAITING_EXTERNAL} status in one short
-     * transaction.
+     * the external identifiers, the {@code WAITING_EXTERNAL} status and — when the engine
+     * reported one — the commit in one short transaction.
      */
     private void trigger(PipelineInstance instance, NodeTask task) {
         PipelineRepository.BuildContext source = repository.buildContextOf(instance.id());
@@ -137,8 +147,15 @@ public final class BuildNodeHandler implements NodeHandler {
             throw ex;
         }
         Instant now = Instant.now();
-        boolean stored = transactionRunner.inTransaction(() -> repository.markTaskWaitingExternal(
-            task.id(), result.externalId(), result.externalUrl(), now.plus(BUILD_DEADLINE), now));
+        boolean stored = transactionRunner.inTransaction(() -> {
+            boolean marked = repository.markTaskWaitingExternal(task.id(), result.externalId(),
+                result.externalUrl(), now.plus(BUILD_DEADLINE), now);
+            if (result.commitSha() != null) {
+                // Later steps build the same commit, not the branch head again.
+                repository.recordCommit(instance.id(), result.commitSha());
+            }
+            return marked;
+        });
         if (!stored) {
             log.warn("task was not moved to WAITING_EXTERNAL: instanceId={}, taskId={},"
                 + " externalId={}", instance.id(), task.id(), result.externalId());
@@ -146,14 +163,17 @@ public final class BuildNodeHandler implements NodeHandler {
     }
 
     /**
-     * Persists {@code image_digest} (read back from the committed completion) and the built
-     * {@code commit_sha} for the production same-image check.
+     * Persists {@code image_digest} (read back from the committed completion) and the
+     * engine-reported built {@code commit_sha} for the production same-image check. A missing
+     * commit is stored as {@code NULL} with a WARN; it is never replaced by the item's
+     * pre-build baseline.
      */
     private void persistBuiltImage(PipelineInstance instance) {
-        PipelineRepository.BuildContext source = repository.buildContextOf(instance.id());
-        String commitSha = source.commitSha() == null ? instance.commitSha() : source.commitSha();
-        if (instance.imageDigest() == null && commitSha == null) {
-            return;
+        String commitSha = instance.commitSha();
+        if (commitSha == null) {
+            log.warn("engine reported no commit for the built image;"
+                + " pipeline_instance.commit_sha stays NULL: instanceId={}, pipelineNo={}",
+                instance.id(), instance.pipelineNo());
         }
         boolean stored = transactionRunner.inTransaction(() -> repository.recordBuiltImage(
             instance.id(), instance.imageDigest(), commitSha));
@@ -179,13 +199,20 @@ public final class BuildNodeHandler implements NodeHandler {
         return null;
     }
 
+    /**
+     * The latest attempt of {@code type}. A manual retry inserts a new {@code attempt} row and
+     * keeps the old failed row (design §5.4), so the first row of a type may be superseded; the
+     * fold matches the orchestrator's latest-attempt rule.
+     */
     private static NodeTask taskOf(PipelineNode node, TaskType type) {
+        NodeTask latest = null;
         for (NodeTask task : node.tasks()) {
-            if (task.taskType() == type) {
-                return task;
+            if (task.taskType() == type
+                    && (latest == null || task.attempt() > latest.attempt())) {
+                latest = task;
             }
         }
-        return null;
+        return latest;
     }
 
     private static TaskType successor(TaskType type) {
@@ -194,14 +221,16 @@ public final class BuildNodeHandler implements NodeHandler {
     }
 
     /**
-     * Marks the current task failed with the engine message. The exception is rethrown by the
-     * caller so the orchestrator runs its failure path in a new short transaction; this handler
-     * does not fail the node or the instance itself.
+     * Marks the current task failed through the completion service, so the usual
+     * {@code NodeTaskCompletedEvent} is published (the design forbids silent engine failures).
+     * The exception is rethrown by the caller so the orchestrator runs its failure path in a
+     * new short transaction; this handler does not fail the node or the instance itself.
      */
     private void failTask(NodeTask task, String summary) {
-        Instant now = Instant.now();
-        transactionRunner.inTransaction(() -> repository.completeTask(
-            task.id(), NodeTaskStatus.FAILED, null, summary, now));
+        transactionRunner.inTransaction(() -> {
+            completionService.apply(task.id(), NodeTaskStatus.FAILED, null, summary);
+            return null;
+        });
     }
 
     /** {@code ENGINE_UNAVAILABLE}/{@code ENGINE_TIMEOUT} plus the adapter message. */

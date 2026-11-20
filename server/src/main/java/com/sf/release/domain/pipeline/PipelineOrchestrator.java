@@ -2,6 +2,7 @@ package com.sf.release.domain.pipeline;
 
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.domain.engine.EngineException;
 import com.sf.release.domain.pipeline.event.InstanceFinishedEvent;
 import com.sf.release.domain.pipeline.event.NodeCompletedEvent;
 import com.sf.release.domain.pipeline.port.PipelineEventBus;
@@ -93,6 +94,14 @@ public final class PipelineOrchestrator {
      */
     private final ThreadLocal<Boolean> handlerRunning = ThreadLocal.withInitial(() -> false);
 
+    /**
+     * Instance whose advance was requested from inside a handler and therefore had to be
+     * postponed. The outer advance runs it once after releasing the instance lock, so a
+     * completion delivered on the triggering thread (in-process callback) cannot leave the
+     * node RUNNING with all tasks SUCCESS and the next node unentered.
+     */
+    private final ThreadLocal<Long> deferredAdvance = new ThreadLocal<>();
+
     public PipelineOrchestrator(PipelineRepository repository,
                                 NodeTaskCompletionService completionService,
                                 PipelineLock pipelineLock,
@@ -155,9 +164,16 @@ public final class PipelineOrchestrator {
         handlerRunning.set(true);
         try {
             handlerRegistry.onTaskCompleted(instance, completed);
+        } catch (EngineException ex) {
+            // The handler already persisted this engine failure through the completion
+            // service (task FAILED + event); the advance below runs the normal failure path.
+            log.warn("node handler could not start the next step: instanceId={}, taskId={},"
+                + " taskType={}, reason={}", instanceId, taskId, completed.taskType(),
+                ex.getMessage());
         } catch (RuntimeException ex) {
-            log.warn("node handler completion callback failed: instanceId={}, taskId={},"
-                + " taskType={}", instanceId, taskId, completed.taskType(), ex);
+            // Any other handler bug must not be swallowed: fail the node/instance through the
+            // same path as a node-entry handler failure (design §6.4: no silent failure).
+            failHandlerCompletion(instance, completed, ex);
         } finally {
             restoreHandlerGuard(nested);
         }
@@ -170,8 +186,9 @@ public final class PipelineOrchestrator {
      */
     public void advance(long instanceId) {
         if (Boolean.TRUE.equals(handlerRunning.get())) {
-            log.warn("re-entrant advance ignored while a node handler is running: instanceId={}",
-                instanceId);
+            log.warn("advance requested from inside a node handler; deferring it until the"
+                + " instance lock is released: instanceId={}", instanceId);
+            deferredAdvance.set(instanceId);
             return;
         }
         for (int attempt = 1; attempt <= ADVANCE_LOCK_ATTEMPTS; attempt++) {
@@ -183,6 +200,7 @@ public final class PipelineOrchestrator {
                 } finally {
                     pipelineLock.release(instanceId);
                 }
+                runDeferredAdvance();
                 return;
             }
             if (attempt < ADVANCE_LOCK_ATTEMPTS) {
@@ -388,13 +406,36 @@ public final class PipelineOrchestrator {
      */
     private void failHandlerEntry(AdvanceOutcome outcome, RuntimeException cause) {
         NodeType nodeType = outcome.enteredNode().nodeType();
-        String reason = "节点入口执行失败（node=" + nodeType + "）：" + messageOf(cause);
+        failNodeAndInstance(outcome.instanceId(), outcome.orderId(), outcome.unitId(), nodeType,
+            "节点入口执行失败（node=" + nodeType + "）：" + messageOf(cause), cause);
+    }
+
+    /**
+     * A completion hook failed with something other than the engine failure the handler
+     * already persisted. The completion itself is committed, so the pipeline is failed
+     * explicitly through the same path as {@link #failHandlerEntry} — never swallowed.
+     */
+    private void failHandlerCompletion(PipelineInstance instance, NodeTask completed,
+                                       RuntimeException cause) {
+        NodeType nodeType = completed.nodeType();
+        PipelineRepository.InstanceContext context = repository.contextOf(instance.id());
+        failNodeAndInstance(instance.id(), context.orderId(), context.unitId(), nodeType,
+            "节点任务完成回调执行失败（node=" + nodeType + "）：" + messageOf(cause), cause);
+    }
+
+    /**
+     * Fails one node (and the instance) after a handler failed, keeping already successful
+     * task rows and skipping the still-pending siblings. Shared by the node-entry and the
+     * completion-hook failure paths.
+     */
+    private void failNodeAndInstance(long instanceId, long orderId, long unitId,
+                                     NodeType nodeType, String reason, RuntimeException cause) {
         log.error("pipeline node handler failed after commit: instanceId={}, node={}",
-            outcome.instanceId(), nodeType, cause);
+            instanceId, nodeType, cause);
         boolean failurePersisted = false;
         try {
             transactionRunner.inTransaction(() -> {
-                PipelineInstance instance = repository.loadInstance(outcome.instanceId());
+                PipelineInstance instance = repository.loadInstance(instanceId);
                 if (instance == null || TERMINAL.contains(instance.status())) {
                     return null;
                 }
@@ -404,11 +445,11 @@ public final class PipelineOrchestrator {
                     && repository.finishNode(node.id(), NodeStatus.FAILED, now);
                 if (nodeFailed) {
                     repository.skipPendingTasks(instance.id(), nodeType, now);
-                    eventBus.publish(new NodeCompletedEvent(instance.id(), outcome.orderId(),
+                    eventBus.publish(new NodeCompletedEvent(instance.id(), orderId,
                         nodeType, NodeStatus.FAILED, reason, now));
                 }
                 if (repository.finishInstance(instance.id(), InstanceStatus.FAILED, now)) {
-                    eventBus.publish(new InstanceFinishedEvent(instance.id(), outcome.orderId(),
+                    eventBus.publish(new InstanceFinishedEvent(instance.id(), orderId,
                         InstanceStatus.FAILED, reason, now));
                 }
                 return null;
@@ -416,13 +457,32 @@ public final class PipelineOrchestrator {
             failurePersisted = true;
         } catch (RuntimeException persistenceFailure) {
             log.error("could not persist the handler failure of pipeline {} (node {})",
-                outcome.instanceId(), nodeType, persistenceFailure);
+                instanceId, nodeType, persistenceFailure);
         }
         if (failurePersisted) {
             // Keep the unit lock when the failure could not be persisted: the instance may
             // still be RUNNING, and its unit must stay reserved for the reconcile path.
-            releaseUnitLock(outcome.instanceId(), outcome.unitId());
+            releaseUnitLock(instanceId, unitId);
         }
+    }
+
+    /**
+     * Runs one advance that a handler asked for while holding the re-entrancy guard. Called
+     * after the outer advance released the instance lock (the lock is not re-entrant), so the
+     * postponed step completes the node and enters the next one exactly once.
+     */
+    private void runDeferredAdvance() {
+        Long deferred = deferredAdvance.get();
+        if (deferred == null) {
+            return;
+        }
+        deferredAdvance.remove();
+        if (Boolean.TRUE.equals(handlerRunning.get())) {
+            deferredAdvance.set(deferred);
+            return;
+        }
+        log.debug("running deferred advance: instanceId={}", deferred);
+        advance(deferred);
     }
 
     /**

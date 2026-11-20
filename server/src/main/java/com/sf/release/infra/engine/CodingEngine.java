@@ -122,7 +122,8 @@ public class CodingEngine implements CicdEngine {
         put(vars, "pipelineNo", cmd.pipelineNo());
         put(vars, "attempt", String.valueOf(cmd.attempt()));
 
-        EngineHttpClient.HttpResult result = execute(ACTION_BUILD_START, vars);
+        EngineHttpClient.HttpResult result = execute(ACTION_BUILD_START, vars,
+            cmd.commitSha() == null ? endpoint.getBodyWithoutCommit() : null);
         JsonNode root = parse(result, ACTION_BUILD_START);
         String externalId = text(root, endpoint.getResponseId(), ACTION_BUILD_START);
         if (externalId == null) {
@@ -131,9 +132,10 @@ public class CodingEngine implements CicdEngine {
                     + "，请检查 responseId 配置）");
         }
         String externalUrl = text(root, endpoint.getResponseUrl(), ACTION_BUILD_START);
-        log.info("coding build triggered: externalId={}, pipelineNo={}",
-            externalId, cmd.pipelineNo());
-        return new TriggerResult(externalId, externalUrl);
+        String commitSha = text(root, endpoint.getResponseCommit(), ACTION_BUILD_START);
+        log.info("coding build triggered: externalId={}, commit={}, pipelineNo={}",
+            externalId, commitSha == null ? "<unreported>" : commitSha, cmd.pipelineNo());
+        return new TriggerResult(externalId, externalUrl, commitSha);
     }
 
     /** Starts the bound deploy task for one DE with the image built for the instance. */
@@ -210,11 +212,20 @@ public class CodingEngine implements CicdEngine {
     // ------------------------------------------------------------------ request plumbing
 
     private EngineHttpClient.HttpResult execute(String action, Map<String, String> vars) {
+        return execute(action, vars, null);
+    }
+
+    /**
+     * Executes one action, optionally with a request-body template replacing the endpoint's
+     * configured body (the branch-head body of a build trigger with no known commit).
+     */
+    private EngineHttpClient.HttpResult execute(String action, Map<String, String> vars,
+                                                String bodyOverride) {
         Connection connection = connectionSupplier.get();
         if (connection == null) {
             throw EngineException.unavailable("CODING 连接未配置：" + action);
         }
-        EndpointTemplateResolver.ResolvedCall call = resolver.resolve(action, vars);
+        EndpointTemplateResolver.ResolvedCall call = resolver.resolve(action, vars, bodyOverride);
         String url = absolutize(connection.baseUrl(), call.url());
         validateOutboundScheme(url, connection);
         Map<String, String> headers = new LinkedHashMap<>(call.headers());
@@ -356,6 +367,7 @@ public class CodingEngine implements CicdEngine {
             validateExpression(action, "responseStatus", endpoint.getResponseStatus());
             validateExpression(action, "responseDigest", endpoint.getResponseDigest());
             validateExpression(action, "responseUrl", endpoint.getResponseUrl());
+            validateExpression(action, "responseCommit", endpoint.getResponseCommit());
         });
     }
 
