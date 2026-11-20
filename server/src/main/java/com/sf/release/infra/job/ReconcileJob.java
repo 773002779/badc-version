@@ -17,6 +17,7 @@ import com.sf.release.domain.pipeline.PipelineNode;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.TaskType;
 import com.sf.release.domain.pipeline.port.DistributedLock;
+import com.sf.release.domain.pipeline.port.ItemFailureRepairer;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.infra.engine.EngineRegistry;
 import com.sf.release.infra.repo.NodeTaskMapper;
@@ -40,11 +41,12 @@ import java.util.Set;
  * but not reliable, so pending external jobs are reconciled against the engine and dropped
  * advances are replayed.
  *
- * <p><strong>One runner.</strong> {@link #run()} first takes {@code lock:job:reconcile} (5min
- * lease); a second application instance skips this round. The lease is released in
- * {@code finally}, so a crashed round does not block the next one for longer than the lease. A
- * round that outlives the lease could overlap another instance; both only ever write through
- * the completion-service CAS, so an overlap wastes queries but cannot corrupt a status.
+ * <p><strong>One runner, bounded round.</strong> {@link #run()} first takes
+ * {@code lock:job:reconcile} (5min lease); a second application instance skips this round. The
+ * round renews its lease every minute and stops scanning at a hard round deadline (10min), so an
+ * engine outage cannot stretch a round past its lease. A failed renewal means the lease is no
+ * longer ours: the round aborts and the final unlock is skipped (unlocking would release another
+ * runner's lease).
  *
  * <p><strong>Which tasks are polled.</strong> {@code WAITING_EXTERNAL} tasks whose
  * {@code updated_at} is older than 90s, plus every such task whose {@code deadline_at} passed
@@ -63,6 +65,11 @@ import java.util.Set;
  * repaired here: their completion belongs to the asynchronous gate/check path (design §5.2 rule
  * 4), and a repair would start the next node before the checks are evaluated.
  *
+ * <p><strong>Listener failures.</strong> Unresolved {@code pipeline_item_failure} rows (V12) are
+ * replayed through {@link ItemFailureRepairer}: a successful replay sets {@code resolved_at}, a
+ * third failed attempt logs ERROR and leaves the row for operations, and every later round warns
+ * that it is still unresolved.
+ *
  * <p><strong>No handler re-entry.</strong> An instance whose node was entered but whose handler
  * never ran (all tasks still {@code PENDING}) is not restarted here: calling a handler is not
  * idempotent and would need a row-level entry claim (Task 13 hand-off). That gap is recorded in
@@ -75,6 +82,12 @@ public class ReconcileJob {
 
     /** Lease of the job lock; a crashed round blocks another runner for at most this long. */
     public static final Duration LOCK_TTL = Duration.ofMinutes(5);
+
+    /** Hard stop of one round, so a slow engine cannot stretch a round indefinitely. */
+    public static final Duration DEFAULT_ROUND_DEADLINE = Duration.ofMinutes(10);
+
+    /** How often the round renews its lease; well below {@link #LOCK_TTL}. */
+    public static final Duration DEFAULT_RENEW_INTERVAL = Duration.ofMinutes(1);
 
     /** A task is polled only when it has not been observed for this long. */
     static final Duration STALE_AFTER = Duration.ofSeconds(90);
@@ -97,6 +110,9 @@ public class ReconcileJob {
     private final PipelineOrchestrator orchestrator;
     private final NodeTaskMapper taskMapper;
     private final PipelineInstanceMapper instanceMapper;
+    private final ItemFailureRepairer failureRepairer;
+    private final Duration roundDeadline;
+    private final Duration renewInterval;
 
     public ReconcileJob(DistributedLock lock,
                         EngineRegistry engines,
@@ -104,7 +120,39 @@ public class ReconcileJob {
                         PipelineRepository repository,
                         PipelineOrchestrator orchestrator,
                         NodeTaskMapper taskMapper,
-                        PipelineInstanceMapper instanceMapper) {
+                        PipelineInstanceMapper instanceMapper,
+                        ItemFailureRepairer failureRepairer) {
+        this(lock, engines, engineType, repository, orchestrator, taskMapper, instanceMapper,
+            failureRepairer, DEFAULT_ROUND_DEADLINE, DEFAULT_RENEW_INTERVAL);
+    }
+
+    /**
+     * @param roundDeadline hard stop of one round; the scan stops when it is reached and the
+     *                      rest is deferred to the next round. Zero stops immediately and is
+     *                      intended for tests.
+     * @param renewInterval how often the round renews its distributed lease; the final unlock
+     *                      is skipped when the last renewal failed (the lease is no longer
+     *                      ours, so unlocking it would steal another runner's lease)
+     */
+    public ReconcileJob(DistributedLock lock,
+                        EngineRegistry engines,
+                        String engineType,
+                        PipelineRepository repository,
+                        PipelineOrchestrator orchestrator,
+                        NodeTaskMapper taskMapper,
+                        PipelineInstanceMapper instanceMapper,
+                        ItemFailureRepairer failureRepairer,
+                        Duration roundDeadline,
+                        Duration renewInterval) {
+        if (roundDeadline == null || roundDeadline.isNegative()) {
+            throw new IllegalArgumentException("roundDeadline must not be negative");
+        }
+        if (renewInterval == null || renewInterval.isNegative()) {
+            throw new IllegalArgumentException("renewInterval must not be negative");
+        }
+        if (failureRepairer == null) {
+            throw new IllegalArgumentException("failureRepairer must not be null");
+        }
         this.lock = lock;
         this.engines = engines;
         this.engineType = engineType;
@@ -112,6 +160,9 @@ public class ReconcileJob {
         this.orchestrator = orchestrator;
         this.taskMapper = taskMapper;
         this.instanceMapper = instanceMapper;
+        this.failureRepairer = failureRepairer;
+        this.roundDeadline = roundDeadline;
+        this.renewInterval = renewInterval;
     }
 
     /** One reconcile round; guarded so only one application instance runs it. */
@@ -121,29 +172,41 @@ public class ReconcileJob {
             log.debug("reconcile round skipped: {} is held by another runner", LOCK_KEY);
             return;
         }
+        Round round = new Round(Instant.now());
         try {
-            Instant now = Instant.now();
-            int polled = reconcileWaitingTasks(now);
-            int repaired = repairRunningInstances();
-            if (polled > 0 || repaired > 0) {
-                log.info("reconcile round finished: polledTasks={}, repairedInstances={}",
-                    polled, repaired);
+            int polled = reconcileWaitingTasks(round);
+            int resolved = round.held() ? drainItemFailures(round) : 0;
+            int repaired = round.held() ? repairRunningInstances(round) : 0;
+            if (polled > 0 || repaired > 0 || resolved > 0) {
+                log.info("reconcile round finished: polledTasks={}, repairedInstances={},"
+                    + " resolvedItemFailures={}", polled, repaired, resolved);
             }
         } catch (RuntimeException ex) {
             // The scheduler must never die because one round hit a transient DB/engine error.
             log.error("reconcile round failed; the next round retries", ex);
         } finally {
-            lock.unlock(LOCK_KEY);
+            round.release();
         }
     }
 
     // ------------------------------------------------------------------ waiting tasks
 
-    private int reconcileWaitingTasks(Instant now) {
+    private int reconcileWaitingTasks(Round round) {
+        Instant now = Instant.now();
         List<NodeTaskPO> stale = taskMapper.selectStaleWaiting(now.minus(STALE_AFTER), now,
             SCAN_LIMIT);
         int polled = 0;
         for (NodeTaskPO po : stale) {
+            Instant moment = Instant.now();
+            if (round.expired(moment)) {
+                log.warn("reconcile round deadline ({} min) reached after {} task(s);"
+                    + " {} task(s) deferred to the next round", roundDeadline.toMinutes(), polled,
+                    stale.size() - polled);
+                break;
+            }
+            if (!round.ensureLease(moment)) {
+                break;
+            }
             NodeTask task;
             try {
                 task = po.toDomain();
@@ -152,7 +215,7 @@ public class ReconcileJob {
                 continue;
             }
             try {
-                reconcileTask(task, now);
+                reconcileTask(task, moment);
                 polled++;
             } catch (RuntimeException ex) {
                 // A single bad task must not abort the rest of the round.
@@ -161,6 +224,24 @@ public class ReconcileJob {
             }
         }
         return polled;
+    }
+
+    /** Replays persisted listener/transition failures (V12); bounded by {@link #SCAN_LIMIT}. */
+    private int drainItemFailures(Round round) {
+        Instant now = Instant.now();
+        if (round.expired(now)) {
+            log.warn("reconcile round deadline reached before draining item transition failures");
+            return 0;
+        }
+        if (!round.ensureLease(now)) {
+            return 0;
+        }
+        try {
+            return failureRepairer.retryUnresolved(SCAN_LIMIT);
+        } catch (RuntimeException ex) {
+            log.error("reconcile item-failure drain failed", ex);
+            return 0;
+        }
     }
 
     private void reconcileTask(NodeTask task, Instant now) {
@@ -203,10 +284,14 @@ public class ReconcileJob {
             return;
         }
         if (status == EngineStatus.UNKNOWN) {
-            // Non-terminal on purpose: an unmapped vendor word must not kill a live task.
+            // A successful UNKNOWN query is a successful observation for bookkeeping: reset the
+            // failure counter and move updated_at forward (non-terminal, no status change). A
+            // fail/fail/UNKNOWN/fail sequence must not reach the 3-failure TIMEOUT, and the row
+            // must not be re-queried in the next round immediately.
             log.warn("reconcile saw an unmapped engine status word for taskId={}, externalId={}:"
                 + " {}; the task stays {}", task.id(), task.externalId(), result.message(),
                 task.status());
+            taskMapper.recordQuerySuccess(task.id(), now);
             return;
         }
         if (deadlinePassed(task, now)) {
@@ -258,7 +343,7 @@ public class ReconcileJob {
 
     // ------------------------------------------------------------------ advance repair
 
-    private int repairRunningInstances() {
+    private int repairRunningInstances(Round round) {
         List<PipelineInstancePO> running = instanceMapper.selectList(
             Wrappers.<PipelineInstancePO>lambdaQuery()
                 .eq(PipelineInstancePO::getStatus, InstanceStatus.RUNNING.name())
@@ -266,6 +351,15 @@ public class ReconcileJob {
                 .last("LIMIT " + SCAN_LIMIT));
         int repaired = 0;
         for (PipelineInstancePO candidate : running) {
+            Instant moment = Instant.now();
+            if (round.expired(moment)) {
+                log.warn("reconcile round deadline ({} min) reached; advance repair deferred",
+                    roundDeadline.toMinutes());
+                break;
+            }
+            if (!round.ensureLease(moment)) {
+                break;
+            }
             long instanceId = candidate.getId() == null ? 0L : candidate.getId();
             try {
                 PipelineInstance instance = repository.loadInstance(instanceId);
@@ -355,6 +449,59 @@ public class ReconcileJob {
     private static String messageOf(RuntimeException ex) {
         String message = ex.getMessage();
         return message == null || message.isBlank() ? ex.getClass().getSimpleName() : message;
+    }
+
+    /**
+     * One round's hard stop and its lease bookkeeping.
+     *
+     * <p>The round stops scanning at {@link #roundDeadline}; the remaining work is deferred to
+     * the next round. The distributed lease is renewed every {@link #renewInterval}; when a
+     * renewal fails the lease is no longer ours, so the round stops and the final unlock is
+     * skipped (an unconditional unlock would release another runner's lease).
+     */
+    private final class Round {
+
+        private final Instant deadline;
+        private Instant lastRenewal;
+        private boolean held = true;
+
+        private Round(Instant start) {
+            this.deadline = start.plus(roundDeadline);
+            this.lastRenewal = start;
+        }
+
+        private boolean held() {
+            return held;
+        }
+
+        private boolean expired(Instant now) {
+            return !now.isBefore(deadline);
+        }
+
+        private boolean ensureLease(Instant now) {
+            if (!held) {
+                return false;
+            }
+            if (Duration.between(lastRenewal, now).compareTo(renewInterval) < 0) {
+                return true;
+            }
+            if (!lock.renew(LOCK_KEY, LOCK_TTL)) {
+                held = false;
+                log.warn("reconcile lease {} could not be renewed; aborting the round without"
+                    + " unlocking (the lease may belong to another runner)", LOCK_KEY);
+                return false;
+            }
+            lastRenewal = now;
+            return true;
+        }
+
+        private void release() {
+            if (held) {
+                lock.unlock(LOCK_KEY);
+            } else {
+                log.debug("reconcile lease was lost; skipping unlock of {}", LOCK_KEY);
+            }
+        }
     }
 
     /** Logical task identity, mirroring the orchestrator's latest-attempt fold. */

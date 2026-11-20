@@ -13,11 +13,14 @@ import com.sf.release.domain.engine.JobKind;
 import com.sf.release.domain.engine.TriggerResult;
 import com.sf.release.domain.pipeline.NodeHandler;
 import com.sf.release.domain.pipeline.NodeHandlerRegistry;
+import com.sf.release.domain.pipeline.NodeStatus;
 import com.sf.release.domain.pipeline.NodeTaskStatus;
 import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
+import com.sf.release.domain.pipeline.event.NodeCompletedEvent;
 import com.sf.release.domain.pipeline.port.DistributedLock;
+import com.sf.release.domain.pipeline.port.ItemFailureRepairer;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.pipeline.port.TransactionRunner;
 import com.sf.release.infra.engine.EngineRegistry;
@@ -33,6 +36,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
@@ -75,16 +79,20 @@ class ReconcileJobTest {
     @Autowired NodeTaskMapper taskMapper;
     @Autowired PipelineInstanceMapper instanceMapper;
     @Autowired DistributedLock distributedLock;
+    @Autowired ItemFailureRepairer failureRepairer;
+    @Autowired ApplicationEventPublisher eventPublisher;
 
     private final Map<NodeType, AtomicInteger> starts = new EnumMap<>(NodeType.class);
     private StubEngine engine;
     private ReconcileJob job;
     private long instanceId;
+    private long orderId;
 
     @BeforeEach
     void setUp() {
         TestUserContext.allUnits(OWNER);
         jdbc.update("DELETE FROM engine_event_dedup");
+        jdbc.update("DELETE FROM pipeline_item_failure");
         jdbc.update("DELETE FROM node_task");
         jdbc.update("DELETE FROM pipeline_node");
         jdbc.update("DELETE FROM pipeline_instance");
@@ -110,9 +118,11 @@ class ReconcileJobTest {
         long itemId = itemService.create(releaseTaskId,
             new CreateItemCmd(unitId, "release/202611", "对账用例", PLAN_DATE));
         PublishAppService.PublishResult published = publishService.publish(itemId);
-        instanceId = jdbc.queryForObject(
-            "SELECT id FROM pipeline_instance WHERE pipeline_no = ?", Long.class,
+        Map<String, Object> instance = jdbc.queryForMap(
+            "SELECT id, order_id FROM pipeline_instance WHERE pipeline_no = ?",
             published.pipelineNo());
+        instanceId = ((Number) instance.get("id")).longValue();
+        orderId = ((Number) instance.get("order_id")).longValue();
 
         handlers.clear();
         starts.clear();
@@ -121,7 +131,7 @@ class ReconcileJobTest {
 
         engine = new StubEngine();
         job = new ReconcileJob(distributedLock, new EngineRegistry(List.of(engine)), "CODING",
-            repository, orchestrator, taskMapper, instanceMapper);
+            repository, orchestrator, taskMapper, instanceMapper, failureRepairer);
     }
 
     @AfterEach
@@ -232,6 +242,123 @@ class ReconcileJobTest {
         assertThat(taskStatus(taskId))
             .as("deadline_at is the engine-facing timeout (design §5.4)")
             .isEqualTo("TIMEOUT");
+    }
+
+    @Test
+    void an_unknown_result_resets_failures_and_refreshes_the_poll_time() {
+        long taskId = waitingBuildTask(Duration.ofMinutes(5), Duration.ofHours(1));
+        engine.failure = EngineException.unavailable("engine unreachable");
+        job.run();
+        job.run();
+        assertThat(queryFailures(taskId)).isEqualTo(2);
+        Timestamp beforeUnknown = jdbc.queryForObject(
+            "SELECT updated_at FROM node_task WHERE id = ?", Timestamp.class, taskId);
+
+        engine.failure = null;
+        engine.result = new EngineResult(EngineStatus.UNKNOWN, null, "MYSTERY");
+        job.run();
+
+        assertThat(queryFailures(taskId))
+            .as("UNKNOWN is a successful observation for bookkeeping")
+            .isZero();
+        assertThat(taskStatus(taskId)).isEqualTo("WAITING_EXTERNAL");
+        Timestamp afterUnknown = jdbc.queryForObject(
+            "SELECT updated_at FROM node_task WHERE id = ?", Timestamp.class, taskId);
+        assertThat(afterUnknown).isAfter(beforeUnknown);
+
+        // Simulate the next 90s window: one more failure must count 1, not complete the 2+1
+        // sequence left over from the two failures before the UNKNOWN observation.
+        jdbc.update("UPDATE node_task SET updated_at = ? WHERE id = ?",
+            Timestamp.from(Instant.now().minus(Duration.ofMinutes(5))), taskId);
+        engine.failure = EngineException.unavailable("engine unreachable");
+        job.run();
+
+        assertThat(queryFailures(taskId)).isEqualTo(1);
+        assertThat(taskStatus(taskId))
+            .as("fail/fail/UNKNOWN/fail must not reach the 3-failure timeout")
+            .isEqualTo("WAITING_EXTERNAL");
+    }
+
+    @Test
+    void a_round_that_exceeds_its_deadline_stops_scanning(CapturedOutput output) {
+        waitingBuildTask(Duration.ofMinutes(5), Duration.ofHours(1));
+        ProbeLock probe = new ProbeLock();
+        ReconcileJob bounded = new ReconcileJob(probe, new EngineRegistry(List.of(engine)),
+            "CODING", repository, orchestrator, taskMapper, instanceMapper, failureRepairer,
+            Duration.ZERO, Duration.ofMinutes(1));
+
+        bounded.run();
+
+        assertThat(engine.queries)
+            .as("the hard round deadline stops the scan before the first query")
+            .isZero();
+        assertThat(probe.unlocks)
+            .as("a lease that is still owned is released at the end")
+            .isEqualTo(1);
+        assertThat(output.getAll()).contains("round deadline");
+    }
+
+    @Test
+    void a_failed_lease_renewal_aborts_without_unlocking(CapturedOutput output) {
+        waitingBuildTask(Duration.ofMinutes(5), Duration.ofHours(1));
+        ProbeLock probe = new ProbeLock();
+        probe.renewResult = false;
+        ReconcileJob bounded = new ReconcileJob(probe, new EngineRegistry(List.of(engine)),
+            "CODING", repository, orchestrator, taskMapper, instanceMapper, failureRepairer,
+            Duration.ofMinutes(10), Duration.ZERO);
+
+        bounded.run();
+
+        assertThat(engine.queries).isZero();
+        assertThat(probe.renews).isPositive();
+        assertThat(probe.unlocks)
+            .as("an unconditional unlock would steal the new holder's lease")
+            .isZero();
+        assertThat(output.getAll()).contains("could not be renewed");
+    }
+
+    // ------------------------------------------------------------------ item failure repair
+
+    @Test
+    void a_failed_item_transition_is_persisted_and_resolved_by_reconcile(CapturedOutput output) {
+        long itemId = itemId();
+        jdbc.update("UPDATE release_item SET status = 'CORRUPT' WHERE id = ?", itemId);
+
+        publishNodeCompleted(NodeType.BUILD, NodeStatus.SUCCESS);
+
+        assertThat(itemFailureCount()).isEqualTo(1);
+        assertThat(failureAttempts()).isZero();
+        assertThat(failureResolvedAt()).isNull();
+
+        jdbc.update("UPDATE release_item SET status = 'BUILDING' WHERE id = ?", itemId);
+        job.run();
+
+        assertThat(itemStatus(itemId)).isEqualTo("TESTING");
+        assertThat(failureResolvedAt()).isNotNull();
+        assertThat(failureAttempts()).isEqualTo(1);
+        assertThat(output.getAll()).contains("item transition failure resolved");
+    }
+
+    @Test
+    void three_failed_item_retries_leave_the_row_unresolved_and_log_error(CapturedOutput output) {
+        long itemId = itemId();
+        jdbc.update("UPDATE release_item SET status = 'CORRUPT' WHERE id = ?", itemId);
+        publishNodeCompleted(NodeType.BUILD, NodeStatus.SUCCESS);
+
+        job.run();
+        job.run();
+        job.run();
+
+        assertThat(itemFailureCount()).isEqualTo(1);
+        assertThat(failureAttempts()).isEqualTo(3);
+        assertThat(failureResolvedAt()).isNull();
+        assertThat(output.getAll())
+            .contains("ERROR")
+            .contains("exhausted");
+
+        job.run();
+        assertThat(failureAttempts()).isEqualTo(3);
+        assertThat(output.getAll()).contains("operations action required");
     }
 
     // ------------------------------------------------------------------ advance repair
@@ -351,6 +478,39 @@ class ReconcileJobTest {
         return failures == null ? 0 : failures;
     }
 
+    private long itemId() {
+        Long item = jdbc.queryForObject("SELECT item_id FROM release_order WHERE id = ?",
+            Long.class, orderId);
+        return item == null ? 0L : item;
+    }
+
+    private void publishNodeCompleted(NodeType nodeType, NodeStatus status) {
+        eventPublisher.publishEvent(new NodeCompletedEvent(instanceId, orderId, nodeType, status,
+            null, Instant.now()));
+    }
+
+    private int itemFailureCount() {
+        Integer count = jdbc.queryForObject(
+            "SELECT COUNT(*) FROM pipeline_item_failure", Integer.class);
+        return count == null ? 0 : count;
+    }
+
+    private int failureAttempts() {
+        Integer attempts = jdbc.queryForObject(
+            "SELECT attempts FROM pipeline_item_failure", Integer.class);
+        return attempts == null ? 0 : attempts;
+    }
+
+    private Timestamp failureResolvedAt() {
+        return jdbc.queryForObject("SELECT resolved_at FROM pipeline_item_failure",
+            Timestamp.class);
+    }
+
+    private String itemStatus(long itemId) {
+        return jdbc.queryForObject("SELECT status FROM release_item WHERE id = ?", String.class,
+            itemId);
+    }
+
     private String nodeStatus(NodeType nodeType) {
         return jdbc.queryForObject(
             "SELECT status FROM pipeline_node WHERE instance_id = ? AND node_type = ?",
@@ -411,6 +571,30 @@ class ReconcileJobTest {
         jdbc.update("INSERT INTO env_de (unit_id, env_kind, de_name, deploy_batch_no,"
                 + " created_at, updated_at) VALUES (?, ?, ?, ?, NOW(3), NOW(3))",
             unit, envKind, name, batchNo);
+    }
+
+    /** Distributed lock probe: records renew/unlock decisions for the round-lease contract. */
+    private static final class ProbeLock implements DistributedLock {
+
+        private boolean renewResult = true;
+        private int renews;
+        private int unlocks;
+
+        @Override
+        public boolean tryLock(String key, Duration ttl) {
+            return true;
+        }
+
+        @Override
+        public boolean renew(String key, Duration ttl) {
+            renews++;
+            return renewResult;
+        }
+
+        @Override
+        public void unlock(String key) {
+            unlocks++;
+        }
     }
 
     /** Minimal engine double; the reconcile loop only needs {@code query}. */

@@ -14,6 +14,8 @@ import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.pipeline.port.TransactionRunner;
 import com.sf.release.infra.security.TestUserContext;
+import com.sf.release.web.support.WebhookBodySizeFilter;
+import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -26,6 +28,8 @@ import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -86,6 +90,7 @@ class CodingWebhookTest {
     @Autowired NodeHandlerRegistry handlers;
     @Autowired PipelineRepository repository;
     @Autowired TransactionRunner transactionRunner;
+    @Autowired WebhookBodySizeFilter bodySizeFilter;
 
     @Value("${release.webhook.secret:}")
     String secret;
@@ -284,6 +289,58 @@ class CodingWebhookTest {
         assertThat(starts(NodeType.TEST_DEPLOY)).isEqualTo(1);
     }
 
+    // ------------------------------------------------------------------ body size limit
+
+    @Test
+    void an_oversized_body_is_rejected_with_413_before_authentication(CapturedOutput output)
+        throws Exception {
+        byte[] body = oversizedWebhook();
+        assertThat(body.length).isGreaterThan(WebhookBodySizeFilter.MAX_BODY_BYTES);
+
+        // The signature is valid on purpose: if the filter did not run before authentication,
+        // the oversized callback would be accepted instead of rejected.
+        mvc.perform(post(PATH)
+                .contentType(MediaType.APPLICATION_JSON)
+                .header(SIGNATURE_HEADER, sign(body))
+                .content(body))
+            .andExpect(status().is(413))
+            .andExpect(jsonPath("$.code").value(40000));
+
+        assertThat(dedupCount("evt-big")).isZero();
+        assertThat(taskStatus(imageBuildTaskId)).isEqualTo("WAITING_EXTERNAL");
+        assertThat(starts(NodeType.TEST_DEPLOY)).isZero();
+        assertThat(output.getAll())
+            .as("neither the controller nor the webhook service ran")
+            .doesNotContain("coding webhook");
+    }
+
+    @Test
+    void a_chunked_body_is_rejected_while_streaming() throws Exception {
+        byte[] body = oversizedWebhook();
+        MockHttpServletRequest delegate = new MockHttpServletRequest("POST",
+            WebhookBodySizeFilter.WEBHOOK_PATH);
+        delegate.setContent(body);
+        // No declared Content-Length: the filter must stop the streaming read at the cap.
+        HttpServletRequest request = new jakarta.servlet.http.HttpServletRequestWrapper(delegate) {
+            @Override
+            public int getContentLength() {
+                return -1;
+            }
+
+            @Override
+            public long getContentLengthLong() {
+                return -1;
+            }
+        };
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        bodySizeFilter.doFilter(request, response, (req, res) ->
+            ((HttpServletRequest) req).getInputStream().readAllBytes());
+
+        assertThat(response.getStatus()).isEqualTo(413);
+        assertThat(response.getContentAsString()).contains("40000");
+    }
+
     // ------------------------------------------------------------------ fixtures and helpers
 
     private byte[] webhook(String eventId, String externalId, String status) {
@@ -297,6 +354,17 @@ class CodingWebhookTest {
         } catch (Exception ex) {
             throw new IllegalStateException(ex);
         }
+    }
+
+    /** A structurally valid but over-limit callback (the padding is ignored by the contract). */
+    private byte[] oversizedWebhook() throws Exception {
+        String padding = "a".repeat(WebhookBodySizeFilter.MAX_BODY_BYTES + 1024);
+        return json.writeValueAsBytes(json.createObjectNode()
+            .put("eventId", "evt-big")
+            .put("externalId", EXTERNAL_ID)
+            .put("status", "SUCCESS")
+            .put("digest", DIGEST)
+            .put("pad", padding));
     }
 
     private String sign(byte[] body) {

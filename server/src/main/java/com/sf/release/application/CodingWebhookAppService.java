@@ -138,10 +138,13 @@ public class CodingWebhookAppService {
         if (nodeStatus == null) {
             if (engineStatus == EngineStatus.UNKNOWN) {
                 // Non-terminal on purpose: an unmapped vendor word must not advance, fail or
-                // time the task out (design §6.4; Task 10 amendment).
+                // time the task out (design §6.4; Task 10 amendment). The delivery is still a
+                // successful observation for bookkeeping, so the reconcile failure counter is
+                // reset and the next poll is pushed out by the normal 90s window.
                 log.warn("coding webhook event {} reported an unmapped status word: {}, task {}"
                     + " stays {}", payload.eventId(), payload.status(), task.getId(),
                     task.getStatus());
+                taskMapper.recordQuerySuccess(task.getId(), Instant.now());
                 return new WebhookResult(Outcome.IGNORED, payload.eventId(), "状态未知");
             }
             // QUEUED/RUNNING: an observation only. Moving updated_at forward keeps the 90s

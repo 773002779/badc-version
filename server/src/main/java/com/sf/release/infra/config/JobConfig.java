@@ -2,6 +2,7 @@ package com.sf.release.infra.config;
 
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.port.DistributedLock;
+import com.sf.release.domain.pipeline.port.ItemFailureRepairer;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.infra.engine.EngineRegistry;
 import com.sf.release.infra.job.ReconcileJob;
@@ -30,8 +31,9 @@ public class JobConfig {
                                      PipelineOrchestrator orchestrator,
                                      NodeTaskMapper taskMapper,
                                      PipelineInstanceMapper instanceMapper,
+                                     ItemFailureRepairer failureRepairer,
                                      @Value("${release.engine.type:CODING}") String engineType) {
         return new ReconcileJob(lock, engines, engineType, repository, orchestrator, taskMapper,
-            instanceMapper);
+            instanceMapper, failureRepairer);
     }
 }
