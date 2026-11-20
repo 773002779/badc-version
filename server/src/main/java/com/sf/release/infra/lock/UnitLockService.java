@@ -137,10 +137,18 @@ public class UnitLockService implements UnitLease {
         return false;
     }
 
-    /** Binds the real pipeline instance id to a lock row reserved by {@link #acquire}. */
+    /**
+     * Binds the real pipeline instance id to a lock row reserved by {@link #acquire}.
+     *
+     * <p><strong>Ownership-scoped.</strong> The update only matches the unbound sentinel row
+     * ({@code instance_id = 0}) it created during the reservation. If the row was already bound
+     * (another publisher owns the unit now) or deleted, nothing is written and the caller
+     * treats it as a lost lock instead of overwriting the holder.
+     */
     public boolean bindInstance(long unitId, long instanceId) {
         int rows = lockMapper.update(null, Wrappers.<DeployUnitLockPO>lambdaUpdate()
             .eq(DeployUnitLockPO::getUnitId, unitId)
+            .eq(DeployUnitLockPO::getInstanceId, UNBOUND_INSTANCE_ID)
             .set(DeployUnitLockPO::getInstanceId, instanceId));
         return rows == 1;
     }

@@ -8,6 +8,7 @@ import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.domain.engine.EngineException;
 import com.sf.release.domain.pipeline.port.GitCommitProbe;
+import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.infra.lock.UnitLockService;
 import com.sf.release.infra.repo.DeployUnitLockMapper;
 import com.sf.release.infra.security.TestUserContext;
@@ -75,6 +76,7 @@ class PublishServiceTest {
     @Autowired UnitLockService unitLockService;
     @Autowired DeployUnitLockMapper lockMapper;
     @Autowired JdbcTemplate jdbc;
+    @Autowired PipelineRepository repository;
     @MockBean GitCommitProbe commitProbe;
 
     private long subsystemId;
@@ -334,6 +336,107 @@ class PublishServiceTest {
     }
 
     @Test
+    void publish_requires_a_test_de_and_a_production_family_de() {
+        long noTestDe = givenUnit(subsystemId, "quota-api-prod-only");
+        givenBinding(noTestDe, "BUILD", "P-BUILD-ONLY");
+        givenBinding(noTestDe, "TEST_DEPLOY", "P-TEST-ONLY");
+        givenBinding(noTestDe, "PROD_DEPLOY", "P-PROD-ONLY");
+        givenDe(noTestDe, "PROD", "prod-only-prod", 1);
+        long prodOnlyItem = itemService.create(taskId,
+            new CreateItemCmd(noTestDe, "release/202611", "缺测试环境", PLAN_DATE));
+
+        assertThatThrownBy(() -> publishService.publish(prodOnlyItem))
+            .as("a unit without a TEST DE cannot test-deploy")
+            .isInstanceOf(BizException.class)
+            .isInstanceOfSatisfying(BizException.class, ex -> {
+                assertThat(ex.getError()).isEqualTo(BizError.UNIT_NOT_CONFIGURED);
+                assertThat(ex.getError().getCode()).isEqualTo(UNIT_NOT_CONFIGURED_CODE);
+                @SuppressWarnings("unchecked")
+                Map<String, Object> payload = (Map<String, Object>) ex.getPayload();
+                assertThat(payload)
+                    .containsEntry("unitId", noTestDe)
+                    .containsEntry("missing", List.of("TEST_DE"));
+            });
+
+        long noProdDe = givenUnit(subsystemId, "quota-api-test-only");
+        givenBinding(noProdDe, "BUILD", "P-BUILD-TESTONLY");
+        givenBinding(noProdDe, "TEST_DEPLOY", "P-TEST-TESTONLY");
+        givenBinding(noProdDe, "PROD_DEPLOY", "P-PROD-TESTONLY");
+        givenDe(noProdDe, "TEST", "test-only-sit", 0);
+        long testOnlyItem = itemService.create(taskId,
+            new CreateItemCmd(noProdDe, "release/202611", "缺生产环境", PLAN_DATE));
+
+        assertThatThrownBy(() -> publishService.publish(testOnlyItem))
+            .as("a unit without a PROD/DR/BLUE DE cannot production-deploy")
+            .isInstanceOf(BizException.class)
+            .isInstanceOfSatisfying(BizException.class, ex -> {
+                assertThat(ex.getError()).isEqualTo(BizError.UNIT_NOT_CONFIGURED);
+                @SuppressWarnings("unchecked")
+                Map<String, Object> payload = (Map<String, Object>) ex.getPayload();
+                assertThat(payload).containsEntry("missing", List.of("PROD_DE"));
+            });
+
+        assertThat(count("release_order"))
+            .as("a misconfigured unit creates no order and takes no lock")
+            .isZero();
+        assertThat(count("pipeline_instance")).isZero();
+        assertThat(count("deploy_unit_lock")).isZero();
+        assertThat(itemStatus(prodOnlyItem)).isEqualTo("PENDING");
+        assertThat(itemStatus(testOnlyItem)).isEqualTo("PENDING");
+
+        // Adding the missing production-family DE makes the unit publishable.
+        givenDe(noProdDe, "DR", "test-only-dr", 1);
+        assertThat(publishService.publish(testOnlyItem).pipelineNo()).isNotBlank();
+        assertThat(count("release_order")).isEqualTo(1);
+    }
+
+    @Test
+    void base_commit_probe_runs_outside_the_publish_transaction_and_before_the_unit_lock() {
+        // The unit is already held by another instance: the publish must fail on the lock, but
+        // the probe has already run. Before the hoist the probe lived inside the transaction,
+        // which the lock check prevents from ever starting.
+        assertThat(unitLockService.acquire(unitId, 999L)).isTrue();
+
+        assertThatThrownBy(() -> publishService.publish(itemId))
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.UNIT_LOCKED);
+
+        verify(commitProbe).headSha(unitId, BRANCH);
+        assertThat(count("release_order")).isZero();
+    }
+
+    @Test
+    void bind_instance_is_scoped_to_the_unbound_sentinel() {
+        assertThat(unitLockService.acquire(unitId, UnitLockService.UNBOUND_INSTANCE_ID)).isTrue();
+
+        assertThat(unitLockService.bindInstance(unitId, 101L)).isTrue();
+        assertThat(unitLockService.bindInstance(unitId, 202L))
+            .as("a stale publisher must not overwrite an already bound lock row")
+            .isFalse();
+        assertThat(lockInstanceId()).isEqualTo(101L);
+    }
+
+    @Test
+    void a_64_char_commit_sha_is_stored_in_full_and_a_longer_one_is_a_business_error() {
+        PublishResult published = publishService.publish(itemId);
+        long instanceId = instanceId(published.pipelineNo());
+        String sha256 = "f".repeat(64);
+
+        assertThat(repository.recordCommit(instanceId, sha256)).isTrue();
+        assertThat(instanceCommitSha(instanceId))
+            .as("a SHA-256 commit is not cut at 40 characters (V14)")
+            .isEqualTo(sha256);
+
+        assertThatThrownBy(() -> repository.recordCommit(instanceId, sha256 + "0"))
+            .as("a value wider than the column fails loudly instead of being truncated")
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.PARAM_INVALID);
+        assertThat(instanceCommitSha(instanceId))
+            .as("the rejected write left the stored commit untouched")
+            .isEqualTo(sha256);
+    }
+
+    @Test
     void incomplete_bindings_is_40011_and_creates_no_order_or_instance() {
         long bareUnit = givenUnit(subsystemId, "quota-api-bare");
         givenBinding(bareUnit, "BUILD", "P-BUILD-BARE");
@@ -520,8 +623,17 @@ class PublishServiceTest {
     }
 
     private String itemStatus() {
+        return itemStatus(itemId);
+    }
+
+    private String itemStatus(long id) {
         return jdbc.queryForObject("SELECT status FROM release_item WHERE id = ?",
-            String.class, itemId);
+            String.class, id);
+    }
+
+    private String instanceCommitSha(long id) {
+        return jdbc.queryForObject("SELECT commit_sha FROM pipeline_instance WHERE id = ?",
+            String.class, id);
     }
 
     private String baseCommit() {

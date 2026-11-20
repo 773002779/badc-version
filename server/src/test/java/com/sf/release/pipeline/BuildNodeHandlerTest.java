@@ -116,6 +116,8 @@ class BuildNodeHandlerTest {
         givenBinding(unitId, "BUILD", PLAN_ID);
         givenBinding(unitId, "TEST_DEPLOY", "P-TEST-QUOTA");
         givenBinding(unitId, "PROD_DEPLOY", "P-PROD-QUOTA");
+        givenDe(unitId, "TEST", "quota-sit", 0);
+        givenDe(unitId, "PROD", "quota-prod-a", 1);
         itemId = itemService.create(taskId, new CreateItemCmd(unitId, BRANCH, "配额优化", PLAN_DATE));
         // The item baseline is deliberately set: it must never become the built commit.
         jdbc.update("UPDATE release_item SET base_commit = ? WHERE id = ?", BASELINE_COMMIT, itemId);
@@ -521,6 +523,12 @@ class BuildNodeHandlerTest {
         jdbc.update("INSERT INTO coding_task_binding (unit_id, task_kind, task_id, enabled,"
                 + " created_at, updated_at) VALUES (?, ?, ?, 1, NOW(3), NOW(3))",
             unit, kind, codingTaskId);
+    }
+
+    private void givenDe(long unit, String envKind, String name, int batchNo) {
+        jdbc.update("INSERT INTO env_de (unit_id, env_kind, de_name, deploy_batch_no,"
+                + " created_at, updated_at) VALUES (?, ?, ?, ?, NOW(3), NOW(3))",
+            unit, envKind, name, batchNo);
     }
 
     private static NodeHandler noop(NodeType type) {

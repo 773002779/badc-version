@@ -115,6 +115,7 @@ class ReconcileJobTest {
         givenBinding(unitId, "TEST_DEPLOY", "P-TEST-QUOTA");
         givenBinding(unitId, "PROD_DEPLOY", "P-PROD-QUOTA");
         givenDe(unitId, "TEST", "quota-sit", 0);
+        givenDe(unitId, "PROD", "quota-prod-a", 1);
         long itemId = itemService.create(releaseTaskId,
             new CreateItemCmd(unitId, "release/202611", "对账用例", PLAN_DATE));
         PublishAppService.PublishResult published = publishService.publish(itemId);

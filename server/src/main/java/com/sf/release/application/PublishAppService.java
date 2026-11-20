@@ -13,6 +13,7 @@ import com.sf.release.domain.pipeline.ReleaseOrder;
 import com.sf.release.domain.pipeline.TriggerType;
 import com.sf.release.domain.pipeline.port.GitCommitProbe;
 import com.sf.release.domain.resource.EnvDe;
+import com.sf.release.domain.resource.EnvKind;
 import com.sf.release.domain.resource.UnitType;
 import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.ItemStateMachine;
@@ -42,6 +43,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -51,9 +53,9 @@ import java.util.UUID;
 
 /**
  * The publish use case of an online 变更项 (tech design §4, §5.1):
- * {@code ScopeGuard → assertPublishable → acquire the unit lock → one transaction that moves
- * the item PENDING -PUBLISH-> BUILDING and creates the release order, the pipeline instance
- * and every node/task}.
+ * {@code ScopeGuard → assertPublishable → require DE configuration → observe the base commit →
+ * acquire the unit lock → one transaction that moves the item PENDING -PUBLISH-> BUILDING and
+ * creates the release order, the pipeline instance and every node/task}.
  *
  * <p><strong>Why the lock comes first.</strong> The unit lock is the mutual exclusion of the
  * whole publish: two clicks (or two nodes) must not create two orders. The winner holds the
@@ -62,6 +64,17 @@ import java.util.UUID;
  * inside the locked transaction (through the state machine and a {@code row_version} CAS), a
  * concurrent double publish loses deterministically on the lock, while a later publish of an
  * already {@code BUILDING} item (lock gone) fails with 40001 and releases its own reservation.
+ *
+ * <p><strong>DE configuration.</strong> A unit must have at least one {@code TEST} DE and at
+ * least one {@code PROD}/{@code DR}/{@code BLUE} DE, otherwise the pre-generated pipeline would
+ * contain a {@code TEST_DEPLOY} or {@code PROD_DEPLOY} node without any deploy task (an empty
+ * node that can never be completed). The validation fails with 40011 and names the missing
+ * families; it runs before the lock, so a misconfigured unit reserves nothing.
+ *
+ * <p><strong>Base-commit probe.</strong> The branch-head probe is an outbound git call; it is
+ * hoisted <em>before</em> the publish transaction (and before the unit lock) and its observed
+ * value is passed in. Failure keeps the best-effort semantics: {@code base_commit} stays NULL
+ * with a WARN and the publish continues.
  *
  * <p><strong>One transaction.</strong> The order, instance, nodes and tasks are inserted in a
  * single {@link TransactionTemplate} transaction together with the item transition, so a
@@ -82,6 +95,12 @@ public class PublishAppService {
     private static final int PUBLISH_NO_RANDOM_LENGTH = 6;
     private static final DateTimeFormatter PUBLISH_DATE =
         DateTimeFormatter.ofPattern("yyyyMMdd", Locale.ROOT);
+
+    /** Payload marker: the unit has no TEST DE, so the pipeline could not test-deploy. */
+    static final String MISSING_TEST_DE = "TEST_DE";
+
+    /** Payload marker: the unit has no PROD/DR/BLUE DE, so production could not deploy. */
+    static final String MISSING_PROD_DE = "PROD_DE";
 
     private final ReleaseItemMapper itemMapper;
     private final EnvDeMapper envDeMapper;
@@ -122,7 +141,8 @@ public class PublishAppService {
      *
      * @throws BizException 40000 unknown item; 40001 not publishable in its current state (or a
      *     lost status CAS); 40006 the deployment unit is locked; 40011 the unit configuration
-     *     is incomplete; 40009 the caller has no data scope on the unit
+     *     is incomplete (CODING tasks or the TEST / PROD|DR|BLUE DEs); 40009 the caller has no
+     *     data scope on the unit
      */
     public PublishResult publish(long itemId) {
         ReleaseItem item = loadItem(itemId);
@@ -134,12 +154,22 @@ public class PublishAppService {
         unitAppService.assertPublishable(item.unitId());
 
         long unitId = item.unitId();
+        // The DE snapshot is read and validated before the transaction: the pipeline cannot be
+        // meaningful without a TEST and a production-family environment, and a failing
+        // validation must not take the unit lock (or open a transaction).
+        List<EnvDe> envDes = loadEnvDes(unitId);
+        requireDeConfiguration(unitId, envDes);
+        // Best-effort probe of the branch head, deliberately *outside* the publish transaction
+        // and before the unit lock: it is an outbound git call and must not extend the critical
+        // section that another publisher is waiting on. Its degradation semantics are unchanged
+        // (a failure leaves base_commit NULL with a WARN and the publish continues).
+        String baseCommit = observeBaseCommit(item);
         if (!unitLockService.acquire(unitId, UnitLockService.UNBOUND_INSTANCE_ID)) {
             throw unitLocked(unitId, itemId);
         }
         try {
             PublishResult result = transactionTemplate.execute(
-                tx -> publishInTransaction(itemId, unitId));
+                tx -> publishInTransaction(itemId, unitId, envDes, baseCommit));
             return Objects.requireNonNull(result, "publish result");
         } catch (LockLostException ex) {
             // The lock row is no longer ours (bindInstance reported it lost). Releasing here
@@ -153,10 +183,37 @@ public class PublishAppService {
         }
     }
 
-    private PublishResult publishInTransaction(long itemId, long unitId) {
+    /**
+     * Fails with {@link BizError#UNIT_NOT_CONFIGURED} (40011) when the unit has no TEST DE or no
+     * production-family ({@code PROD}/{@code DR}/{@code BLUE}) DE. Publishing such a unit would
+     * create a pipeline whose TEST_DEPLOY or PROD_DEPLOY node has no deploy task and therefore
+     * can never be completed; the missing families are returned in the payload so the caller can
+     * name them.
+     */
+    private static void requireDeConfiguration(long unitId, List<EnvDe> envDes) {
+        boolean hasTest = envDes.stream().anyMatch(de -> de.envKind() == EnvKind.TEST);
+        boolean hasProduction = envDes.stream()
+            .anyMatch(de -> de.envKind() == EnvKind.PROD
+                || de.envKind() == EnvKind.DR
+                || de.envKind() == EnvKind.BLUE);
+        List<String> missing = new ArrayList<>(2);
+        if (!hasTest) {
+            missing.add(MISSING_TEST_DE);
+        }
+        if (!hasProduction) {
+            missing.add(MISSING_PROD_DE);
+        }
+        if (!missing.isEmpty()) {
+            throw new BizException(BizError.UNIT_NOT_CONFIGURED,
+                "部署单元未配置部署环境（DE），缺少：" + String.join("、", missing),
+                Map.of("unitId", unitId, "missing", List.copyOf(missing)));
+        }
+    }
+
+    private PublishResult publishInTransaction(long itemId, long unitId, List<EnvDe> envDes,
+                                               String baseCommit) {
         ReleaseItem current = loadItem(itemId);
         ItemStatus next = ItemStateMachine.transit(current, ItemEvent.PUBLISH);
-        String baseCommit = observeBaseCommit(current);
         Instant now = Instant.now();
         LambdaUpdateWrapper<ReleaseItemPO> update = Wrappers.<ReleaseItemPO>lambdaUpdate()
             .eq(ReleaseItemPO::getId, itemId)
@@ -181,7 +238,6 @@ public class PublishAppService {
         orderMapper.insert(orderPo);
         ReleaseOrder persistedOrder = order.withId(orderPo.getId());
 
-        List<EnvDe> envDes = loadEnvDes(unitId);
         PipelineInstance instance = PipelineFactory.createOnline(persistedOrder, current, envDes);
         persistInstance(instance, unitId, itemId);
         log.info("release published: itemId={}, unitId={}, publishNo={}, pipelineNo={}",

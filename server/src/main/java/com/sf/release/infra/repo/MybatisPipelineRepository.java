@@ -2,6 +2,8 @@ package com.sf.release.infra.repo;
 
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.common.BizError;
+import com.sf.release.common.BizException;
 import com.sf.release.domain.pipeline.InstanceStatus;
 import com.sf.release.domain.pipeline.NodeStatus;
 import com.sf.release.domain.pipeline.NodeTask;
@@ -26,6 +28,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * MyBatis-Plus implementation of the pipeline persistence port. Every state change is a status
@@ -40,7 +43,13 @@ public class MybatisPipelineRepository implements PipelineRepository {
         NodeTaskStatus.TIMEOUT.name(), NodeTaskStatus.SKIPPED.name());
     private static final int MAX_SUMMARY_LENGTH = 500;
     private static final int MAX_DIGEST_LENGTH = 80;
-    private static final int MAX_COMMIT_SHA_LENGTH = 40;
+
+    /**
+     * Width of {@code pipeline_instance.commit_sha} (V14). Git SHA-1 is 40 characters and
+     * SHA-256 is 64; the column is 64 wide and a longer value is a business error instead of a
+     * silent truncation, because a cut commit would compare unequal to the commit it names.
+     */
+    private static final int MAX_COMMIT_SHA_LENGTH = 64;
     private static final int MAX_STATUS_REASON_LENGTH = 255;
 
     private final PipelineInstanceMapper instanceMapper;
@@ -315,14 +324,13 @@ public class MybatisPipelineRepository implements PipelineRepository {
 
     @Override
     public boolean recordCommit(long instanceId, String commitSha) {
-        String commit = trimToNull(commitSha);
+        String commit = requireCommitSha(commitSha, "recordCommit");
         if (commit == null) {
             return false;
         }
         return instanceMapper.update(null, Wrappers.<PipelineInstancePO>lambdaUpdate()
             .eq(PipelineInstancePO::getId, instanceId)
-            .set(PipelineInstancePO::getCommitSha,
-                truncate(commit, MAX_COMMIT_SHA_LENGTH))) == 1;
+            .set(PipelineInstancePO::getCommitSha, commit)) == 1;
     }
 
     @Override
@@ -343,7 +351,7 @@ public class MybatisPipelineRepository implements PipelineRepository {
     @Override
     public boolean recordBuiltImage(long instanceId, String imageDigest, String commitSha) {
         String digest = trimToNull(imageDigest);
-        String commit = trimToNull(commitSha);
+        String commit = requireCommitSha(commitSha, "recordBuiltImage");
         LambdaUpdateWrapper<PipelineInstancePO> update =
             Wrappers.<PipelineInstancePO>lambdaUpdate()
                 .eq(PipelineInstancePO::getId, instanceId);
@@ -352,9 +360,31 @@ public class MybatisPipelineRepository implements PipelineRepository {
         }
         // Explicitly write the commit, including NULL: the engine reported "no commit" and a
         // stale value must not survive as if it belonged to this image.
-        update.set(PipelineInstancePO::getCommitSha,
-            commit == null ? null : truncate(commit, MAX_COMMIT_SHA_LENGTH));
+        update.set(PipelineInstancePO::getCommitSha, commit);
         return instanceMapper.update(null, update) == 1;
+    }
+
+    /**
+     * The commit to store, or {@code null} when none was reported. A value wider than the column
+     * is rejected with a business error: silently cutting the SHA would make the stored commit
+     * name a different (shorter) value than the engine reported, which is exactly the kind of
+     * mismatch the rerun baseline and the production same-image check must not see.
+     *
+     * @throws BizException 40000 when {@code value} is wider than {@value #MAX_COMMIT_SHA_LENGTH}
+     */
+    private static String requireCommitSha(String value, String action) {
+        String commit = trimToNull(value);
+        if (commit == null) {
+            return null;
+        }
+        if (commit.length() > MAX_COMMIT_SHA_LENGTH) {
+            throw new BizException(BizError.PARAM_INVALID,
+                "commit sha 长度超过 " + MAX_COMMIT_SHA_LENGTH + " 个字符，拒绝截断写入（"
+                    + action + "）",
+                Map.of("commitSha", commit, "maxLength", MAX_COMMIT_SHA_LENGTH,
+                    "actualLength", commit.length()));
+        }
+        return commit;
     }
 
     private static String trimToNull(String value) {

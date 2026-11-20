@@ -68,7 +68,9 @@ import java.util.Set;
  *
  * <p><strong>Lock.</strong> The unit lock is acquired before the transaction (the same
  * immediate-visibility rule as the initial publish) and is bound to the new instance inside it.
- * A failed transaction releases the sentinel reservation; a lost bind is reported as 40006.
+ * A failed transaction releases the sentinel reservation; a lost bind is reported as 40006 and
+ * releases nothing (the row now belongs to another holder, or to nobody, so a release could
+ * steal the new holder's lock).
  */
 @Service
 public class RerunAppService {
@@ -164,7 +166,9 @@ public class RerunAppService {
                 itemId, order, previous, plan, full, revoke, fromNode, observedHead));
             return Objects.requireNonNull(result, "rerun result");
         } catch (PublishAppService.LockLostException ex) {
-            unitLockService.release(unitId, UnitLockService.UNBOUND_INSTANCE_ID);
+            // The lock row is no longer ours (bindInstance reported it lost). Mirroring the
+            // publish path, releasing here could delete a new holder's row/key, so the release
+            // is skipped entirely.
             throw ex.failure();
         } catch (RuntimeException ex) {
             // The transaction rolled back, including the lock bind, so the reservation is still

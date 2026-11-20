@@ -89,6 +89,7 @@ class RerunControllerTest {
         givenBinding(unitId, "TEST_DEPLOY", "P-TEST-T15");
         givenBinding(unitId, "PROD_DEPLOY", "P-PROD-T15");
         givenDe(unitId, "TEST", "t15-http-sit", 0);
+        givenDe(unitId, "PROD", "t15-http-prod", 1);
         itemId = itemService.create(taskId,
             new CreateItemCmd(unitId, BRANCH, "重新发布判定", PLAN_DATE));
     }
