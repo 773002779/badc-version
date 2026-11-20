@@ -1,14 +1,15 @@
-﻿param([Parameter(Mandatory)][string]$Base,[Parameter(Mandatory)][string]$Head,[Parameter(Mandatory)][string]$OutDir,[Parameter(Mandatory)][int]$N)
+param([Parameter(Mandatory)][string]$Base,[Parameter(Mandatory)][string]$Head,[Parameter(Mandatory)][string]$OutDir,[Parameter(Mandatory)][string]$N)
 $out = Join-Path $OutDir "task-$N-review.md"
-$sb = New-Object System.Text.StringBuilder
-[void]$sb.AppendLine("# Review package — task $N")
-[void]$sb.AppendLine("range: $Base..$Head")
-[void]$sb.AppendLine("")
-[void]$sb.AppendLine("## Commits")
-[void]$sb.AppendLine((git log --oneline "$Base..$Head" | Out-String))
-[void]$sb.AppendLine("## Stat")
-[void]$sb.AppendLine((git diff --stat "$Base..$Head" | Out-String))
-[void]$sb.AppendLine("## Diff")
-[void]$sb.AppendLine((git diff -U10 "$Base..$Head" | Out-String))
-Set-Content -LiteralPath $out -Value $sb.ToString() -Encoding UTF8
+$parts = @(
+  "# Review package - task $N",
+  "range: $Base..$Head",
+  "",
+  "## Commits",
+  (git log --oneline "$Base..$Head" | Out-String),
+  "## Stat",
+  (git diff --stat "$Base..$Head" | Out-String),
+  "## Diff",
+  (git diff -U10 "$Base..$Head" | Out-String)
+)
+[System.IO.File]::WriteAllText($out, ($parts -join "`n"), (New-Object System.Text.UTF8Encoding($false)))
 Write-Output $out
