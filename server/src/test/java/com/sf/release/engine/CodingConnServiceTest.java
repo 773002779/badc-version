@@ -3,6 +3,7 @@ package com.sf.release.engine;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sf.release.application.CodingConnAppService;
 import com.sf.release.application.CodingConnAppService.CodingConnView;
+import com.sf.release.application.CodingConnAppService.CodingProbeView;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.domain.resource.CodingConn;
@@ -23,8 +24,10 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
-import static com.sf.release.domain.resource.CodingScope.GLOBAL;
-import static com.sf.release.domain.resource.CodingScope.SUBSYSTEM;
+import java.lang.reflect.Modifier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -42,6 +45,8 @@ class CodingConnServiceTest {
 
     private static final String BASE_URL = "https://coding.example.com";
     private static final int PARAM_INVALID_CODE = 40000;
+    private static final String GLOBAL_SCOPE = "GLOBAL";
+    private static final String SUBSYSTEM_SCOPE = "SUBSYSTEM";
 
     @Autowired CodingConnAppService connService;
     @Autowired JdbcTemplate jdbc;
@@ -62,13 +67,13 @@ class CodingConnServiceTest {
     @Test
     void save_encrypts_and_get_returns_only_a_masked_hint() throws Exception {
         CodingConnView saved = connService.save(
-            GLOBAL, null, BASE_URL, "team-a", "project-a", "tok-123");
+            GLOBAL_SCOPE, null, BASE_URL, "team-a", "project-a", "tok-123");
 
         String stored = storedCipher();
         assertThat(stored).doesNotContain("tok-123");
         assertThat(cipher.decrypt(stored)).isEqualTo("tok-123");
 
-        CodingConnView view = connService.get(GLOBAL, null);
+        CodingConnView view = connService.get(GLOBAL_SCOPE, null);
         assertThat(view.id()).isEqualTo(saved.id());
         assertThat(view.scope()).isEqualTo("GLOBAL");
         assertThat(view.subsystemId()).isZero();
@@ -87,9 +92,9 @@ class CodingConnServiceTest {
     @Test
     void token_never_appears_in_db_or_logs(CapturedOutput output) {
         String token = "SUPER-SECRET";
-        connService.save(GLOBAL, null, BASE_URL, "team-a", "project-a", token);
-        connService.get(GLOBAL, null);
-        long id = connService.get(GLOBAL, null).id();
+        connService.save(GLOBAL_SCOPE, null, BASE_URL, "team-a", "project-a", token);
+        connService.get(GLOBAL_SCOPE, null);
+        long id = connService.get(GLOBAL_SCOPE, null).id();
         connService.test(id);
 
         assertThat(storedCipher()).doesNotContain(token);
@@ -103,16 +108,16 @@ class CodingConnServiceTest {
     @Test
     void save_upserts_by_scope_and_keeps_a_single_row() {
         CodingConnView first = connService.save(
-            GLOBAL, null, BASE_URL, "team-a", "project-a", "tok-123");
+            GLOBAL_SCOPE, null, BASE_URL, "team-a", "project-a", "tok-123");
         CodingConnView second = connService.save(
-            GLOBAL, 0L, BASE_URL + "/v2", "team-b", "project-b", "tok-456");
+            GLOBAL_SCOPE, 0L, BASE_URL + "/v2", "team-b", "project-b", "tok-456");
 
         assertThat(second.id()).isEqualTo(first.id());
         assertThat(rowCount()).isEqualTo(1);
         assertThat(storedCipher()).doesNotContain("tok-123");
         assertThat(cipher.decrypt(storedCipher())).isEqualTo("tok-456");
 
-        CodingConnView view = connService.get(GLOBAL, 0L);
+        CodingConnView view = connService.get(GLOBAL_SCOPE, 0L);
         assertThat(view.id()).isEqualTo(first.id());
         assertThat(view.baseUrl()).isEqualTo(BASE_URL + "/v2");
         assertThat(view.team()).isEqualTo("team-b");
@@ -129,7 +134,7 @@ class CodingConnServiceTest {
 
     @Test
     void global_scope_stores_zero_subsystem_id_and_subsystem_scope_validates() {
-        connService.save(GLOBAL, null, BASE_URL, "team-a", "project-a", "tok-123");
+        connService.save(GLOBAL_SCOPE, null, BASE_URL, "team-a", "project-a", "tok-123");
 
         Integer globalId = jdbc.queryForObject(
             "SELECT subsystem_id FROM coding_conn WHERE scope = 'GLOBAL'", Integer.class);
@@ -140,21 +145,21 @@ class CodingConnServiceTest {
                 + " AND column_name = 'subsystem_id'", String.class)).isEqualTo("NO");
 
         CodingConnView subsystemView = connService.save(
-            SUBSYSTEM, subsystemId, BASE_URL, "team-a", "project-a", "tok-789");
+            SUBSYSTEM_SCOPE, subsystemId, BASE_URL, "team-a", "project-a", "tok-789");
         assertThat(subsystemView.scope()).isEqualTo("SUBSYSTEM");
         assertThat(subsystemView.subsystemId()).isEqualTo(subsystemId);
-        assertThat(connService.get(SUBSYSTEM, subsystemId).tokenHint()).isEqualTo("tok-***");
+        assertThat(connService.get(SUBSYSTEM_SCOPE, subsystemId).tokenHint()).isEqualTo("tok-***");
         assertThat(rowCount()).isEqualTo(2);
 
         assertThatThrownBy(() -> connService.save(
-            SUBSYSTEM, null, BASE_URL, "team-a", "project-a", "tok-000"))
+            SUBSYSTEM_SCOPE, null, BASE_URL, "team-a", "project-a", "tok-000"))
             .as("SUBSYSTEM scope needs a subsystem id")
             .isInstanceOf(BizException.class)
             .extracting("error").isEqualTo(BizError.PARAM_INVALID)
             .satisfies(error -> assertThat(((BizError) error).getCode())
                 .isEqualTo(PARAM_INVALID_CODE));
         assertThatThrownBy(() -> connService.save(
-            SUBSYSTEM, 999_999L, BASE_URL, "team-a", "project-a", "tok-000"))
+            SUBSYSTEM_SCOPE, 999_999L, BASE_URL, "team-a", "project-a", "tok-000"))
             .as("an unknown subsystem cannot own a connection")
             .isInstanceOf(BizException.class)
             .extracting("error").isEqualTo(BizError.PARAM_INVALID);
@@ -164,14 +169,14 @@ class CodingConnServiceTest {
     @Test
     void save_rejects_blank_token_and_unknown_connection_is_param_invalid() {
         assertThatThrownBy(() -> connService.save(
-            GLOBAL, null, BASE_URL, "team-a", "project-a", "   "))
+            GLOBAL_SCOPE, null, BASE_URL, "team-a", "project-a", "   "))
             .isInstanceOf(BizException.class)
             .extracting("error").isEqualTo(BizError.PARAM_INVALID)
             .satisfies(error -> assertThat(((BizError) error).getCode())
                 .isEqualTo(PARAM_INVALID_CODE));
         assertThat(rowCount()).isZero();
 
-        assertThatThrownBy(() -> connService.get(GLOBAL, null))
+        assertThatThrownBy(() -> connService.get(GLOBAL_SCOPE, null))
             .isInstanceOf(BizException.class)
             .extracting("error").isEqualTo(BizError.PARAM_INVALID);
         assertThatThrownBy(() -> connService.test(999_999L))
@@ -182,21 +187,72 @@ class CodingConnServiceTest {
     @Test
     void test_delegates_to_the_injected_probe_and_propagates_failed() {
         long id = connService.save(
-            SUBSYSTEM, subsystemId, BASE_URL, "team-a", "project-a", "tok-123").id();
+            SUBSYSTEM_SCOPE, subsystemId, BASE_URL, "team-a", "project-a", "tok-123").id();
 
         fakeProbe.respondWith(ProbeResult.failed("凭证无效：401"));
 
-        ProbeResult result = connService.test(id);
+        CodingProbeView result = connService.test(id);
 
-        assertThat(result.status()).isEqualTo(ProbeResult.Status.FAILED);
+        assertThat(result.status()).isEqualTo("FAILED");
+        assertThat(result.ok()).isFalse();
         assertThat(result.message()).isEqualTo("凭证无效：401");
         assertThat(fakeProbe.lastConn()).isNotNull();
         assertThat(fakeProbe.lastConn().id()).isEqualTo(id);
-        assertThat(fakeProbe.lastConn().scope()).isEqualTo(SUBSYSTEM);
+        assertThat(fakeProbe.lastConn().scope()).isEqualTo(CodingScope.SUBSYSTEM);
         assertThat(fakeProbe.lastConn().subsystemId()).isEqualTo(subsystemId);
         assertThat(fakeProbe.lastConn().baseUrl()).isEqualTo(BASE_URL);
         assertThat(fakeProbe.lastToken()).as("the service decrypts before probing")
             .isEqualTo("tok-123");
+    }
+
+    @Test
+    void invalid_scope_string_is_param_invalid() {
+        assertThatThrownBy(() -> connService.save(
+            "TENANT", null, BASE_URL, "team-a", "project-a", "tok-123"))
+            .as("unknown scope vocabulary")
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.PARAM_INVALID)
+            .satisfies(error -> assertThat(((BizError) error).getCode())
+                .isEqualTo(PARAM_INVALID_CODE));
+        assertThatThrownBy(() -> connService.save(
+            "   ", null, BASE_URL, "team-a", "project-a", "tok-123"))
+            .as("blank scope")
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.PARAM_INVALID);
+        assertThatThrownBy(() -> connService.get("unknown", null))
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.PARAM_INVALID);
+        assertThat(rowCount()).isZero();
+    }
+
+    @Test
+    void string_typed_scope_round_trips_case_insensitively() {
+        CodingConnView global = connService.save(
+            "GLOBAL", null, BASE_URL, "team-a", "project-a", "tok-123");
+        assertThat(connService.get("global", null).id()).isEqualTo(global.id());
+        assertThat(connService.get(" Global ", null).tokenHint()).isEqualTo("tok-***");
+
+        CodingConnView subsystem = connService.save(
+            "subsystem", subsystemId, BASE_URL, "team-a", "project-a", "tok-456");
+        assertThat(subsystem.scope()).isEqualTo("SUBSYSTEM");
+        assertThat(connService.get("SUBSYSTEM", subsystemId).id()).isEqualTo(subsystem.id());
+    }
+
+    @Test
+    void public_application_api_is_free_of_domain_and_infra_types() {
+        String leaked = Stream.of(CodingConnAppService.class.getDeclaredMethods())
+            .filter(method -> Modifier.isPublic(method.getModifiers()))
+            .flatMap(method -> Stream.concat(
+                Stream.of(method.getReturnType()), Stream.of(method.getParameterTypes())))
+            .map(Class::getName)
+            .filter(name -> name.startsWith("com.sf.release.domain.")
+                || name.startsWith("com.sf.release.infra."))
+            .collect(Collectors.joining(", "));
+
+        assertThat(leaked)
+            .as("the web layer must be able to call the application API without importing "
+                + "domain or infra types")
+            .isEmpty();
     }
 
     private String storedCipher() {

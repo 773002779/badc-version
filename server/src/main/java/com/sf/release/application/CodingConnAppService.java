@@ -68,12 +68,14 @@ public class CodingConnAppService {
 
     /**
      * Upserts the connection identified by {@code (scope, subsystemId)} and returns the
-     * stored view (with a masked token hint).
+     * stored view (with a masked token hint). {@code scope} is the API string
+     * {@code "GLOBAL"} / {@code "SUBSYSTEM"}, parsed case-insensitively, so the web layer
+     * never depends on the domain enum.
      */
     @Transactional
-    public CodingConnView save(CodingScope scope, Long subsystemId, String baseUrl,
+    public CodingConnView save(String scope, Long subsystemId, String baseUrl,
                                String team, String project, String token) {
-        CodingScope effectiveScope = requireScope(scope);
+        CodingScope effectiveScope = parseScope(scope);
         long effectiveSubsystemId = requireSubsystemId(effectiveScope, subsystemId);
         if (effectiveScope == CodingScope.SUBSYSTEM
                 && subsystemMapper.selectById(effectiveSubsystemId) == null) {
@@ -103,29 +105,28 @@ public class CodingConnAppService {
             }
         }
 
-        CodingConnView view = get(effectiveScope, effectiveSubsystemId);
+        CodingConnView view = loadStoredView(effectiveScope, effectiveSubsystemId);
         log.info("coding connection saved: id={}, scope={}, subsystemId={}",
             view.id(), view.scope(), view.subsystemId());
         return view;
     }
 
-    /** Reads a connection by natural key; the response never carries the token itself. */
-    public CodingConnView get(CodingScope scope, Long subsystemId) {
-        CodingScope effectiveScope = requireScope(scope);
+    /**
+     * Reads a connection by natural key; {@code scope} is the API string. The response
+     * never carries the token itself.
+     */
+    public CodingConnView get(String scope, Long subsystemId) {
+        CodingScope effectiveScope = parseScope(scope);
         long effectiveSubsystemId = requireSubsystemId(effectiveScope, subsystemId);
-        CodingConnPO po = selectStored(effectiveScope, effectiveSubsystemId);
-        if (po == null) {
-            throw notFound(effectiveScope, effectiveSubsystemId);
-        }
-        return toView(po);
+        return loadStoredView(effectiveScope, effectiveSubsystemId);
     }
 
     /**
      * Decrypts the stored credential and asks the injected probe to check the connection.
-     * A {@link ProbeResult.Status#FAILED} result is propagated as data (its message is the
-     * operator-facing reason), not converted into an exception.
+     * A failed probe is propagated as data (its message is the operator-facing reason), not
+     * converted into an exception.
      */
-    public ProbeResult test(long id) {
+    public CodingProbeView test(long id) {
         CodingConnPO po = connMapper.selectById(id);
         if (po == null) {
             throw new BizException(BizError.PARAM_INVALID, "CODING 连接不存在",
@@ -139,7 +140,15 @@ public class CodingConnAppService {
         String token = credentialCipher.decrypt(po.getCredentialCipher());
         ProbeResult result = probe.probe(po.toDomain(), token);
         log.info("coding connection probe finished: id={}, status={}", id, result.status());
-        return result;
+        return new CodingProbeView(result.status().name(), result.message());
+    }
+
+    private CodingConnView loadStoredView(CodingScope scope, long subsystemId) {
+        CodingConnPO po = selectStored(scope, subsystemId);
+        if (po == null) {
+            throw notFound(scope, subsystemId);
+        }
+        return toView(po);
     }
 
     private int updateStoredConnection(CodingScope scope, long subsystemId, String baseUrl,
@@ -161,12 +170,18 @@ public class CodingConnAppService {
             .eq(CodingConnPO::getSubsystemId, subsystemId));
     }
 
-    private static CodingScope requireScope(CodingScope scope) {
-        if (scope == null) {
+    private static CodingScope parseScope(String raw) {
+        String value = trimToNull(raw);
+        if (value == null) {
             throw new BizException(BizError.PARAM_INVALID, "连接范围不能为空",
                 Map.of("scope", "不能为空"));
         }
-        return scope;
+        try {
+            return CodingScope.valueOf(value.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ex) {
+            throw new BizException(BizError.PARAM_INVALID, "连接范围不合法：" + value,
+                Map.of("scope", value));
+        }
     }
 
     private static long requireSubsystemId(CodingScope scope, Long subsystemId) {
@@ -252,5 +267,16 @@ public class CodingConnAppService {
         String tokenHint,
         Instant createdAt,
         Instant updatedAt) {
+    }
+
+    /**
+     * Probe outcome exposed to the web layer. The {@code infra.engine.ProbeResult} enum is
+     * flattened to its name so no domain or infra type appears in an application API.
+     */
+    public record CodingProbeView(String status, String message) {
+
+        public boolean ok() {
+            return "OK".equals(status);
+        }
     }
 }
