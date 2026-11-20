@@ -1,0 +1,16 @@
+﻿# build
+server/target/
+server/*/target/
+# ide
+.idea/
+.vscode/
+*.iml
+# node
+web/node_modules/
+web/dist/
+# sdd scratch
+.superpowers/
+# logs / local
+*.log
+.env
+.env.local
