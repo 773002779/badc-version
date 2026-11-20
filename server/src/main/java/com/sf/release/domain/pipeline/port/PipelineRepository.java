@@ -8,6 +8,7 @@ import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 
 import java.time.Instant;
+import java.util.List;
 
 /**
  * Persistence port of the pipeline aggregate (tech design §3.1: the instance is the
@@ -83,6 +84,14 @@ public interface PipelineRepository {
     BuildContext buildContextOf(long instanceId);
 
     /**
+     * The deploy coordinates of an instance's {@code TEST_DEPLOY} node: the deployment unit, the
+     * publish number of its release order, the unit's enabled {@code TEST_DEPLOY} binding (the
+     * deploy plan) and the {@code env_kind = TEST} DEs it is configured for. Unresolvable parts
+     * are {@code 0}/blank/an empty list instead of failing the pipeline.
+     */
+    DeployContext deployContextOf(long instanceId);
+
+    /**
      * Records the commit an engine trigger reported for this instance, so later steps of the
      * chain build the same commit. Only a reported (non-blank) commit is written.
      */
@@ -114,5 +123,31 @@ public interface PipelineRepository {
 
     /** Build trigger coordinates; see {@link #buildContextOf(long)}. */
     record BuildContext(long unitId, String planId, String branch, String commitSha) {
+    }
+
+    /** Test-deploy coordinates; see {@link #deployContextOf(long)}. */
+    record DeployContext(long unitId, String publishNo, String planId,
+                         List<DeployTarget> targets) {
+
+        public DeployContext {
+            targets = targets == null ? List.of() : List.copyOf(targets);
+        }
+
+        /** The DE with {@code deId}, or {@code null} when the unit no longer configures it. */
+        public DeployTarget targetOf(long deId) {
+            for (DeployTarget target : targets) {
+                if (target.deId() == deId) {
+                    return target;
+                }
+            }
+            return null;
+        }
+    }
+
+    /**
+     * One TEST DE a {@code DEPLOY} task can target: the {@code env_de} id stored as
+     * {@code node_task.target_id}, its environment family and its concrete name.
+     */
+    record DeployTarget(long deId, String envKind, String deName) {
     }
 }

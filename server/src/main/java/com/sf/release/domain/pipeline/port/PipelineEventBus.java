@@ -3,6 +3,7 @@ package com.sf.release.domain.pipeline.port;
 import com.sf.release.domain.pipeline.event.InstanceFinishedEvent;
 import com.sf.release.domain.pipeline.event.NodeCompletedEvent;
 import com.sf.release.domain.pipeline.event.NodeTaskCompletedEvent;
+import com.sf.release.domain.pipeline.event.TestEnvReadyEvent;
 
 /**
  * Publishes the pipeline domain events. The implementation bridges them to the Spring
@@ -16,4 +17,6 @@ public interface PipelineEventBus {
     void publish(NodeCompletedEvent event);
 
     void publish(InstanceFinishedEvent event);
+
+    void publish(TestEnvReadyEvent event);
 }

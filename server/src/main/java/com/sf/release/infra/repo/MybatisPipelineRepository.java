@@ -11,8 +11,10 @@ import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineNode;
 import com.sf.release.domain.pipeline.TaskType;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
+import com.sf.release.domain.resource.EnvKind;
 import com.sf.release.domain.resource.TaskKind;
 import com.sf.release.infra.repo.po.CodingTaskBindingPO;
+import com.sf.release.infra.repo.po.EnvDePO;
 import com.sf.release.infra.repo.po.NodeTaskPO;
 import com.sf.release.infra.repo.po.PipelineInstancePO;
 import com.sf.release.infra.repo.po.PipelineNodePO;
@@ -46,19 +48,22 @@ public class MybatisPipelineRepository implements PipelineRepository {
     private final ReleaseOrderMapper orderMapper;
     private final ReleaseItemMapper itemMapper;
     private final CodingTaskBindingMapper bindingMapper;
+    private final EnvDeMapper envDeMapper;
 
     public MybatisPipelineRepository(PipelineInstanceMapper instanceMapper,
                                      PipelineNodeMapper nodeMapper,
                                      NodeTaskMapper taskMapper,
                                      ReleaseOrderMapper orderMapper,
                                      ReleaseItemMapper itemMapper,
-                                     CodingTaskBindingMapper bindingMapper) {
+                                     CodingTaskBindingMapper bindingMapper,
+                                     EnvDeMapper envDeMapper) {
         this.instanceMapper = instanceMapper;
         this.nodeMapper = nodeMapper;
         this.taskMapper = taskMapper;
         this.orderMapper = orderMapper;
         this.itemMapper = itemMapper;
         this.bindingMapper = bindingMapper;
+        this.envDeMapper = envDeMapper;
     }
 
     @Override
@@ -229,6 +234,41 @@ public class MybatisPipelineRepository implements PipelineRepository {
         }
         String commitSha = trimToNull(instance.getCommitSha());
         return new BuildContext(unitId, planId, trimToNull(item.getSourceBranch()), commitSha);
+    }
+
+    @Override
+    public DeployContext deployContextOf(long instanceId) {
+        PipelineInstancePO instance = instanceMapper.selectById(instanceId);
+        if (instance == null || instance.getOrderId() == null || instance.getOrderId() <= 0) {
+            return new DeployContext(0L, null, null, List.of());
+        }
+        ReleaseOrderPO order = orderMapper.selectById(instance.getOrderId());
+        if (order == null || order.getItemId() == null) {
+            return new DeployContext(0L, null, null, List.of());
+        }
+        String publishNo = trimToNull(order.getPublishNo());
+        ReleaseItemPO item = itemMapper.selectById(order.getItemId());
+        if (item == null) {
+            return new DeployContext(0L, publishNo, null, List.of());
+        }
+        long unitId = item.getUnitId() == null ? 0L : item.getUnitId();
+        CodingTaskBindingPO binding = unitId <= 0 ? null : bindingMapper.selectOne(
+            Wrappers.<CodingTaskBindingPO>lambdaQuery()
+                .eq(CodingTaskBindingPO::getUnitId, unitId)
+                .eq(CodingTaskBindingPO::getTaskKind, TaskKind.TEST_DEPLOY.name())
+                .eq(CodingTaskBindingPO::getEnabled, true));
+        String planId = binding == null ? null : trimToNull(binding.getTaskId());
+        List<DeployTarget> targets = unitId <= 0 ? List.of() : envDeMapper.selectList(
+                Wrappers.<EnvDePO>lambdaQuery()
+                    .eq(EnvDePO::getUnitId, unitId)
+                    .eq(EnvDePO::getEnvKind, EnvKind.TEST.name())
+                    .orderByAsc(EnvDePO::getDeployBatchNo)
+                    .orderByAsc(EnvDePO::getId))
+            .stream()
+            .map(de -> new DeployTarget(de.getId() == null ? 0L : de.getId(),
+                de.getEnvKind(), de.getDeName()))
+            .toList();
+        return new DeployContext(unitId, publishNo, planId, targets);
     }
 
     @Override

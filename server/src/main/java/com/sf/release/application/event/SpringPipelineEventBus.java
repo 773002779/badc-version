@@ -3,6 +3,7 @@ package com.sf.release.application.event;
 import com.sf.release.domain.pipeline.event.InstanceFinishedEvent;
 import com.sf.release.domain.pipeline.event.NodeCompletedEvent;
 import com.sf.release.domain.pipeline.event.NodeTaskCompletedEvent;
+import com.sf.release.domain.pipeline.event.TestEnvReadyEvent;
 import com.sf.release.domain.pipeline.port.PipelineEventBus;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
@@ -36,6 +37,11 @@ public class SpringPipelineEventBus implements PipelineEventBus {
 
     @Override
     public void publish(InstanceFinishedEvent event) {
+        publisher.publishEvent(event);
+    }
+
+    @Override
+    public void publish(TestEnvReadyEvent event) {
         publisher.publishEvent(event);
     }
 }
