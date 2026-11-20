@@ -4,6 +4,10 @@ server:
 spring:
   application:
     name: release-pipeline
+  config:
+    # CODING endpoint templates; external configuration (application.yml outside the jar,
+    # environment variables, command line) overrides the same keys without a code change.
+    import: classpath:coding-endpoints.yml
   datasource:
     url: "${DB_URL:jdbc:mysql://127.0.0.1:3306/release_pipeline?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true}"
     username: ${DB_USERNAME:root}

@@ -1,0 +1,69 @@
+# CODING endpoint templates and status vocabulary.
+#
+# Everything the adapter knows about the CODING API lives here: when the real tenant
+# documentation arrives, change this file (or override the same keys from an external
+# application.yml / environment) and no Java code has to move.
+#
+# Placeholder syntax: {variable}. Variables available per action:
+#   build.start  : unitId, taskId, branch, commitSha, pipelineNo, attempt
+#   build.query  : externalId
+#   build.logs   : externalId, offset, limit
+#   deploy.start : unitId, taskId, envKind, deName, imageDigest, pipelineNo, attempt
+#   deploy.query : externalId
+#   cancel       : externalId
+# A missing/blank variable is an error that names the placeholder; it never renders "".
+#
+# Map keys that contain a dot use the Spring "[key]" form, otherwise binding would treat
+# "build.start" as two nested levels.
+#
+# Paths, field names and response expressions below are the documented shape guessed for
+# phase 1 — no CODING tenant was reachable to verify them. They are configuration on
+# purpose (see docs/tech-design/发版流水线-技术方案-v1.0.md §6.1/§6.2).
+coding:
+  # Which action CicdEngine.query() uses. Switch to deploy.query once deploy reconciliation
+  # gets its own caller.
+  queryAction: build.query
+
+  endpoints:
+    "[build.start]":
+      method: POST
+      url: "/open-api/build/start"
+      body: '{"TaskId":"{taskId}","UnitId":{unitId},"Branch":"{branch}","CommitSha":"{commitSha}","PipelineNo":"{pipelineNo}","Attempt":{attempt}}'
+      responseId: "$.Response.Data.JobId"
+      # responseUrl: "$.Response.Data.WebUrl"   # optional jump URL, unknown from the docs
+
+    "[build.query]":
+      method: GET
+      url: "/open-api/build/{externalId}"
+      responseStatus: "$.Data.Status"
+      responseDigest: "$.Data.Digest"
+
+    "[build.logs]":
+      method: GET
+      url: "/open-api/build/{externalId}/logs?offset={offset}&limit={limit}"
+
+    "[deploy.start]":
+      method: POST
+      url: "/open-api/deploy/start"
+      body: '{"TaskId":"{taskId}","UnitId":{unitId},"EnvKind":"{envKind}","DeName":"{deName}","ImageDigest":"{imageDigest}","PipelineNo":"{pipelineNo}","Attempt":{attempt}}'
+      responseId: "$.Data.DeployId"
+      # responseUrl: "$.Data.WebUrl"            # optional jump URL, unknown from the docs
+
+    "[deploy.query]":
+      method: GET
+      url: "/open-api/deploy/{externalId}"
+      responseStatus: "$.Data.Status"
+      responseDigest: "$.Data.Digest"
+
+    "[cancel]":
+      method: POST
+      url: "/open-api/job/{externalId}/cancel"
+
+  # Engine word (case-insensitive) -> platform EngineStatus. A word absent from this map is
+  # reported as an engine error naming the word, so an unknown vocabulary is visible.
+  statusMapping:
+    QUEUED: [QUEUEING, PENDING]
+    RUNNING: [RUNNING, DEPLOYING]
+    SUCCESS: [SUCCESS, FINISHED]
+    FAILED: [FAILED, ERROR]
+    CANCELED: [CANCELED, CANCELLED]
