@@ -29,6 +29,17 @@ release:
     # Outbound CODING calls require HTTPS. Enable only for an internal test tenant or a
     # local MockWebServer; never for a production connection.
     allow-insecure-http: false
+    # Engine implementation looked up in EngineRegistry (phase 1 has CODING only).
+    type: CODING
+  webhook:
+    # Shared HMAC-SHA256 secret of the CODING callback. Empty means fail closed: every
+    # callback is rejected with 401 (the application still boots). Inject it from the
+    # deployment environment, never commit a real value.
+    secret: ${CODING_WEBHOOK_SECRET:}
+  reconcile:
+    # 30s reconcile loop (tech design §6.3); disable it in environments that run a single
+    # externally scheduled reconciler.
+    enabled: true
   redis:
     # Redis-backed distributed lock is only wired when explicitly enabled.
     enabled: false

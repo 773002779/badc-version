@@ -18,7 +18,6 @@ import org.slf4j.LoggerFactory;
 
 import java.net.URI;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -65,6 +64,7 @@ public class CodingEngine implements CicdEngine {
     private final EngineHttpClient http;
     private final EngineProperties engineProperties;
     private final Supplier<Connection> connectionSupplier;
+    private final CodingStatusMapper statusMapper;
 
     public CodingEngine(CodingProperties properties,
                         EndpointTemplateResolver resolver,
@@ -97,6 +97,7 @@ public class CodingEngine implements CicdEngine {
         this.http = http;
         this.engineProperties = engineProperties;
         this.connectionSupplier = connectionSupplier;
+        this.statusMapper = new CodingStatusMapper(properties);
     }
 
     @Override
@@ -187,7 +188,7 @@ public class CodingEngine implements CicdEngine {
                 "引擎响应缺少状态字段（action=" + action + "，expression="
                     + statusExpression + "）");
         }
-        EngineStatus status = mapStatus(word, action);
+        EngineStatus status = statusMapper.map(word, action);
         String digest = text(root, endpoint.getResponseDigest(), action);
         return new EngineResult(status, digest, word);
     }
@@ -297,41 +298,6 @@ public class CodingEngine implements CicdEngine {
             // The parser message can quote the response body; do not risk leaking a token.
             throw EngineException.unavailable(
                 "引擎响应不是合法 JSON（action=" + action + "）");
-        }
-    }
-
-    private EngineStatus mapStatus(String word, String action) {
-        String normalized = word.trim();
-        for (Map.Entry<String, List<String>> entry : properties.getStatusMapping().entrySet()) {
-            EngineStatus status = parseStatusKey(entry.getKey(), action);
-            if (entry.getValue() == null) {
-                continue;
-            }
-            for (String engineWord : entry.getValue()) {
-                if (engineWord != null && normalized.equalsIgnoreCase(engineWord.trim())) {
-                    return status;
-                }
-            }
-        }
-        // A vendor word we have not mapped yet is a configuration gap, not an engine outage:
-        // report UNKNOWN and keep the raw word so the operator can extend statusMapping.
-        log.warn("coding engine returned an unmapped status word: {} (action={}), "
-            + "reporting UNKNOWN", normalized, action);
-        return EngineStatus.UNKNOWN;
-    }
-
-    private static EngineStatus parseStatusKey(String key, String action) {
-        String normalized = key == null ? "" : key.trim();
-        // The design brief writes keys as "#{QUEUED}"; accept that form as well as "QUEUED"
-        // so either spelling in configuration maps to the same EngineStatus.
-        if (normalized.startsWith("#{") && normalized.endsWith("}")) {
-            normalized = normalized.substring(2, normalized.length() - 1).trim();
-        }
-        try {
-            return EngineStatus.valueOf(normalized.toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException ex) {
-            throw EngineException.unavailable(
-                "statusMapping 的键不是 EngineStatus：" + key + "（action=" + action + "）");
         }
     }
 

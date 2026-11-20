@@ -123,7 +123,8 @@ public class MybatisPipelineRepository implements PipelineRepository {
         LambdaUpdateWrapper<NodeTaskPO> update = Wrappers.<NodeTaskPO>lambdaUpdate()
             .eq(NodeTaskPO::getId, taskId)
             .notIn(NodeTaskPO::getStatus, TERMINAL_TASK_STATUSES)
-            .set(NodeTaskPO::getStatus, status.name());
+            .set(NodeTaskPO::getStatus, status.name())
+            .set(NodeTaskPO::getUpdatedAt, now);
         if (terminal) {
             update.set(NodeTaskPO::getFinishedAt, now);
             if (task.startedAt() != null) {
@@ -299,7 +300,8 @@ public class MybatisPipelineRepository implements PipelineRepository {
             .set(NodeTaskPO::getExternalId, externalId)
             .set(NodeTaskPO::getExternalUrl, externalUrl)
             .set(NodeTaskPO::getDeadlineAt, deadlineAt)
-            .set(NodeTaskPO::getStartedAt, now)) == 1;
+            .set(NodeTaskPO::getStartedAt, now)
+            .set(NodeTaskPO::getUpdatedAt, now)) == 1;
     }
 
     @Override

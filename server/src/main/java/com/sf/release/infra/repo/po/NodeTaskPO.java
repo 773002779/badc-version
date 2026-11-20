@@ -37,6 +37,16 @@ public class NodeTaskPO {
     private Instant finishedAt;
     private Long durationMs;
 
+    /**
+     * Last observed progress of the row (V11). It is the gate of the 30s reconcile poll and is
+     * not part of the {@link NodeTask} aggregate: {@code started_at} cannot express "the engine
+     * was queried and still reports RUNNING".
+     */
+    private Instant updatedAt;
+
+    /** Consecutive failed engine queries (V11); reset by every successful query. */
+    private Integer queryFailures;
+
     public static NodeTaskPO of(NodeTask task, long instanceId) {
         NodeTaskPO po = new NodeTaskPO();
         po.id = task.id();
@@ -195,5 +205,21 @@ public class NodeTaskPO {
 
     public void setDurationMs(Long durationMs) {
         this.durationMs = durationMs;
+    }
+
+    public Instant getUpdatedAt() {
+        return updatedAt;
+    }
+
+    public void setUpdatedAt(Instant updatedAt) {
+        this.updatedAt = updatedAt;
+    }
+
+    public Integer getQueryFailures() {
+        return queryFailures;
+    }
+
+    public void setQueryFailures(Integer queryFailures) {
+        this.queryFailures = queryFailures;
     }
 }

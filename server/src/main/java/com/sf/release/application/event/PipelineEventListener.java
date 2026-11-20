@@ -57,30 +57,46 @@ public class PipelineEventListener {
 
     @EventListener
     public void onNodeTaskCompleted(NodeTaskCompletedEvent event) {
-        log.debug("node task completed: instanceId={}, taskId={}, node={}, type={}, status={}",
-            event.instanceId(), event.taskId(), event.nodeType(), event.taskType(),
-            event.status());
+        try {
+            log.debug("node task completed: instanceId={}, taskId={}, node={}, type={}, status={}",
+                event.instanceId(), event.taskId(), event.nodeType(), event.taskType(),
+                event.status());
+        } catch (RuntimeException ex) {
+            log.error("node task listener failed: instanceId={}, taskId={}",
+                event.instanceId(), event.taskId(), ex);
+        }
     }
 
     @EventListener
     public void onNodeCompleted(NodeCompletedEvent event) {
-        ItemEvent itemEvent = itemEventOf(event.nodeType(), event.status());
-        if (itemEvent == null) {
-            log.debug("node {} result does not change an item state (instanceId={})",
-                event.nodeType(), event.instanceId());
-            return;
+        try {
+            ItemEvent itemEvent = itemEventOf(event.nodeType(), event.status());
+            if (itemEvent == null) {
+                log.debug("node {} result does not change an item state (instanceId={})",
+                    event.nodeType(), event.instanceId());
+                return;
+            }
+            applyItemEvent(event, itemEvent);
+        } catch (RuntimeException ex) {
+            // A listener is a notification side effect, not a step of the advance: never let a
+            // broken item transition break the pipeline transaction (design §6.4).
+            log.error("item listener failed for node {} of instance {}: {}", event.nodeType(),
+                event.instanceId(), ex.getMessage(), ex);
         }
-        applyItemEvent(event, itemEvent);
     }
 
     @EventListener
     public void onInstanceFinished(InstanceFinishedEvent event) {
-        if (event.status() == InstanceStatus.FAILED) {
-            log.warn("pipeline failed: instanceId={}, orderId={}, reason={}", event.instanceId(),
-                event.orderId(), event.reason());
-        } else {
-            log.info("pipeline finished: instanceId={}, orderId={}, status={}, reason={}",
-                event.instanceId(), event.orderId(), event.status(), event.reason());
+        try {
+            if (event.status() == InstanceStatus.FAILED) {
+                log.warn("pipeline failed: instanceId={}, orderId={}, reason={}",
+                    event.instanceId(), event.orderId(), event.reason());
+            } else {
+                log.info("pipeline finished: instanceId={}, orderId={}, status={}, reason={}",
+                    event.instanceId(), event.orderId(), event.status(), event.reason());
+            }
+        } catch (RuntimeException ex) {
+            log.error("instance listener failed: instanceId={}", event.instanceId(), ex);
         }
     }
 

@@ -17,3 +17,12 @@ CODING_CRED_KEY: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 release:
   engine:
     allow-insecure-http: true
+  webhook:
+    # Published on purpose: the webhook test signs its own bodies with this value.
+    secret: "test-webhook-secret-not-a-real-one"
+  reconcile:
+    # The suite shares one MySQL schema; tests invoke ReconcileJob.run() explicitly instead
+    # of racing a 30s background thread.
+    enabled: false
+  redis:
+    enabled: false
