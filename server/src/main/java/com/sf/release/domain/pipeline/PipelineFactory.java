@@ -32,8 +32,8 @@ import java.util.UUID;
  *       deployment is deterministic (C14).</li>
  * </ol>
  *
- * <p>The daily pipeline, the second-party library pipeline and rerun plans are later tasks;
- * this factory deliberately exposes only {@code createOnline}.
+ * <p>The daily pipeline and the second-party library pipeline are later tasks; the online shape
+ * is exposed through {@link #createOnline} and {@link #createRerun}.
  */
 public final class PipelineFactory {
 
@@ -105,6 +105,48 @@ public final class PipelineFactory {
         return new PipelineInstance(null, order.id(), newPipelineNo(now),
             ExecType.ONLINE, TriggerType.INITIAL, NodeType.BUILD, InstanceStatus.PENDING,
             null, null, null, null, now, nodes);
+    }
+
+    /**
+     * Pre-generates a rerun instance for {@code order} (tech design §5.3). The graph is the same
+     * online graph; the instance starts at {@code fromNode} and the nodes before it are marked
+     * {@code SKIPPED} together with their tasks, because a rerun from a failed node reuses the
+     * previous execution's work instead of repeating it. The caller passes the previous image
+     * digest and commit for a from-node rerun (they are the input of the test/production
+     * deploy), and {@code null} for a full rerun.
+     */
+    public static PipelineInstance createRerun(ReleaseOrder order, ReleaseItem item,
+                                               List<EnvDe> envDes, TriggerType triggerType,
+                                               NodeType fromNode, String imageDigest,
+                                               String commitSha) {
+        Objects.requireNonNull(fromNode, "fromNode must not be null");
+        PipelineInstance base = createOnline(order, item, envDes);
+        PipelineNode start = base.node(fromNode);
+        if (start == null) {
+            throw new IllegalArgumentException(
+                "the online pipeline has no node " + fromNode);
+        }
+        List<PipelineNode> nodes = new ArrayList<>(base.nodes().size());
+        for (PipelineNode node : base.nodes()) {
+            nodes.add(node.seq() < start.seq() ? skipped(node, fromNode, base.createdAt()) : node);
+        }
+        return new PipelineInstance(null, base.orderId(), base.pipelineNo(), ExecType.ONLINE,
+            triggerType, fromNode, InstanceStatus.PENDING, imageDigest, commitSha,
+            null, null, base.createdAt(), nodes);
+    }
+
+    /**
+     * A pre-generated node the rerun does not execute. Its tasks are {@code SKIPPED} as well so
+     * the aggregate never shows an earlier node as still waiting to run.
+     */
+    private static PipelineNode skipped(PipelineNode node, NodeType fromNode, Instant now) {
+        List<NodeTask> tasks = node.tasks().stream()
+            .map(task -> new NodeTask(null, null, task.nodeType(), task.taskType(),
+                task.batchNo(), task.targetId(), NodeTaskStatus.SKIPPED, 0, null, null,
+                "重新发布从 " + fromNode + " 开始，跳过该节点", null, null, now, null))
+            .toList();
+        return new PipelineNode(null, null, node.nodeType(), node.seq(), NodeStatus.SKIPPED,
+            null, now, tasks);
     }
 
     /** {@code PROD}, {@code DR} and {@code BLUE} DEs are deployed by the PROD_DEPLOY node. */

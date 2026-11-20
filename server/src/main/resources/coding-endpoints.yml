@@ -12,6 +12,8 @@
 #   deploy.query : externalId
 #   deploy.logs  : externalId, offset, limit
 #   cancel       : externalId
+#   git.head     : unitId, branch
+#   git.changes  : unitId, branch, modulePath, baseSha
 # A missing/blank variable is an error that names the placeholder; it never renders "".
 #
 # Map keys that contain a dot use the Spring "[key]" form, otherwise binding would treat
@@ -76,6 +78,21 @@ coding:
     "[cancel]":
       method: POST
       url: "/open-api/job/{externalId}/cancel"
+
+    # Git commit probe of the rerun planner (Task 15, requirements 4.5 C15). These endpoints
+    # are configuration like every other action: the real repository API paths and field names
+    # are replaced here once the CODING tenant documentation is available. git.head returns the
+    # branch head commit in responseCommit; git.changes returns whether anything under
+    # modulePath changed since baseSha in responseValue (true/false, 1/0 or yes/no).
+    "[git.head]":
+      method: GET
+      url: "/open-api/repo/{unitId}/branch/{branch}/head"
+      responseCommit: "$.Response.Data.CommitSha"
+
+    "[git.changes]":
+      method: GET
+      url: "/open-api/repo/{unitId}/changes?branch={branch}&modulePath={modulePath}&baseSha={baseSha}"
+      responseValue: "$.Response.Data.Changed"
 
   # Engine word (case-insensitive) -> platform EngineStatus. A word absent from this map is
   # reported as UNKNOWN (keeping the raw word) and logged at WARN, so an unmapped vocabulary

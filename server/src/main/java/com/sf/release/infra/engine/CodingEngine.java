@@ -334,6 +334,7 @@ public class CodingEngine implements CicdEngine {
             validateExpression(action, "responseDigest", endpoint.getResponseDigest());
             validateExpression(action, "responseUrl", endpoint.getResponseUrl());
             validateExpression(action, "responseCommit", endpoint.getResponseCommit());
+            validateExpression(action, "responseValue", endpoint.getResponseValue());
         });
     }
 

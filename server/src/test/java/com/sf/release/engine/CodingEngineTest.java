@@ -410,8 +410,9 @@ class CodingEngineTest {
     void bundled_yaml_declares_all_endpoints_and_the_status_mapping() {
         assertThat(properties.getEndpoints())
             .containsKeys("build.start", "build.query", "build.logs",
-                "deploy.start", "deploy.query", "deploy.logs", "cancel")
-            .hasSize(7);
+                "deploy.start", "deploy.query", "deploy.logs", "cancel",
+                "git.head", "git.changes")
+            .hasSize(9);
         assertThat(properties.getEndpoints().get("build.start").getMethod()).isEqualTo("POST");
         assertThat(properties.getEndpoints().get("build.start").getUrl())
             .isEqualTo("/open-api/build/start");
@@ -429,6 +430,12 @@ class CodingEngineTest {
             .isEqualTo("/open-api/deploy/{externalId}");
         assertThat(properties.getEndpoints().get("deploy.logs").getUrl())
             .isEqualTo("/open-api/deploy/{externalId}/logs?offset={offset}&limit={limit}");
+        assertThat(properties.getEndpoints().get("git.head").getResponseCommit())
+            .as("the rerun planner reads the branch head from this expression")
+            .isEqualTo("$.Response.Data.CommitSha");
+        assertThat(properties.getEndpoints().get("git.changes").getResponseValue())
+            .as("the shared-repo filter reads the changed flag from this expression")
+            .isEqualTo("$.Response.Data.Changed");
         assertThat(properties.getStatusMapping())
             .containsEntry("QUEUED", List.of("QUEUEING", "PENDING"))
             .containsEntry("SUCCESS", List.of("SUCCESS", "FINISHED"));

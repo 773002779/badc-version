@@ -24,6 +24,13 @@ public interface PipelineRepository {
     /** The aggregate root with its nodes and tasks, or {@code null} when it does not exist. */
     PipelineInstance loadInstance(long instanceId);
 
+    /**
+     * The most recent instance of a 变更项 (the newest release order's newest instance), with its
+     * nodes and tasks, or {@code null} when the item has never been published. Used by the rerun
+     * planner to find the resume node and by the rerun service to reuse the built image.
+     */
+    PipelineInstance latestInstanceOf(long itemId);
+
     /** One task row as a domain object, or {@code null} when it does not exist. */
     NodeTask loadTask(long taskId);
 

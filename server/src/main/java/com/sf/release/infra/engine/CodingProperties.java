@@ -53,6 +53,7 @@ public class CodingProperties {
         private String responseDigest;
         private String responseUrl;
         private String responseCommit;
+        private String responseValue;
 
         public String getMethod() {
             return method;
@@ -146,6 +147,18 @@ public class CodingProperties {
 
         public void setResponseCommit(String responseCommit) {
             this.responseCommit = responseCommit;
+        }
+
+        /**
+         * Optional JSONPath of a scalar answer for probe actions (for example whether a module
+         * path has commits since a baseline). It is not used by the build/deploy job adapter.
+         */
+        public String getResponseValue() {
+            return responseValue;
+        }
+
+        public void setResponseValue(String responseValue) {
+            this.responseValue = responseValue;
         }
     }
 }

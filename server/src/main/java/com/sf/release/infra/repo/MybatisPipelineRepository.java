@@ -91,6 +91,23 @@ public class MybatisPipelineRepository implements PipelineRepository {
     }
 
     @Override
+    public PipelineInstance latestInstanceOf(long itemId) {
+        ReleaseOrderPO order = orderMapper.selectOne(Wrappers.<ReleaseOrderPO>lambdaQuery()
+            .eq(ReleaseOrderPO::getItemId, itemId)
+            .orderByDesc(ReleaseOrderPO::getId)
+            .last("LIMIT 1"));
+        if (order == null) {
+            return null;
+        }
+        PipelineInstancePO instance = instanceMapper.selectOne(
+            Wrappers.<PipelineInstancePO>lambdaQuery()
+                .eq(PipelineInstancePO::getOrderId, order.getId())
+                .orderByDesc(PipelineInstancePO::getId)
+                .last("LIMIT 1"));
+        return instance == null ? null : loadInstance(instance.getId());
+    }
+
+    @Override
     public NodeTask loadTask(long taskId) {
         NodeTaskPO task = taskMapper.selectById(taskId);
         return task == null ? null : task.toDomain();

@@ -108,6 +108,7 @@ public class EndpointTemplateResolver {
             case "responseDigest" -> endpoint.setResponseDigest(value);
             case "responseUrl" -> endpoint.setResponseUrl(value);
             case "responseCommit" -> endpoint.setResponseCommit(value);
+            case "responseValue" -> endpoint.setResponseValue(value);
             default -> throw EngineException.unavailable(
                 "端点字段不可覆盖：" + field + "（action=" + action + "）");
         }

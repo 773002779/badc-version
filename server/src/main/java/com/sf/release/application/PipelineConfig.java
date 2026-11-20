@@ -5,8 +5,10 @@ import com.sf.release.domain.pipeline.NodeHandler;
 import com.sf.release.domain.pipeline.NodeHandlerRegistry;
 import com.sf.release.domain.pipeline.NodeTaskCompletionService;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
+import com.sf.release.domain.pipeline.RerunPlanner;
 import com.sf.release.domain.pipeline.handler.BuildNodeHandler;
 import com.sf.release.domain.pipeline.handler.TestDeployNodeHandler;
+import com.sf.release.domain.pipeline.port.GitCommitProbe;
 import com.sf.release.domain.pipeline.port.PipelineEventBus;
 import com.sf.release.domain.pipeline.port.PipelineLock;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
@@ -68,5 +70,14 @@ public class PipelineConfig {
                                                      PipelineEventBus eventBus) {
         return new PipelineOrchestrator(repository, completionService, pipelineLock, unitLease,
             transactionRunner, handlerRegistry, eventBus);
+    }
+
+    /**
+     * The rerun scope decision (Task 15). The planner is plain domain: its git probe is the
+     * infrastructure adapter and its last-instance lookup is the pipeline repository.
+     */
+    @Bean
+    public RerunPlanner rerunPlanner(GitCommitProbe commitProbe, PipelineRepository repository) {
+        return new RerunPlanner(commitProbe, repository::latestInstanceOf);
     }
 }

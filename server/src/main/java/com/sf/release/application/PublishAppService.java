@@ -4,10 +4,12 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.domain.pipeline.NodeTask;
+import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineFactory;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineNode;
 import com.sf.release.domain.pipeline.ReleaseOrder;
+import com.sf.release.domain.pipeline.TriggerType;
 import com.sf.release.domain.resource.EnvDe;
 import com.sf.release.domain.resource.UnitType;
 import com.sf.release.domain.task.ItemEvent;
@@ -67,7 +69,8 @@ import java.util.UUID;
  * itself means the lock was lost, so no release is attempted at all.
  *
  * <p><strong>Scope.</strong> Only online deployment-unit items are published here. The daily
- * pipeline, the second-party library pipeline and reruns belong to later tasks.
+ * pipeline and the second-party library pipeline belong to later tasks; the rerun use case
+ * ({@link RerunAppService}) reuses {@link #createRerunInstance} for its instance creation.
  */
 @Service
 public class PublishAppService {
@@ -166,14 +169,50 @@ public class PublishAppService {
         orderMapper.insert(orderPo);
         ReleaseOrder persistedOrder = order.withId(orderPo.getId());
 
-        List<EnvDe> envDes = envDeMapper.selectList(Wrappers.<EnvDePO>lambdaQuery()
+        List<EnvDe> envDes = loadEnvDes(unitId);
+        PipelineInstance instance = PipelineFactory.createOnline(persistedOrder, current, envDes);
+        persistInstance(instance, unitId, itemId);
+        log.info("release published: itemId={}, unitId={}, publishNo={}, pipelineNo={}",
+            itemId, unitId, persistedOrder.publishNo(), instance.pipelineNo());
+        return new PublishResult(persistedOrder.publishNo(), instance.pipelineNo());
+    }
+
+    /**
+     * Creates and persists the pipeline instance of a rerun under an existing 发布单. The caller
+     * owns the transaction and must already hold the unit lock (the sentinel reservation):
+     * this method binds the new instance id to it, exactly as the initial publish does.
+     *
+     * <p>Shared by {@link RerunAppService} so instance creation, node/task pre-generation and the
+     * lock bind have a single implementation. A lost lock surfaces as the internal
+     * {@link LockLostException}, whose business failure the caller rethrows.
+     */
+    PipelineInstance createRerunInstance(ReleaseOrder order, ReleaseItem item, long unitId,
+                                                TriggerType triggerType, NodeType fromNode,
+                                                String imageDigest, String commitSha) {
+        List<EnvDe> envDes = loadEnvDes(unitId);
+        PipelineInstance instance = PipelineFactory.createRerun(order, item, envDes,
+            triggerType, fromNode, imageDigest, commitSha);
+        persistInstance(instance, unitId, item.id());
+        log.info("rerun pipeline created: itemId={}, unitId={}, publishNo={}, pipelineNo={},"
+                + " triggerType={}, fromNode={}, imageDigest={}",
+            item.id(), unitId, order.publishNo(), instance.pipelineNo(),
+            instance.triggerType(), instance.currentNode(), imageDigest == null ? "<none>"
+                : imageDigest);
+        return instance;
+    }
+
+    private List<EnvDe> loadEnvDes(long unitId) {
+        return envDeMapper.selectList(Wrappers.<EnvDePO>lambdaQuery()
                 .eq(EnvDePO::getUnitId, unitId)
                 .orderByAsc(EnvDePO::getDeployBatchNo)
                 .orderByAsc(EnvDePO::getId))
             .stream()
             .map(EnvDePO::toDomain)
             .toList();
-        PipelineInstance instance = PipelineFactory.createOnline(persistedOrder, current, envDes);
+    }
+
+    /** Inserts the instance, binds the unit lock to it and pre-generates every node and task. */
+    private void persistInstance(PipelineInstance instance, long unitId, long itemId) {
         PipelineInstancePO instancePo = PipelineInstancePO.of(instance);
         instanceMapper.insert(instancePo);
         long instanceId = instancePo.getId();
@@ -188,11 +227,6 @@ public class PublishAppService {
                 taskMapper.insert(NodeTaskPO.of(task, instanceId));
             }
         }
-        log.info("release published: itemId={}, unitId={}, publishNo={}, pipelineNo={},"
-                + " instanceId={}, nodes={}",
-            itemId, unitId, persistedOrder.publishNo(), instance.pipelineNo(), instanceId,
-            instance.nodes().size());
-        return new PublishResult(persistedOrder.publishNo(), instance.pipelineNo());
     }
 
     /**
@@ -200,7 +234,7 @@ public class PublishAppService {
      * "known" by its instance id only after {@code bindInstance}; the acquisition time is
      * always part of the row.
      */
-    private BizException unitLocked(long unitId, long itemId) {
+    BizException unitLocked(long unitId, long itemId) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("unitId", unitId);
         payload.put("itemId", itemId);
@@ -238,16 +272,16 @@ public class PublishAppService {
      * Internal marker: {@code bindInstance} found the lock row gone, so the "lock lost" path
      * must not release anything (the row now belongs to somebody else, or to nobody).
      */
-    private static final class LockLostException extends RuntimeException {
+    static final class LockLostException extends RuntimeException {
 
         private final BizException failure;
 
-        private LockLostException(BizException failure) {
+        LockLostException(BizException failure) {
             super(failure.getMessage(), failure);
             this.failure = failure;
         }
 
-        private BizException failure() {
+        BizException failure() {
             return failure;
         }
     }
