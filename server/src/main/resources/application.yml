@@ -25,6 +25,10 @@ mybatis-plus:
       id-type: auto
 
 release:
+  engine:
+    # Outbound CODING calls require HTTPS. Enable only for an internal test tenant or a
+    # local MockWebServer; never for a production connection.
+    allow-insecure-http: false
   redis:
     # Redis-backed distributed lock is only wired when explicitly enabled.
     enabled: false

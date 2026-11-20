@@ -8,10 +8,12 @@ import com.sf.release.domain.engine.DeployCmd;
 import com.sf.release.domain.engine.EngineException;
 import com.sf.release.domain.engine.EngineResult;
 import com.sf.release.domain.engine.EngineStatus;
+import com.sf.release.domain.engine.JobKind;
 import com.sf.release.domain.engine.TriggerResult;
 import com.sf.release.infra.engine.CodingEngine;
 import com.sf.release.infra.engine.CodingProperties;
 import com.sf.release.infra.engine.EngineHttpClient;
+import com.sf.release.infra.engine.EngineProperties;
 import com.sf.release.infra.engine.EngineRegistry;
 import com.sf.release.infra.engine.EndpointTemplateResolver;
 import okhttp3.mockwebserver.Dispatcher;
@@ -40,19 +42,23 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
- * Task 10: the CODING adapter is driven by {@code /coding-endpoints.yml}, not by hard-coded
+ * Task 10: the CODING adapter is driven by {@code coding-endpoints.yml}, not by hard-coded
  * paths or field names. Every test loads the real bundled YAML through Spring's binder, then
  * points the resulting endpoint template at MockWebServer.
+ *
+ * <p>Covers the review amendments too: job-kind discriminated query/log endpoints, UNKNOWN
+ * as a non-failure status, no timeout retry on POST triggers, HTTPS enforcement, and the
+ * validated JSONPath subset.
  */
 @ExtendWith(OutputCaptureExtension.class)
 class CodingEngineTest {
 
     private static final String TOKEN = "tok-123";
-    private static final String NO_WAIT = "the retry sleeper is a no-op so backoff stays out of test time";
 
     private MockWebServer server;
     private CodingProperties properties;
     private EndpointTemplateResolver resolver;
+    private EngineProperties engineProperties;
     private String baseUrl;
 
     private final ObjectMapper json = new ObjectMapper();
@@ -64,6 +70,8 @@ class CodingEngineTest {
         baseUrl = "http://localhost:" + server.getPort();
         properties = loadBundledProperties();
         resolver = new EndpointTemplateResolver(properties);
+        engineProperties = new EngineProperties();
+        engineProperties.setAllowInsecureHttp(true);
     }
 
     @AfterEach
@@ -117,15 +125,15 @@ class CodingEngineTest {
     }
 
     @Test
-    void query_maps_representative_status_words_and_extracts_the_digest() {
+    void build_query_maps_representative_status_words_and_extracts_the_digest() throws Exception {
         server.enqueue(new MockResponse().setBody("{\"Data\":{\"Status\":\"QUEUEING\"}}"));
         server.enqueue(new MockResponse()
             .setBody("{\"Data\":{\"Status\":\"DEPLOYING\",\"Digest\":\"sha256:ab\"}}"));
         server.enqueue(new MockResponse().setBody("{\"Data\":{\"Status\":\"FINISHED\"}}"));
 
-        EngineResult queued = engine().query("j-1");
-        EngineResult running = engine().query("j-1");
-        EngineResult success = engine().query("j-1");
+        EngineResult queued = engine().query("j-1", JobKind.BUILD);
+        EngineResult running = engine().query("j-1", JobKind.BUILD);
+        EngineResult success = engine().query("j-1", JobKind.BUILD);
 
         assertThat(queued.status()).isEqualTo(EngineStatus.QUEUED);
         assertThat(queued.imageDigest())
@@ -135,6 +143,30 @@ class CodingEngineTest {
         assertThat(running.imageDigest()).isEqualTo("sha256:ab");
         assertThat(success.status()).isEqualTo(EngineStatus.SUCCESS);
         assertThat(success.imageDigest()).isNull();
+        assertThat(server.takeRequest().getPath()).isEqualTo("/open-api/build/j-1");
+        assertThat(server.takeRequest().getPath()).isEqualTo("/open-api/build/j-1");
+        assertThat(server.takeRequest().getPath()).isEqualTo("/open-api/build/j-1");
+    }
+
+    @Test
+    void deploy_query_hits_the_deploy_endpoint_not_the_build_one() throws Exception {
+        server.enqueue(new MockResponse()
+            .setBody("{\"Data\":{\"Status\":\"RUNNING\",\"Digest\":\"sha256:de\"}}"));
+
+        EngineResult result = engine().query("d-1", JobKind.DEPLOY);
+
+        assertThat(result.status()).isEqualTo(EngineStatus.RUNNING);
+        assertThat(result.imageDigest()).isEqualTo("sha256:de");
+        assertThat(server.takeRequest().getPath()).isEqualTo("/open-api/deploy/d-1");
+    }
+
+    @Test
+    void query_without_a_job_kind_fails_loudly_and_makes_no_request() {
+        Throwable thrown = catchThrowable(() -> engine().query("j-1", null));
+
+        assertThat(thrown).isInstanceOf(EngineException.class);
+        assertThat(thrown.getMessage()).contains("JobKind");
+        assertThat(server.getRequestCount()).isZero();
     }
 
     @Test
@@ -143,33 +175,25 @@ class CodingEngineTest {
         properties.getStatusMapping().put("#{QUEUED}", List.of("WAITING"));
         server.enqueue(new MockResponse().setBody("{\"Data\":{\"Status\":\"WAITING\"}}"));
 
-        assertThat(engine().query("j-1").status()).isEqualTo(EngineStatus.QUEUED);
+        assertThat(engine().query("j-1", JobKind.BUILD).status()).isEqualTo(EngineStatus.QUEUED);
     }
 
     @Test
-    void query_reports_an_unknown_status_word_without_guessing() {
+    void unmapped_status_word_becomes_unknown_instead_of_engine_unavailable(
+        CapturedOutput output) {
         server.enqueue(new MockResponse().setBody("{\"Data\":{\"Status\":\"MYSTERY\"}}"));
 
-        Throwable thrown = catchThrowable(() -> engine().query("j-1"));
+        EngineResult result = engine().query("j-1", JobKind.BUILD);
 
-        assertThat(thrown).isInstanceOf(EngineException.class);
-        assertThat(((EngineException) thrown).getError()).isEqualTo(BizError.ENGINE_UNAVAILABLE);
-        assertThat(thrown.getMessage()).contains("MYSTERY");
-    }
-
-    @Test
-    void engine_5xx_is_retried_three_times_then_fails() {
-        for (int i = 0; i < 3; i++) {
-            server.enqueue(new MockResponse().setResponseCode(500).setBody("boom"));
-        }
-
-        Throwable thrown = catchThrowable(() -> engine().triggerBuild(buildCmd()));
-
-        assertThat(thrown).isInstanceOf(EngineException.class);
-        assertThat(((EngineException) thrown).getError()).isEqualTo(BizError.ENGINE_UNAVAILABLE);
-        assertThat(thrown.getMessage()).contains("500");
-        assertThat(thrown.getMessage()).doesNotContain(TOKEN);
-        assertThat(server.getRequestCount()).isEqualTo(3);
+        assertThat(result.status())
+            .as("an unmapped vendor word must not trigger the failure-to-TIMEOUT path")
+            .isEqualTo(EngineStatus.UNKNOWN);
+        assertThat(result.message()).isEqualTo("MYSTERY");
+        assertThat(output.getAll())
+            .as("the raw word must be visible in the log so the mapping can be extended")
+            .contains("WARN")
+            .contains("MYSTERY")
+            .contains("UNKNOWN");
     }
 
     @Test
@@ -191,6 +215,21 @@ class CodingEngineTest {
     }
 
     @Test
+    void engine_5xx_is_retried_three_times_then_fails() {
+        for (int i = 0; i < 3; i++) {
+            server.enqueue(new MockResponse().setResponseCode(500).setBody("boom"));
+        }
+
+        Throwable thrown = catchThrowable(() -> engine().triggerBuild(buildCmd()));
+
+        assertThat(thrown).isInstanceOf(EngineException.class);
+        assertThat(((EngineException) thrown).getError()).isEqualTo(BizError.ENGINE_UNAVAILABLE);
+        assertThat(thrown.getMessage()).contains("500");
+        assertThat(thrown.getMessage()).doesNotContain(TOKEN);
+        assertThat(server.getRequestCount()).isEqualTo(3);
+    }
+
+    @Test
     void engine_4xx_is_not_retried() {
         server.enqueue(new MockResponse().setResponseCode(400).setBody("bad request"));
 
@@ -203,24 +242,29 @@ class CodingEngineTest {
     }
 
     @Test
-    void read_timeout_maps_to_engine_timeout() {
-        server.setDispatcher(new Dispatcher() {
-            @Override
-            public MockResponse dispatch(RecordedRequest request) {
-                return new MockResponse()
-                    .setBody("{\"Data\":{\"Status\":\"RUNNING\"}}")
-                    .setBodyDelay(1, java.util.concurrent.TimeUnit.SECONDS);
-            }
-        });
-        EngineHttpClient impatient = new EngineHttpClient(
-            Duration.ofSeconds(5), Duration.ofMillis(200), 3,
-            List.of(Duration.ofSeconds(1), Duration.ofSeconds(3)), duration -> { });
+    void get_read_timeout_is_retried_three_times_then_engine_timeout() {
+        server.setDispatcher(delayedBody(1, java.util.concurrent.TimeUnit.SECONDS));
 
-        Throwable thrown = catchThrowable(() -> engine(impatient).query("j-1"));
+        Throwable thrown = catchThrowable(() -> engine(impatient()).query("j-1", JobKind.BUILD));
 
         assertThat(thrown).isInstanceOf(EngineException.class);
         assertThat(((EngineException) thrown).getError()).isEqualTo(BizError.ENGINE_TIMEOUT);
+        assertThat(thrown.getMessage()).contains("尝试 3 次");
         assertThat(server.getRequestCount()).isEqualTo(3);
+    }
+
+    @Test
+    void post_trigger_timeout_is_not_retried_to_avoid_duplicate_jobs() {
+        server.setDispatcher(delayedBody(1, java.util.concurrent.TimeUnit.SECONDS));
+
+        Throwable thrown = catchThrowable(() -> engine(impatient()).triggerBuild(buildCmd()));
+
+        assertThat(thrown).isInstanceOf(EngineException.class);
+        assertThat(((EngineException) thrown).getError()).isEqualTo(BizError.ENGINE_TIMEOUT);
+        assertThat(thrown.getMessage()).contains("尝试 1 次");
+        assertThat(server.getRequestCount())
+            .as("a timed-out POST may already have created the job")
+            .isEqualTo(1);
     }
 
     @Test
@@ -261,14 +305,25 @@ class CodingEngineTest {
     }
 
     @Test
-    void logs_returns_the_response_body_and_passes_offset_and_limit() throws Exception {
+    void build_logs_returns_the_response_body_and_passes_offset_and_limit() throws Exception {
         server.enqueue(new MockResponse().setBody("line-1\nline-2"));
 
-        String logs = engine().logs("j-9", 0, 100);
+        String logs = engine().logs("j-9", JobKind.BUILD, 0, 100);
 
         assertThat(logs).isEqualTo("line-1\nline-2");
         assertThat(server.takeRequest().getPath())
             .isEqualTo("/open-api/build/j-9/logs?offset=0&limit=100");
+    }
+
+    @Test
+    void deploy_logs_uses_the_deploy_log_endpoint() throws Exception {
+        server.enqueue(new MockResponse().setBody("deploy-line"));
+
+        String logs = engine().logs("d-9", JobKind.DEPLOY, 5, 50);
+
+        assertThat(logs).isEqualTo("deploy-line");
+        assertThat(server.takeRequest().getPath())
+            .isEqualTo("/open-api/deploy/d-9/logs?offset=5&limit=50");
     }
 
     @Test
@@ -311,11 +366,10 @@ class CodingEngineTest {
 
     @Test
     void bundled_yaml_declares_all_endpoints_and_the_status_mapping() {
-        assertThat(properties.getQueryAction()).isEqualTo("build.query");
         assertThat(properties.getEndpoints())
             .containsKeys("build.start", "build.query", "build.logs",
-                "deploy.start", "deploy.query", "cancel")
-            .hasSize(6);
+                "deploy.start", "deploy.query", "deploy.logs", "cancel")
+            .hasSize(7);
         assertThat(properties.getEndpoints().get("build.start").getMethod()).isEqualTo("POST");
         assertThat(properties.getEndpoints().get("build.start").getUrl())
             .isEqualTo("/open-api/build/start");
@@ -323,9 +377,63 @@ class CodingEngineTest {
             .isEqualTo("$.Response.Data.JobId");
         assertThat(properties.getEndpoints().get("build.query").getUrl())
             .isEqualTo("/open-api/build/{externalId}");
+        assertThat(properties.getEndpoints().get("deploy.query").getUrl())
+            .isEqualTo("/open-api/deploy/{externalId}");
+        assertThat(properties.getEndpoints().get("deploy.logs").getUrl())
+            .isEqualTo("/open-api/deploy/{externalId}/logs?offset={offset}&limit={limit}");
         assertThat(properties.getStatusMapping())
             .containsEntry("QUEUED", List.of("QUEUEING", "PENDING"))
             .containsEntry("SUCCESS", List.of("SUCCESS", "FINISHED"));
+    }
+
+    @Test
+    void jsonpath_bracket_quotes_and_numeric_indexes_are_supported() {
+        CodingProperties.Endpoint query = properties.getEndpoints().get("build.query");
+        query.setResponseStatus("$['Data']['Jobs'][0]['Status']");
+        query.setResponseDigest("$['Data']['Digest']");
+        server.enqueue(new MockResponse().setBody(
+            "{\"Data\":{\"Jobs\":[{\"Status\":\"RUNNING\"}],\"Digest\":\"sha256:cd\"}}"));
+
+        EngineResult result = engine().query("j-1", JobKind.BUILD);
+
+        assertThat(result.status()).isEqualTo(EngineStatus.RUNNING);
+        assertThat(result.imageDigest()).isEqualTo("sha256:cd");
+    }
+
+    @Test
+    void unsupported_jsonpath_is_rejected_at_startup_naming_action_and_expression() {
+        properties.getEndpoints().get("build.query").setResponseStatus("$.Data[*].Status");
+
+        Throwable thrown = catchThrowable(this::engine);
+
+        assertThat(thrown).isInstanceOf(EngineException.class);
+        assertThat(((EngineException) thrown).getError()).isEqualTo(BizError.ENGINE_UNAVAILABLE);
+        assertThat(thrown.getMessage())
+            .contains("build.query")
+            .contains("$.Data[*].Status");
+        assertThat(server.getRequestCount()).isZero();
+    }
+
+    @Test
+    void plain_http_base_url_is_rejected_unless_the_test_switch_allows_it() {
+        EngineProperties secure = new EngineProperties();
+        Throwable thrown = catchThrowable(
+            () -> engine(defaultHttp(), secure).triggerBuild(buildCmd()));
+
+        assertThat(thrown).isInstanceOf(EngineException.class);
+        assertThat(((EngineException) thrown).getError()).isEqualTo(BizError.ENGINE_UNAVAILABLE);
+        assertThat(thrown.getMessage())
+            .contains("HTTPS")
+            .doesNotContain(TOKEN);
+        assertThat(server.getRequestCount()).isZero();
+
+        EngineProperties insecure = new EngineProperties();
+        insecure.setAllowInsecureHttp(true);
+        server.enqueue(new MockResponse()
+            .setBody("{\"Response\":{\"Data\":{\"JobId\":\"j-123\"}}}"));
+        TriggerResult result = engine(defaultHttp(), insecure).triggerBuild(buildCmd());
+        assertThat(result.externalId()).isEqualTo("j-123");
+        assertThat(server.getRequestCount()).isEqualTo(1);
     }
 
     // ------------------------------------------------------------------ helpers
@@ -335,13 +443,33 @@ class CodingEngineTest {
     }
 
     private CodingEngine engine(EngineHttpClient http) {
-        return new CodingEngine(properties, resolver, json, http,
+        return engine(http, engineProperties);
+    }
+
+    private CodingEngine engine(EngineHttpClient http, EngineProperties properties) {
+        return new CodingEngine(this.properties, resolver, json, http, properties,
             () -> new CodingEngine.Connection(baseUrl, TOKEN));
     }
 
     private EngineHttpClient defaultHttp() {
         return new EngineHttpClient(Duration.ofSeconds(5), Duration.ofSeconds(5), 3,
             List.of(Duration.ofSeconds(1), Duration.ofSeconds(3)), duration -> { });
+    }
+
+    private EngineHttpClient impatient() {
+        return new EngineHttpClient(Duration.ofSeconds(5), Duration.ofMillis(200), 3,
+            List.of(Duration.ofSeconds(1), Duration.ofSeconds(3)), duration -> { });
+    }
+
+    private static Dispatcher delayedBody(long delay, java.util.concurrent.TimeUnit unit) {
+        return new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                return new MockResponse()
+                    .setBody("{\"Data\":{\"Status\":\"RUNNING\"}}")
+                    .setBodyDelay(delay, unit);
+            }
+        };
     }
 
     private static BuildCmd buildCmd() {

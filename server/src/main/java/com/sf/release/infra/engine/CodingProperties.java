@@ -23,7 +23,6 @@ public class CodingProperties {
 
     private Map<String, Endpoint> endpoints = new LinkedHashMap<>();
     private Map<String, List<String>> statusMapping = new LinkedHashMap<>();
-    private String queryAction = "build.query";
 
     public Map<String, Endpoint> getEndpoints() {
         return endpoints;
@@ -39,19 +38,6 @@ public class CodingProperties {
 
     public void setStatusMapping(Map<String, List<String>> statusMapping) {
         this.statusMapping = statusMapping == null ? new LinkedHashMap<>() : new LinkedHashMap<>(statusMapping);
-    }
-
-    /**
-     * Which endpoint action {@code CicdEngine.query} uses. Phase 1 queries builds; a deploy
-     * status query can be selected by configuration once it has its own caller.
-     */
-    public String getQueryAction() {
-        return queryAction == null || queryAction.isBlank() ? "build.query" : queryAction;
-    }
-
-    public void setQueryAction(String queryAction) {
-        this.queryAction = queryAction == null || queryAction.isBlank()
-            ? "build.query" : queryAction.trim();
     }
 
     /** One endpoint template: HTTP method, URL pattern and optional JSONPath mappings. */

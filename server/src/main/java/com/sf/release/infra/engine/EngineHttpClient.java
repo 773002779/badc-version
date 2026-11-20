@@ -25,8 +25,11 @@ import java.util.concurrent.TimeoutException;
  *
  * <ul>
  *   <li>connect timeout 5s, read timeout 30s (both injectable);</li>
- *   <li>HTTP 5xx and I/O failures: at most 3 attempts, sleeping 1s then 3s between them
- *       (the sleeper is injectable so tests do not wait);</li>
+ *   <li>HTTP 5xx (an unambiguous rejection): at most 3 attempts for every method, sleeping
+ *       1s then 3s between them (the sleeper is injectable so tests do not wait);</li>
+ *   <li>transport failures (read timeout or other I/O): retried only for {@code GET} actions.
+ *       A {@code POST} trigger may already have created a job, so it is attempted once and
+ *       never retried on timeout/I/O — retrying could create a duplicate job;</li>
  *   <li>HTTP 4xx: never retried, the reason is surfaced immediately;</li>
  *   <li>a read timeout is reported as {@link com.sf.release.common.BizError#ENGINE_TIMEOUT},
  *       every other failure as {@link com.sf.release.common.BizError#ENGINE_UNAVAILABLE}.</li>
@@ -91,8 +94,11 @@ public final class EngineHttpClient {
      */
     public HttpResult send(String method, URI uri, Map<String, String> headers, String body) {
         String target = Masker.mask(uri.toString());
+        boolean retryTransport = "GET".equalsIgnoreCase(method);
         Throwable lastIo = null;
+        int attemptsMade = 0;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            attemptsMade = attempt;
             try {
                 HttpRequest request = request(method, uri, headers, body);
                 HttpResponse<String> response = sendWithReadDeadline(request);
@@ -121,7 +127,7 @@ public final class EngineHttpClient {
                         + errorDetail(response.body()));
             } catch (HttpTimeoutException ex) {
                 lastIo = ex;
-                if (attempt < maxAttempts) {
+                if (retryTransport && attempt < maxAttempts) {
                     log.warn("coding engine read timeout on {} {} (attempt {}/{}), retrying",
                         method, target, attempt, maxAttempts);
                     pause(attempt);
@@ -129,7 +135,7 @@ public final class EngineHttpClient {
                 }
             } catch (IOException ex) {
                 lastIo = ex;
-                if (attempt < maxAttempts) {
+                if (retryTransport && attempt < maxAttempts) {
                     log.warn("coding engine I/O failure on {} {} (attempt {}/{}), retrying: {}",
                         method, target, attempt, maxAttempts, ex.getClass().getSimpleName());
                     pause(attempt);
@@ -140,17 +146,20 @@ public final class EngineHttpClient {
                 throw EngineException.unavailable(
                     "引擎调用被中断：" + method + " " + target);
             }
+            // A POST transport failure is ambiguous: the engine may already have created the
+            // job, so it is not retried even when attempts remain.
+            break;
         }
         if (lastIo instanceof HttpTimeoutException) {
             throw EngineException.timeout(
                 "引擎调用超时：" + method + " " + target
                     + "（readTimeout=" + readTimeout.toMillis() + "ms，尝试 "
-                    + maxAttempts + " 次）");
+                    + attemptsMade + " 次）");
         }
         throw EngineException.unavailable(
             "引擎调用失败：" + method + " " + target
                 + "（" + (lastIo == null ? "unknown" : lastIo.getClass().getSimpleName())
-                + "，尝试 " + maxAttempts + " 次）");
+                + "，尝试 " + attemptsMade + " 次）");
     }
 
     /**

@@ -22,14 +22,20 @@ public interface CicdEngine {
     TriggerResult triggerDeploy(DeployCmd cmd);
 
     /**
-     * Queries a job started earlier. A missing image digest is returned as {@code null}:
-     * deciding what a missing digest means (for example blocking a production deploy) is
-     * the caller's policy, not the adapter's.
+     * Queries a build or deploy job started earlier. The kind selects the engine endpoint
+     * ({@code build.query} / {@code deploy.query}); it cannot be inferred from the id.
+     *
+     * <p>A missing image digest is returned as {@code null}: deciding what a missing digest
+     * means (for example blocking a production deploy) is the caller's policy, not the
+     * adapter's.
      */
-    EngineResult query(String externalId);
+    EngineResult query(String externalId, JobKind kind);
 
-    /** Reads the raw log content for a job; offset and limit are passed through to the engine. */
-    String logs(String externalId, int offset, int limit);
+    /**
+     * Reads the raw log content for a build or deploy job; offset and limit are passed
+     * through to the engine.
+     */
+    String logs(String externalId, JobKind kind, int offset, int limit);
 
     /** Cancels a running job; an engine that cannot cancel reports the failure as an exception. */
     void cancel(String externalId);

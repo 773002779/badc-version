@@ -11,6 +11,7 @@ import com.sf.release.domain.engine.DeployCmd;
 import com.sf.release.domain.engine.EngineException;
 import com.sf.release.domain.engine.EngineResult;
 import com.sf.release.domain.engine.EngineStatus;
+import com.sf.release.domain.engine.JobKind;
 import com.sf.release.domain.engine.TriggerResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,23 +28,31 @@ import java.util.function.Supplier;
  * tenant was reachable while implementing this task).
  *
  * <p><strong>Configuration, not code.</strong> Paths, HTTP methods, request-body field names
- * and response {@code $.a.b} expressions come from {@code coding-endpoints.yml}; engine
- * status words are mapped by {@code coding.statusMapping}. Anything guessed from incomplete
- * documentation is therefore correctable by editing YAML only.
+ * and response expressions come from {@code coding-endpoints.yml}; engine status words are
+ * mapped by {@code coding.statusMapping}. Anything guessed from incomplete documentation is
+ * therefore correctable by editing YAML only. Every configured expression is validated when
+ * the adapter is constructed, so an unsupported path fails at startup instead of silently
+ * never matching.
+ *
+ * <p><strong>Job kind.</strong> Build and deploy jobs use different query/log endpoints, so
+ * {@link #query(String, JobKind)} and {@link #logs(String, JobKind, int, int)} take the kind
+ * recorded when the job was triggered; there is no process-wide default.
  *
  * <p><strong>Credentials.</strong> The caller supplies the current connection (base URL plus
  * the already-decrypted token). The token is only ever placed in the {@code Authorization}
- * header and is redacted from every log line and exception message.
+ * header and is redacted from every log line and exception message. Outbound calls must be
+ * HTTPS unless {@code release.engine.allow-insecure-http=true} is set for an internal test
+ * tenant.
  *
- * <p><strong>Digest.</strong> {@link #query(String)} returns a {@code null} digest when the
- * configured expression is absent from the response; it never fails the call for that.
+ * <p><strong>Digest.</strong> {@link #query(String, JobKind)} returns a {@code null} digest
+ * when the configured expression is absent from the response; it never fails the call for
+ * that.
  */
 public class CodingEngine implements CicdEngine {
 
     public static final String ENGINE_NAME = "CODING";
 
     static final String ACTION_BUILD_START = "build.start";
-    static final String ACTION_BUILD_LOGS = "build.logs";
     static final String ACTION_DEPLOY_START = "deploy.start";
     static final String ACTION_CANCEL = "cancel";
 
@@ -54,14 +63,16 @@ public class CodingEngine implements CicdEngine {
     private final EndpointTemplateResolver resolver;
     private final ObjectMapper objectMapper;
     private final EngineHttpClient http;
+    private final EngineProperties engineProperties;
     private final Supplier<Connection> connectionSupplier;
 
     public CodingEngine(CodingProperties properties,
                         EndpointTemplateResolver resolver,
                         ObjectMapper objectMapper,
                         EngineHttpClient http,
+                        EngineProperties engineProperties,
                         Connection connection) {
-        this(properties, resolver, objectMapper, http, () -> connection);
+        this(properties, resolver, objectMapper, http, engineProperties, () -> connection);
     }
 
     /**
@@ -73,15 +84,18 @@ public class CodingEngine implements CicdEngine {
                         EndpointTemplateResolver resolver,
                         ObjectMapper objectMapper,
                         EngineHttpClient http,
+                        EngineProperties engineProperties,
                         Supplier<Connection> connectionSupplier) {
         if (properties == null || resolver == null || objectMapper == null || http == null
-                || connectionSupplier == null) {
+                || engineProperties == null || connectionSupplier == null) {
             throw new IllegalArgumentException("CodingEngine dependencies are required");
         }
+        validateConfiguredExpressions(properties);
         this.properties = properties;
         this.resolver = resolver;
         this.objectMapper = objectMapper;
         this.http = http;
+        this.engineProperties = engineProperties;
         this.connectionSupplier = connectionSupplier;
     }
 
@@ -152,10 +166,10 @@ public class CodingEngine implements CicdEngine {
         return new TriggerResult(externalId, externalUrl);
     }
 
-    /** Queries the action configured by {@code coding.query-action} (default build.query). */
+    /** Queries {@code build.query} or {@code deploy.query} according to the job kind. */
     @Override
-    public EngineResult query(String externalId) {
-        String action = properties.getQueryAction();
+    public EngineResult query(String externalId, JobKind kind) {
+        String action = action(kind, "query");
         CodingProperties.Endpoint endpoint = endpoint(action);
         String statusExpression = endpoint.getResponseStatus();
         if (statusExpression == null || statusExpression.isBlank()) {
@@ -176,14 +190,15 @@ public class CodingEngine implements CicdEngine {
         return new EngineResult(status, digest, word);
     }
 
-    /** Returns the raw log body reported by the engine. */
+    /** Returns the raw log body of a build ({@code build.logs}) or deploy job. */
     @Override
-    public String logs(String externalId, int offset, int limit) {
+    public String logs(String externalId, JobKind kind, int offset, int limit) {
+        String action = action(kind, "logs");
         Map<String, String> vars = new LinkedHashMap<>();
         put(vars, "externalId", requireExternalId(externalId));
         put(vars, "offset", String.valueOf(offset));
         put(vars, "limit", String.valueOf(limit));
-        EngineHttpClient.HttpResult result = execute(ACTION_BUILD_LOGS, vars);
+        EngineHttpClient.HttpResult result = execute(action, vars);
         return result.body() == null ? "" : result.body();
     }
 
@@ -201,6 +216,7 @@ public class CodingEngine implements CicdEngine {
         }
         EndpointTemplateResolver.ResolvedCall call = resolver.resolve(action, vars);
         String url = absolutize(connection.baseUrl(), call.url());
+        validateOutboundScheme(url, connection);
         Map<String, String> headers = new LinkedHashMap<>(call.headers());
         headers.put("Authorization", "Bearer " + connection.token());
         headers.putIfAbsent("Accept", "application/json");
@@ -228,6 +244,14 @@ public class CodingEngine implements CicdEngine {
         return endpoint;
     }
 
+    private static String action(JobKind kind, String suffix) {
+        if (kind == null) {
+            throw EngineException.unavailable(
+                "任务类型（JobKind）不能为空，无法确定 " + suffix + " 端点");
+        }
+        return kind.name().toLowerCase(Locale.ROOT) + "." + suffix;
+    }
+
     private static String absolutize(String baseUrl, String url) {
         if (url.startsWith("http://") || url.startsWith("https://")) {
             return url;
@@ -235,6 +259,19 @@ public class CodingEngine implements CicdEngine {
         String base = baseUrl.endsWith("/")
             ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         return url.startsWith("/") ? base + url : base + "/" + url;
+    }
+
+    private void validateOutboundScheme(String url, Connection connection) {
+        if (engineProperties.isAllowInsecureHttp()) {
+            return;
+        }
+        if (url.toLowerCase(Locale.ROOT).startsWith("https://")) {
+            return;
+        }
+        throw EngineException.unavailable(redact(
+            "CODING 出站地址必须使用 HTTPS：" + url
+                + "（仅内网测试可配置 release.engine.allow-insecure-http=true）",
+            connection));
     }
 
     private JsonNode parse(EngineHttpClient.HttpResult result, String action) {
@@ -265,9 +302,11 @@ public class CodingEngine implements CicdEngine {
                 }
             }
         }
-        throw EngineException.unavailable(
-            "未识别的引擎状态词：" + normalized + "（action=" + action
-                + "，请检查 coding.statusMapping）");
+        // A vendor word we have not mapped yet is a configuration gap, not an engine outage:
+        // report UNKNOWN and keep the raw word so the operator can extend statusMapping.
+        log.warn("coding engine returned an unmapped status word: {} (action={}), "
+            + "reporting UNKNOWN", normalized, action);
+        return EngineStatus.UNKNOWN;
     }
 
     private static EngineStatus parseStatusKey(String key, String action) {
@@ -286,14 +325,19 @@ public class CodingEngine implements CicdEngine {
     }
 
     /**
-     * Extracts one JSONPath-lite expression ({@code $.a.b[0].c}) from a response.
+     * Extracts one configured JSONPath-subset expression from a response.
      * Missing nodes and non-value nodes yield {@code null}.
      */
     private static String text(JsonNode root, String expression, String action) {
         if (expression == null || expression.isBlank()) {
             return null;
         }
-        JsonNode node = path(root, expression.trim(), action);
+        JsonNode node;
+        try {
+            node = JsonPathLite.read(root, expression.trim());
+        } catch (IllegalArgumentException ex) {
+            throw invalidExpression(action, "响应", expression, ex);
+        }
         if (node == null || node.isMissingNode() || node.isNull() || !node.isValueNode()) {
             return null;
         }
@@ -301,51 +345,46 @@ public class CodingEngine implements CicdEngine {
         return value == null || value.isBlank() ? null : value.trim();
     }
 
-    private static JsonNode path(JsonNode root, String expression, String action) {
-        if (root == null) {
-            return null;
-        }
-        if (!expression.startsWith("$")) {
-            throw EngineException.unavailable(
-                "JSONPath 表达式必须以 $ 开头：" + expression + "（action=" + action + "）");
-        }
-        JsonNode node = root;
-        int i = 1;
-        while (i < expression.length()) {
-            char ch = expression.charAt(i);
-            if (ch == '.') {
-                int start = ++i;
-                while (i < expression.length()
-                        && expression.charAt(i) != '.'
-                        && expression.charAt(i) != '[') {
-                    i++;
-                }
-                if (start == i) {
-                    throw badPath(expression, action);
-                }
-                node = node == null || !node.isObject()
-                    ? null : node.get(expression.substring(start, i));
-            } else if (ch == '[') {
-                int end = expression.indexOf(']', i);
-                if (end < 0) {
-                    throw badPath(expression, action);
-                }
-                String index = expression.substring(i + 1, end).trim();
-                if (index.isEmpty() || !index.chars().allMatch(Character::isDigit)) {
-                    throw badPath(expression, action);
-                }
-                node = node == null || !node.isArray() ? null : node.get(Integer.parseInt(index));
-                i = end + 1;
-            } else {
-                throw badPath(expression, action);
-            }
-        }
-        return node;
+    /**
+     * Fail-fast startup check: every configured response expression is parsed once when the
+     * adapter is constructed. A typo or unsupported syntax names the action and expression
+     * instead of silently never matching.
+     */
+    private static void validateConfiguredExpressions(CodingProperties properties) {
+        names(properties).forEach((action, endpoint) -> {
+            validateExpression(action, "responseId", endpoint.getResponseId());
+            validateExpression(action, "responseStatus", endpoint.getResponseStatus());
+            validateExpression(action, "responseDigest", endpoint.getResponseDigest());
+            validateExpression(action, "responseUrl", endpoint.getResponseUrl());
+        });
     }
 
-    private static EngineException badPath(String expression, String action) {
+    private static Map<String, CodingProperties.Endpoint> names(CodingProperties properties) {
+        Map<String, CodingProperties.Endpoint> endpoints = new LinkedHashMap<>();
+        properties.getEndpoints().forEach((action, endpoint) -> {
+            if (action != null && endpoint != null) {
+                endpoints.put(action, endpoint);
+            }
+        });
+        return endpoints;
+    }
+
+    private static void validateExpression(String action, String field, String expression) {
+        if (expression == null || expression.isBlank()) {
+            return;
+        }
+        try {
+            JsonPathLite.validate(expression);
+        } catch (IllegalArgumentException ex) {
+            throw invalidExpression(action, field, expression, ex);
+        }
+    }
+
+    private static EngineException invalidExpression(String action, String field,
+                                                      String expression, Exception cause) {
         return EngineException.unavailable(
-            "JSONPath 表达式不合法：" + expression + "（action=" + action + "）");
+            "端点 action=" + action + " 的 " + field + " JSONPath 表达式不合法："
+                + expression + "（" + cause.getMessage() + "）");
     }
 
     private static String requireExternalId(String externalId) {
@@ -398,5 +437,4 @@ public class CodingEngine implements CicdEngine {
             return "Connection[baseUrl=" + baseUrl + ", token=" + REDACTED + "]";
         }
     }
-
-    }
+}

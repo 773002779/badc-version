@@ -10,20 +10,27 @@
 #   build.logs   : externalId, offset, limit
 #   deploy.start : unitId, taskId, envKind, deName, imageDigest, pipelineNo, attempt
 #   deploy.query : externalId
+#   deploy.logs  : externalId, offset, limit
 #   cancel       : externalId
 # A missing/blank variable is an error that names the placeholder; it never renders "".
 #
 # Map keys that contain a dot use the Spring "[key]" form, otherwise binding would treat
-# "build.start" as two nested levels.
+# "build.start" as two nested levels. The job kind selects "build.query"/"build.logs" or
+# "deploy.query"/"deploy.logs"; there is no global query action.
+#
+# Response expressions are the deliberately small JSONPath subset supported by
+# JsonPathLite: $.Data.Status, $['Data']['Status'], $.Data.Jobs[0].Status and
+# $['Data']['Jobs'][0]['Status']. Wildcards (*), recursive descent (..), filters and
+# slices are NOT supported; the adapter rejects such an expression at startup, naming the
+# action and expression (no silently-never-matching mapping).
+#
+# Outbound calls must be HTTPS. For an internal test tenant or MockWebServer only, set
+# release.engine.allow-insecure-http=true; it is false by default.
 #
 # Paths, field names and response expressions below are the documented shape guessed for
 # phase 1 — no CODING tenant was reachable to verify them. They are configuration on
 # purpose (see docs/tech-design/发版流水线-技术方案-v1.0.md §6.1/§6.2).
 coding:
-  # Which action CicdEngine.query() uses. Switch to deploy.query once deploy reconciliation
-  # gets its own caller.
-  queryAction: build.query
-
   endpoints:
     "[build.start]":
       method: POST
@@ -55,12 +62,17 @@ coding:
       responseStatus: "$.Data.Status"
       responseDigest: "$.Data.Digest"
 
+    "[deploy.logs]":
+      method: GET
+      url: "/open-api/deploy/{externalId}/logs?offset={offset}&limit={limit}"
+
     "[cancel]":
       method: POST
       url: "/open-api/job/{externalId}/cancel"
 
   # Engine word (case-insensitive) -> platform EngineStatus. A word absent from this map is
-  # reported as an engine error naming the word, so an unknown vocabulary is visible.
+  # reported as UNKNOWN (keeping the raw word) and logged at WARN, so an unmapped vocabulary
+  # is visible without being mistaken for an engine outage.
   statusMapping:
     QUEUED: [QUEUEING, PENDING]
     RUNNING: [RUNNING, DEPLOYING]
