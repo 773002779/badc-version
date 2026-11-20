@@ -10,9 +10,11 @@ import com.sf.release.domain.task.TaskMember;
 import com.sf.release.domain.task.TaskProgress;
 import com.sf.release.domain.task.TaskStatus;
 import com.sf.release.infra.repo.AppUserRepository;
+import com.sf.release.infra.repo.ReleaseItemMapper;
 import com.sf.release.infra.repo.ReleaseTaskMapper;
 import com.sf.release.infra.repo.ReleaseTaskMemberMapper;
 import com.sf.release.infra.repo.SubsystemMapper;
+import com.sf.release.infra.repo.po.ReleaseItemPO;
 import com.sf.release.infra.repo.po.ReleaseTaskMemberPO;
 import com.sf.release.infra.repo.po.ReleaseTaskPO;
 import com.sf.release.infra.security.UserContext;
@@ -40,9 +42,8 @@ import java.util.Map;
  * addressed to them (C22).
  *
  * <p><strong>Progress.</strong> {@code done/total} over the 变更项 of the task and the
- * 「有阻塞」 flag (FR-T-04 / J9). The {@code release_item} table does not exist in Task 7,
- * so a task has no items yet and its progress is zero; the item statuses are supplied by
- * Task 8 and summarised by {@link TaskProgress} over {@link ItemStatus}.
+ * 「有阻塞」 flag (FR-T-04 / J9), computed from the real {@code release_item.status} values
+ * and never persisted. A task without items has rate {@code 0} and no blocking item.
  */
 @Service
 public class TaskAppService {
@@ -54,15 +55,18 @@ public class TaskAppService {
 
     private final ReleaseTaskMapper taskMapper;
     private final ReleaseTaskMemberMapper memberMapper;
+    private final ReleaseItemMapper itemMapper;
     private final SubsystemMapper subsystemMapper;
     private final AppUserRepository appUserRepository;
 
     public TaskAppService(ReleaseTaskMapper taskMapper,
                           ReleaseTaskMemberMapper memberMapper,
+                          ReleaseItemMapper itemMapper,
                           SubsystemMapper subsystemMapper,
                           AppUserRepository appUserRepository) {
         this.taskMapper = taskMapper;
         this.memberMapper = memberMapper;
+        this.itemMapper = itemMapper;
         this.subsystemMapper = subsystemMapper;
         this.appUserRepository = appUserRepository;
     }
@@ -134,9 +138,15 @@ public class TaskAppService {
      */
     public ProgressView progress(long taskId) {
         loadTask(taskId);
-        // release_item arrives with Task 8, so a task has no items yet. The rules below are
-        // already defined over ItemStatus; Task 8 only has to pass the real statuses in.
-        TaskProgress progress = TaskProgress.of(List.of());
+        // Task 8 owns release_item; the state machine writes its status, the progress rule
+        // only reads it (FR-T-04 / J9).
+        List<ItemStatus> statuses = itemMapper.selectList(Wrappers.<ReleaseItemPO>lambdaQuery()
+                .eq(ReleaseItemPO::getTaskId, taskId)
+                .orderByAsc(ReleaseItemPO::getId))
+            .stream()
+            .map(po -> po.toDomain().status())
+            .toList();
+        TaskProgress progress = TaskProgress.of(statuses);
         return new ProgressView(progress.done(), progress.total(), progress.rate(),
             progress.hasBlocking());
     }

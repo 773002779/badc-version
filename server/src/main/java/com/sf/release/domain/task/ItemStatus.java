@@ -13,6 +13,12 @@ import java.util.Set;
  * deliberately not in that set: it is the success end state and may still be rolled back,
  * so a {@link #isBlocking()} item is {@code !isDone() && !isTerminal()} — exactly the
  * 「有阻塞」 definition of FR-T-04 / J9.
+ *
+ * <p>Note that "terminal" here means "no longer blocking", <em>not</em> "no outgoing
+ * events": {@link #DONE} still accepts {@code ROLLBACK}, and {@link #GATE_FAILED},
+ * {@link #FAILED} and {@link #REJECTED} can still be rerun, resubmitted, closed or exited.
+ * The states without any outgoing event are {@code CLOSED}, {@code TERMINATED} and
+ * {@code ROLLED_BACK} (see {@code ItemStateMachine}).
  */
 public enum ItemStatus {
     PENDING,

@@ -53,6 +53,7 @@ class TaskServiceTest {
 
     @BeforeEach
     void resetFixtures() {
+        jdbc.update("DELETE FROM release_item");
         jdbc.update("DELETE FROM release_task_member");
         jdbc.update("DELETE FROM release_task");
         jdbc.update("DELETE FROM subsystem");
