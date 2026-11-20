@@ -13,19 +13,22 @@ public enum ItemEvent {
     /** Engine callback: the build failed ({@code BUILDING → FAILED}). The design calls it FAIL. */
     BUILD_FAIL,
     /**
-     * Engine callback: the test deployment succeeded. It is part of the plan's shared type
-     * set but has no row in the §3.2 matrix, because the main state already is
-     * {@code TESTING} by then; pipeline tasks record it on the node, not on the item.
+     * Engine callback: the test deployment succeeded. The main state already is
+     * {@code TESTING} by then, so this event is an idempotent acknowledgement
+     * ({@code TESTING → TESTING}) rather than a status change; the deployment itself is
+     * recorded on the pipeline node.
      */
     TEST_DEPLOY_OK,
     /** Engine callback: the test deployment failed ({@code TESTING → FAILED}). */
     TEST_DEPLOY_FAIL,
+    /** The gate evaluator concluded that both gates are satisfied: {@code TESTING → GATE_PENDING}. */
+    GATE_PASS,
     /**
-     * The gate evaluator finished: the positive conclusion is {@code TESTING → GATE_PENDING}.
-     * The negative conclusion is expressed with {@link #TEST_REVOKE} / {@link #CHECK_INVALID},
-     * which both reach {@code GATE_FAILED}.
+     * The gate evaluator concluded that at least one gate is not satisfied:
+     * {@code TESTING → GATE_FAILED}. A failed decision can never reach {@code SUBMITTED}, so
+     * it cannot be admitted to production by mistake.
      */
-    GATE_DECIDE,
+    GATE_FAIL,
     /** The developer submits the production release ({@code GATE_PENDING → SUBMITTED}). */
     SUBMIT,
     /** Every required approver approved ({@code PENDING_APPROVAL → READY}). */
@@ -40,12 +43,21 @@ public enum ItemEvent {
     PROD_FAIL,
     /** A freeze became effective while the item was submitted or ready. */
     FREEZE_HIT,
-    /** A check result became invalid: {@code TESTING/GATE_PENDING/PENDING_APPROVAL → GATE_FAILED}. */
+    /**
+     * A check result became invalid and revokes production admission:
+     * {@code TESTING/GATE_PENDING/SUBMITTED/READY → GATE_FAILED}. While {@code TESTING} this
+     * covers environment-level checks that run after the test deployment.
+     */
     CHECK_INVALID,
     /** The test pass was revoked: {@code TESTING/GATE_PENDING → GATE_FAILED}. */
     TEST_REVOKE,
-    /** The user reruns a failed item ({@code GATE_FAILED/FAILED → TESTING}). */
+    /** Rerun from the failed node, reusing the image and image-level checks: {@code GATE_FAILED/FAILED → TESTING}. */
     RERUN,
+    /**
+     * Full rerun after the commit changed (requirements §4.5): the image and all checks are
+     * rebuilt, so the item re-enters {@code BUILDING} ({@code GATE_FAILED/FAILED → BUILDING}).
+     */
+    RERUN_FULL,
     /** Owner or administrator closes the item ({@code any non-terminal → CLOSED}). */
     CLOSE,
     /** The user leaves the pipeline ({@code any non-terminal → TERMINATED}). */

@@ -144,18 +144,26 @@ public class ItemAppService {
      */
     public ItemView transit(long itemId, String event) {
         ItemEvent parsed = parseEvent(event);
+        ItemStatus lastKnownStatus = null;
+        int lastKnownVersion = -1;
         for (int attempt = 1; attempt <= MAX_CAS_ATTEMPTS; attempt++) {
             try {
                 ItemView view = transactionTemplate.execute(tx -> applyTransition(itemId, parsed));
                 return Objects.requireNonNull(view, "transition result");
             } catch (LostUpdateException ex) {
+                lastKnownStatus = ex.currentStatus();
+                lastKnownVersion = ex.rowVersion();
                 log.warn("lost update on release item {} ({}), attempt {}/{}",
                     itemId, parsed, attempt, MAX_CAS_ATTEMPTS);
             }
         }
+        String currentStatus = lastKnownStatus == null ? "UNKNOWN" : lastKnownStatus.name();
+        log.error("release item {} transition {} aborted after {} CAS attempts;"
+                + " currentStatus={}, rowVersion={}",
+            itemId, parsed, MAX_CAS_ATTEMPTS, currentStatus, lastKnownVersion);
         throw new BizException(BizError.STATE_NOT_ALLOWED,
             "变更项并发更新冲突，已重试 " + MAX_CAS_ATTEMPTS + " 次",
-            Map.of("itemId", itemId));
+            Map.of("itemId", itemId, "currentStatus", currentStatus));
     }
 
     private ItemView applyTransition(long itemId, ItemEvent event) {
@@ -170,7 +178,7 @@ public class ItemAppService {
             .set(ReleaseItemPO::getRowVersion, nextVersion)
             .set(ReleaseItemPO::getUpdatedAt, now));
         if (rows != 1) {
-            throw new LostUpdateException();
+            throw new LostUpdateException(current.status(), current.rowVersion());
         }
         return toView(current.withStatus(next), nextVersion, now);
     }
@@ -321,5 +329,22 @@ public class ItemAppService {
 
     /** Signals that the row_version CAS lost; the caller retries in a fresh transaction. */
     private static final class LostUpdateException extends RuntimeException {
+
+        private final ItemStatus currentStatus;
+        private final int rowVersion;
+
+        private LostUpdateException(ItemStatus currentStatus, int rowVersion) {
+            super("lost update on release item status " + currentStatus);
+            this.currentStatus = currentStatus;
+            this.rowVersion = rowVersion;
+        }
+
+        private ItemStatus currentStatus() {
+            return currentStatus;
+        }
+
+        private int rowVersion() {
+            return rowVersion;
+        }
     }
 }

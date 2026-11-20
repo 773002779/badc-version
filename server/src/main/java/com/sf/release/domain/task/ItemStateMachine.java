@@ -13,21 +13,27 @@ import java.util.Set;
  * every legal edge is a row of the map, and anything else throws
  * {@link IllegalTransitionException} (40001) with the current status in the payload.
  *
- * <p><strong>Rows and the two multi-target cells.</strong> The design table has two cells
- * with more than one target, both resolved here to a single deterministic target:
+ * <p><strong>Rows and the resolved multi-target cells.</strong> The design table's
+ * {@code GATE_DECIDE} and {@code RERUN} cells name more than one target; each outcome is an
+ * explicit event row here, so the static map stays single-valued:
  * <ul>
- *   <li>{@code TESTING + RERUN}: the rerun planner decides the scope, the main state always
- *   re-enters {@code TESTING} (brief ruling); {@code GATE_FAILED/FAILED + RERUN} likewise.</li>
- *   <li>{@code TESTING + GATE_DECIDE}: the positive conclusion is {@code GATE_PENDING}; the
- *   negative conclusion is expressed by {@code TEST_REVOKE}/{@code CHECK_INVALID}, which the
- *   map accepts directly from {@code TESTING} as well (requirements §4.4:
- *   测试中 → 门禁未通过) and from {@code GATE_PENDING} as the design table specifies.</li>
+ *   <li>{@code TESTING + GATE_PASS → GATE_PENDING} and
+ *   {@code TESTING + GATE_FAIL → GATE_FAILED}: a failed evaluation can never reach
+ *   {@code GATE_PENDING}, where {@code SUBMIT} would be legal.</li>
+ *   <li>{@code GATE_FAILED/FAILED + RERUN → TESTING} is the rerun-from-failed-node case
+ *   (image and image-level checks are reused); {@code GATE_FAILED/FAILED + RERUN_FULL →
+ *   BUILDING} is the full rebuild after the commit changed (requirements §4.5).</li>
  * </ul>
  *
+ * <p><strong>Invalidation.</strong> {@code CHECK_INVALID} also applies while
+ * {@code TESTING}: environment-level checks run after the test deployment, so an invalid
+ * result at that point must revoke the gate instead of leaving the item in {@code TESTING}.
+ * It likewise revokes admission from {@code SUBMITTED} and {@code READY} (requirements
+ * §4.4/§4.6).
+ *
  * <p><strong>Naming.</strong> The design's {@code FAIL} engine callback is
- * {@link ItemEvent#BUILD_FAIL} in the plan's shared type set. {@code TEST_DEPLOY_OK} is in
- * that set but has no row in the §3.2 matrix (the main state already is {@code TESTING} when
- * the test deployment succeeds), so it is not accepted by this machine yet.
+ * {@link ItemEvent#BUILD_FAIL} in the plan's shared type set. {@code TEST_DEPLOY_OK} is an
+ * idempotent acknowledgement while {@code TESTING} (the main state does not change).
  *
  * <p><strong>CLOSE / EXIT.</strong> The "any non-terminal" rows apply to every state except
  * the success end {@code DONE} and the closed-out ends {@code CLOSED}, {@code TERMINATED} and
@@ -91,18 +97,22 @@ public final class ItemStateMachine {
         put(matrix, ItemStatus.PENDING, ItemEvent.PUBLISH, ItemStatus.BUILDING);
         put(matrix, ItemStatus.BUILDING, ItemEvent.BUILD_OK, ItemStatus.TESTING);
         put(matrix, ItemStatus.BUILDING, ItemEvent.BUILD_FAIL, ItemStatus.FAILED);
-        put(matrix, ItemStatus.TESTING, ItemEvent.GATE_DECIDE, ItemStatus.GATE_PENDING);
+        put(matrix, ItemStatus.TESTING, ItemEvent.GATE_PASS, ItemStatus.GATE_PENDING);
+        put(matrix, ItemStatus.TESTING, ItemEvent.GATE_FAIL, ItemStatus.GATE_FAILED);
+        put(matrix, ItemStatus.TESTING, ItemEvent.TEST_DEPLOY_OK, ItemStatus.TESTING);
         put(matrix, ItemStatus.TESTING, ItemEvent.TEST_DEPLOY_FAIL, ItemStatus.FAILED);
         put(matrix, ItemStatus.GATE_PENDING, ItemEvent.SUBMIT, ItemStatus.SUBMITTED);
         put(matrix, ItemStatus.SUBMITTED, ItemEvent.NEED_APPROVAL,
             ItemStatus.PENDING_APPROVAL);
         put(matrix, ItemStatus.SUBMITTED, ItemEvent.FREEZE_HIT, ItemStatus.PENDING_APPROVAL);
         put(matrix, ItemStatus.SUBMITTED, ItemEvent.NO_APPROVAL, ItemStatus.READY);
+        put(matrix, ItemStatus.SUBMITTED, ItemEvent.CHECK_INVALID, ItemStatus.GATE_FAILED);
         put(matrix, ItemStatus.PENDING_APPROVAL, ItemEvent.APPROVE_ALL, ItemStatus.READY);
         put(matrix, ItemStatus.PENDING_APPROVAL, ItemEvent.REJECT, ItemStatus.REJECTED);
         put(matrix, ItemStatus.PENDING_APPROVAL, ItemEvent.GATE_INVALID, ItemStatus.GATE_FAILED);
         put(matrix, ItemStatus.READY, ItemEvent.EXECUTE, ItemStatus.PROD_DEPLOYING);
         put(matrix, ItemStatus.READY, ItemEvent.FREEZE_HIT, ItemStatus.PENDING_APPROVAL);
+        put(matrix, ItemStatus.READY, ItemEvent.CHECK_INVALID, ItemStatus.GATE_FAILED);
         put(matrix, ItemStatus.PROD_DEPLOYING, ItemEvent.PROD_OK, ItemStatus.DONE);
         put(matrix, ItemStatus.PROD_DEPLOYING, ItemEvent.PROD_FAIL, ItemStatus.FAILED);
 
@@ -116,6 +126,8 @@ public final class ItemStateMachine {
         // Rerun and resubmit.
         put(matrix, ItemStatus.GATE_FAILED, ItemEvent.RERUN, ItemStatus.TESTING);
         put(matrix, ItemStatus.FAILED, ItemEvent.RERUN, ItemStatus.TESTING);
+        put(matrix, ItemStatus.GATE_FAILED, ItemEvent.RERUN_FULL, ItemStatus.BUILDING);
+        put(matrix, ItemStatus.FAILED, ItemEvent.RERUN_FULL, ItemStatus.BUILDING);
         put(matrix, ItemStatus.REJECTED, ItemEvent.RESUBMIT, ItemStatus.SUBMITTED);
 
         // "Any non-terminal" rows.
