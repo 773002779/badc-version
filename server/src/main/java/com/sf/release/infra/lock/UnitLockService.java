@@ -182,6 +182,7 @@ public class UnitLockService implements UnitLease {
      *
      * @return {@code true} when this call removed the row (and the key)
      */
+    @Override
     public boolean release(long unitId, long instanceId) {
         int rows = lockMapper.delete(Wrappers.<DeployUnitLockPO>lambdaQuery()
             .eq(DeployUnitLockPO::getUnitId, unitId)

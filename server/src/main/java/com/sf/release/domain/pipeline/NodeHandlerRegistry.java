@@ -57,6 +57,21 @@ public final class NodeHandlerRegistry {
         return nodeType == null ? null : handlers.get(nodeType);
     }
 
+    /**
+     * The registered handler of {@code nodeType}.
+     *
+     * @throws IllegalStateException when no handler is registered; callers use this to fail
+     *     inside the transaction before any node state is written
+     */
+    public NodeHandler require(NodeType nodeType) {
+        NodeHandler handler = handler(nodeType);
+        if (handler == null) {
+            throw new IllegalStateException(
+                "节点 " + nodeType + " 没有注册 NodeHandler，拒绝静默跳过该节点");
+        }
+        return handler;
+    }
+
     /** All registered node types, for diagnostics. */
     public List<NodeType> nodeTypes() {
         return List.copyOf(handlers.keySet());
@@ -71,12 +86,6 @@ public final class NodeHandlerRegistry {
     public void onNodeEnter(PipelineInstance instance, PipelineNode node) {
         Objects.requireNonNull(instance, "instance must not be null");
         Objects.requireNonNull(node, "node must not be null");
-        NodeHandler handler = handlers.get(node.nodeType());
-        if (handler == null) {
-            throw new IllegalStateException(
-                "节点 " + node.nodeType() + "（instanceId=" + instance.id()
-                    + "）没有注册 NodeHandler，拒绝静默跳过该节点");
-        }
-        handler.start(instance);
+        require(node.nodeType()).start(instance);
     }
 }

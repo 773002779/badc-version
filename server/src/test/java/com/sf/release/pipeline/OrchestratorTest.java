@@ -221,6 +221,88 @@ class OrchestratorTest {
     }
 
     @Test
+    void concurrent_completions_of_the_last_two_tasks_still_complete_the_node() throws Exception {
+        orchestrator.advance(instanceId);
+        List<Long> buildTasks = taskIds(NodeType.BUILD);
+        orchestrator.onTaskCompleted(buildTasks.get(0), NodeTaskStatus.SUCCESS, null, null);
+
+        CountDownLatch go = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        Future<?> first = pool.submit(() -> {
+            go.await();
+            orchestrator.onTaskCompleted(buildTasks.get(1), NodeTaskStatus.SUCCESS, null, null);
+            return null;
+        });
+        Future<?> second = pool.submit(() -> {
+            go.await();
+            orchestrator.onTaskCompleted(buildTasks.get(2), NodeTaskStatus.SUCCESS, null, null);
+            return null;
+        });
+        go.countDown();
+        first.get(30, TimeUnit.SECONDS);
+        second.get(30, TimeUnit.SECONDS);
+        pool.shutdownNow();
+
+        assertThat(nodeStatus(NodeType.BUILD)).isEqualTo("SUCCESS");
+        assertThat(starts(NodeType.TEST_DEPLOY))
+            .as("the bounded lock retry lets the loser see the winner's completion; one entry")
+            .isEqualTo(1);
+        assertThat(nodeStatus(NodeType.TEST_DEPLOY)).isEqualTo("RUNNING");
+    }
+
+    @Test
+    void retried_task_uses_the_latest_attempt_for_completion() {
+        long failedAttempt = taskIds(NodeType.BUILD).get(0);
+        jdbc.update("UPDATE node_task SET status = 'FAILED', finished_at = NOW(3),"
+            + " result_summary = 'previous attempt failed' WHERE id = ?", failedAttempt);
+        jdbc.update("INSERT INTO node_task (instance_id, node_type, task_type, batch_no,"
+            + " target_id, status, attempt)"
+            + " SELECT instance_id, node_type, task_type, batch_no, target_id, 'PENDING', 1"
+            + " FROM node_task WHERE id = ?", failedAttempt);
+        long retriedAttempt = jdbc.queryForObject(
+            "SELECT id FROM node_task WHERE instance_id = ? AND node_type = 'BUILD'"
+                + " AND task_type = 'CODE_CHECK' AND attempt = 1", Long.class, instanceId);
+
+        orchestrator.advance(instanceId);
+        for (long taskId : taskIds(NodeType.BUILD)) {
+            if (taskId != failedAttempt && taskId != retriedAttempt) {
+                orchestrator.onTaskCompleted(taskId, NodeTaskStatus.SUCCESS, null, null);
+            }
+        }
+        orchestrator.onTaskCompleted(retriedAttempt, NodeTaskStatus.SUCCESS, null, null);
+
+        assertThat(taskStatus(failedAttempt))
+            .as("the retained old attempt row is left intact")
+            .isEqualTo("FAILED");
+        assertThat(nodeStatus(NodeType.BUILD))
+            .as("only the latest attempt of a logical task decides node completion")
+            .isEqualTo("SUCCESS");
+        assertThat(starts(NodeType.TEST_DEPLOY)).isEqualTo(1);
+    }
+
+    @Test
+    void check_tasks_do_not_gate_verify_completion() {
+        orchestrator.advance(instanceId);
+        completeBuildNode();
+        orchestrator.onTaskCompleted(taskIds(NodeType.TEST_DEPLOY).get(0),
+            NodeTaskStatus.SUCCESS, null, null);
+        assertThat(nodeStatus(NodeType.VERIFY)).isEqualTo("RUNNING");
+        assertThat(taskIds(NodeType.VERIFY)).hasSize(7);
+        assertThat(taskIds(NodeType.VERIFY))
+            .allSatisfy(taskId -> assertThat(taskStatus(taskId)).isEqualTo("PENDING"));
+
+        orchestrator.advance(instanceId);
+
+        assertThat(nodeStatus(NodeType.VERIFY))
+            .as("asynchronous CHECK results never block VERIFY completion (design §5.2 rule 4)")
+            .isEqualTo("SUCCESS");
+        assertThat(starts(NodeType.PROD_DEPLOY)).isEqualTo(1);
+        assertThat(taskIds(NodeType.VERIFY))
+            .allSatisfy(taskId -> assertThat(taskStatus(taskId)).isEqualTo("PENDING"));
+        assertThat(itemStatus()).isEqualTo("TESTING");
+    }
+
+    @Test
     void failure_skips_pending_tasks_and_keeps_success_rows() {
         orchestrator.advance(instanceId);
         List<Long> buildTasks = taskIds(NodeType.BUILD);
@@ -248,6 +330,44 @@ class OrchestratorTest {
         assertThat(recorder.instanceFinished).hasSize(1);
         assertThat(recorder.instanceFinished.get(0).status()).isEqualTo(InstanceStatus.FAILED);
         assertThat(recorder.instanceFinished.get(0).reason()).contains("boom");
+        assertThat(unitLockRows()).isZero();
+        assertThat(unitLockService.acquire(unitId, OTHER_INSTANCE_ID))
+            .as("a failed instance releases the unit so the C15 republish can acquire it")
+            .isTrue();
+    }
+
+    @Test
+    void done_releases_the_unit_lock() {
+        orchestrator.advance(instanceId);
+        completeBuildNode();
+        orchestrator.onTaskCompleted(taskIds(NodeType.TEST_DEPLOY).get(0),
+            NodeTaskStatus.SUCCESS, null, null);
+        orchestrator.advance(instanceId);
+        assertThat(nodeStatus(NodeType.VERIFY)).isEqualTo("SUCCESS");
+        assertThat(starts(NodeType.PROD_DEPLOY)).isEqualTo(1);
+
+        orchestrator.onTaskCompleted(taskIds(NodeType.PROD_DEPLOY).get(0),
+            NodeTaskStatus.SUCCESS, null, null);
+
+        assertThat(instanceStatus()).isEqualTo("DONE");
+        assertThat(unitLockRows())
+            .as("a terminal instance deletes its deploy_unit_lock row after the commit")
+            .isZero();
+        assertThat(unitLockService.acquire(unitId, OTHER_INSTANCE_ID)).isTrue();
+    }
+
+    @Test
+    void advance_on_a_terminal_instance_heals_a_stale_unit_lock() {
+        jdbc.update("UPDATE pipeline_instance SET status = 'FAILED', end_at = NOW(3)"
+            + " WHERE id = ?", instanceId);
+        assertThat(unitLockRows()).isEqualTo(1);
+
+        orchestrator.advance(instanceId);
+
+        assertThat(unitLockRows())
+            .as("an already-terminal instance releases a leftover unit lock")
+            .isZero();
+        assertThat(unitLockService.acquire(unitId, OTHER_INSTANCE_ID)).isTrue();
     }
 
     // ------------------------------------------------------------------ unit lock renewal
@@ -309,6 +429,80 @@ class OrchestratorTest {
         orchestrator.advance(instanceId);
         assertThat(starts(NodeType.BUILD)).isEqualTo(1);
         assertThat(instanceStatus()).isEqualTo("RUNNING");
+    }
+
+    @Test
+    void handler_failure_after_commit_fails_the_node() {
+        handlers.clear();
+        handlers.register(new NodeHandler() {
+            @Override
+            public NodeType nodeType() {
+                return NodeType.BUILD;
+            }
+
+            @Override
+            public void start(PipelineInstance instance) {
+                throw new IllegalStateException("engine down");
+            }
+        });
+
+        orchestrator.advance(instanceId);
+
+        assertThat(nodeStatus(NodeType.BUILD)).isEqualTo("FAILED");
+        assertThat(instanceStatus()).isEqualTo("FAILED");
+        assertThat(recorder.instanceFinished).hasSize(1);
+        assertThat(recorder.instanceFinished.get(0).reason()).contains("engine down");
+        assertThat(unitLockRows())
+            .as("the handler-failure path also releases the unit")
+            .isZero();
+    }
+
+    @Test
+    void handler_runs_outside_the_transaction_holding_the_instance_row() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch releaseHandler = new CountDownLatch(1);
+        handlers.clear();
+        handlers.register(new NodeHandler() {
+            @Override
+            public NodeType nodeType() {
+                return NodeType.BUILD;
+            }
+
+            @Override
+            public void start(PipelineInstance instance) {
+                entered.countDown();
+                try {
+                    releaseHandler.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        Future<?> advancing = pool.submit(() -> {
+            orchestrator.advance(instanceId);
+            return null;
+        });
+        assertThat(entered.await(5, TimeUnit.SECONDS))
+            .as("the handler is running")
+            .isTrue();
+
+        Future<Integer> rowUpdate = pool.submit(() -> jdbc.update(
+            "UPDATE pipeline_instance SET commit_sha = ? WHERE id = ?", "deadbeef", instanceId));
+        assertThat(rowUpdate.get(3, TimeUnit.SECONDS))
+            .as("the instance row is not locked while the handler runs")
+            .isEqualTo(1);
+
+        long firstTask = taskIds(NodeType.BUILD).get(0);
+        orchestrator.onTaskCompleted(firstTask, NodeTaskStatus.SUCCESS, null, null);
+        assertThat(taskStatus(firstTask))
+            .as("a completion commits while the slow handler still runs")
+            .isEqualTo("SUCCESS");
+
+        releaseHandler.countDown();
+        advancing.get(10, TimeUnit.SECONDS);
+        pool.shutdownNow();
     }
 
     // ------------------------------------------------------------------ item state wiring
@@ -478,6 +672,12 @@ class OrchestratorTest {
         Timestamp expireAt = jdbc.queryForObject(
             "SELECT expire_at FROM deploy_unit_lock WHERE unit_id = ?", Timestamp.class, unitId);
         return expireAt == null ? null : expireAt.toInstant();
+    }
+
+    private int unitLockRows() {
+        Integer rows = jdbc.queryForObject(
+            "SELECT COUNT(*) FROM deploy_unit_lock WHERE unit_id = ?", Integer.class, unitId);
+        return rows == null ? 0 : rows;
     }
 
     private void givenUser(String userId) {
