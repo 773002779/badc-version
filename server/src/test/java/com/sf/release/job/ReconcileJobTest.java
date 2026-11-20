@@ -388,6 +388,28 @@ class ReconcileJobTest {
     }
 
     @Test
+    void reconcile_never_replays_a_paused_instance() {
+        // The orchestrator paused the instance at a node that has no handler (C1). The BUILD
+        // node is complete, so without the pause rule the advance repair would try to enter the
+        // blocked node on every round.
+        jdbc.update("UPDATE pipeline_instance SET status = 'PAUSED', current_node = 'TEST_DEPLOY',"
+            + " status_reason = 'no handler for TEST_DEPLOY' WHERE id = ?", instanceId);
+        jdbc.update("UPDATE pipeline_node SET status = 'SUCCESS', finished_at = NOW(3)"
+            + " WHERE instance_id = ? AND node_type = 'BUILD'", instanceId);
+        jdbc.update("UPDATE node_task SET status = 'SUCCESS', finished_at = NOW(3)"
+            + " WHERE instance_id = ? AND node_type = 'BUILD'", instanceId);
+
+        job.run();
+
+        assertThat(instanceStatus()).isEqualTo("PAUSED");
+        assertThat(currentNode()).isEqualTo("TEST_DEPLOY");
+        assertThat(nodeStatus(NodeType.TEST_DEPLOY)).isEqualTo("PENDING");
+        assertThat(starts(NodeType.TEST_DEPLOY))
+            .as("a deliberate pause is not a dropped advance and is never replayed")
+            .isZero();
+    }
+
+    @Test
     void reconcile_does_not_advance_an_instance_whose_node_is_not_complete() {
         job.run();
 

@@ -13,6 +13,10 @@ import java.util.List;
  * rollback) while the publish number of the order stays unchanged. {@code currentNode} points
  * at the node the orchestrator is about to run; a fresh online instance starts in
  * {@code BUILD} with {@link InstanceStatus#PENDING}.
+ *
+ * <p>{@code statusReason} is the operator-facing explanation of a non-happy status. It is
+ * written when the instance is {@code PAUSED} because the next node has no handler (V13); it
+ * stays {@code null} for a normal run, so the aggregate is not forced to invent a reason.
  */
 public record PipelineInstance(
     Long id,
@@ -27,12 +31,14 @@ public record PipelineInstance(
     Instant startAt,
     Instant endAt,
     Instant createdAt,
+    String statusReason,
     List<PipelineNode> nodes) {
 
     public PipelineInstance {
         pipelineNo = trimToNull(pipelineNo);
         imageDigest = trimToNull(imageDigest);
         commitSha = trimToNull(commitSha);
+        statusReason = trimToNull(statusReason);
         execType = execType == null ? ExecType.ONLINE : execType;
         triggerType = triggerType == null ? TriggerType.INITIAL : triggerType;
         status = status == null ? InstanceStatus.PENDING : status;

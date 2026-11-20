@@ -211,7 +211,7 @@ class RerunPlannerTest {
         }
         return new PipelineInstance(1L, 10L, "PL-T15-PLAN", ExecType.ONLINE,
             TriggerType.INITIAL, NodeType.BUILD, InstanceStatus.FAILED, null, null, null, null,
-            Instant.ofEpochSecond(1_700_000_000L), nodes);
+            Instant.ofEpochSecond(1_700_000_000L), null, nodes);
     }
 
     private static final class StubGitCommitProbe implements GitCommitProbe {

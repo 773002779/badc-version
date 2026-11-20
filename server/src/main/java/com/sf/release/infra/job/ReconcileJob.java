@@ -65,6 +65,11 @@ import java.util.Set;
  * repaired here: their completion belongs to the asynchronous gate/check path (design §5.2 rule
  * 4), and a repair would start the next node before the checks are evaluated.
  *
+ * <p><strong>{@code PAUSED} is never repaired.</strong> An instance the orchestrator paused at a
+ * node without a handler (phase 1 boundary: {@code VERIFY}/{@code PROD_DEPLOY}) is a deliberate
+ * stop, not a dropped advance: replaying it would re-enter the same blocked node forever. The
+ * candidate query only selects {@code RUNNING} rows and the loop double-checks the status.
+ *
  * <p><strong>Listener failures.</strong> Unresolved {@code pipeline_item_failure} rows (V12) are
  * replayed through {@link ItemFailureRepairer}: a successful replay sets {@code resolved_at}, a
  * third failed attempt logs ERROR and leaves the row for operations, and every later round warns
@@ -364,6 +369,11 @@ public class ReconcileJob {
             try {
                 PipelineInstance instance = repository.loadInstance(instanceId);
                 if (instance == null) {
+                    continue;
+                }
+                if (instance.status() == InstanceStatus.PAUSED) {
+                    // A deliberate stop at a node without a handler: never replay the advance.
+                    log.debug("reconcile skipping paused instance: instanceId={}", instanceId);
                     continue;
                 }
                 PipelineNode current = instance.node(instance.currentNode());

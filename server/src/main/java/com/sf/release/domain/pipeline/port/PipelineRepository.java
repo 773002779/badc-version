@@ -82,6 +82,17 @@ public interface PipelineRepository {
     boolean finishInstance(long instanceId, InstanceStatus status, Instant now);
 
     /**
+     * Stops a running instance because it would have to enter {@code blockedNode} without a
+     * registered handler: the status becomes {@link InstanceStatus#PAUSED}, {@code currentNode}
+     * stays (or becomes) the blocked node, {@code status_reason} explains it and {@code end_at}
+     * is set. The compare-and-set only matches a {@code PENDING}/{@code RUNNING} instance, so a
+     * second caller cannot overwrite a terminal status with a pause.
+     *
+     * @return {@code true} when this call paused the instance
+     */
+    boolean pauseInstance(long instanceId, NodeType blockedNode, String reason, Instant now);
+
+    /**
      * The build coordinates of an instance: the deployment unit, the CODING plan (the unit's
      * enabled {@code BUILD} binding), the item's read-only source branch and the commit the
      * pipeline already knows. The commit is never the item's pre-build {@code base_commit};

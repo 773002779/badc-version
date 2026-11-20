@@ -14,6 +14,7 @@ import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.event.InstanceFinishedEvent;
 import com.sf.release.domain.pipeline.event.NodeCompletedEvent;
 import com.sf.release.domain.pipeline.event.NodeTaskCompletedEvent;
+import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.infra.lock.UnitLockService;
 import com.sf.release.infra.security.TestUserContext;
 import org.junit.jupiter.api.AfterEach;
@@ -72,6 +73,7 @@ class OrchestratorTest {
     @Autowired PublishAppService publishService;
     @Autowired PipelineOrchestrator orchestrator;
     @Autowired NodeHandlerRegistry handlers;
+    @Autowired PipelineRepository repository;
     @Autowired UnitLockService unitLockService;
     @Autowired JdbcTemplate jdbc;
     @Autowired ApplicationEventPublisher eventPublisher;
@@ -281,7 +283,7 @@ class OrchestratorTest {
     }
 
     @Test
-    void check_tasks_do_not_gate_verify_completion() {
+    void check_tasks_do_not_gate_but_a_check_only_node_never_completes_on_its_own() {
         orchestrator.advance(instanceId);
         completeBuildNode();
         orchestrator.onTaskCompleted(taskIds(NodeType.TEST_DEPLOY).get(0),
@@ -293,13 +295,21 @@ class OrchestratorTest {
 
         orchestrator.advance(instanceId);
 
-        assertThat(nodeStatus(NodeType.VERIFY))
-            .as("asynchronous CHECK results never block VERIFY completion (design §5.2 rule 4)")
-            .isEqualTo("SUCCESS");
-        assertThat(starts(NodeType.PROD_DEPLOY)).isEqualTo(1);
+        // C3: a node needs at least one counted (non-CHECK) task before it can complete. The
+        // CHECK results are asynchronous, so VERIFY belongs to the gate/check path (P2) and must
+        // not be auto-completed by an empty completion fold.
+        assertThat(nodeStatus(NodeType.VERIFY)).isEqualTo("RUNNING");
+        assertThat(starts(NodeType.PROD_DEPLOY)).isZero();
         assertThat(taskIds(NodeType.VERIFY))
             .allSatisfy(taskId -> assertThat(taskStatus(taskId)).isEqualTo("PENDING"));
         assertThat(itemStatus()).isEqualTo("TESTING");
+
+        long verifyNodeId = jdbc.queryForObject(
+            "SELECT id FROM pipeline_node WHERE instance_id = ? AND node_type = 'VERIFY'",
+            Long.class, instanceId);
+        assertThat(repository.finishNodeIfComplete(verifyNodeId, Instant.now()))
+            .as("the SQL completion guard mirrors the empty-node rule")
+            .isFalse();
     }
 
     @Test
@@ -338,22 +348,61 @@ class OrchestratorTest {
 
     @Test
     void done_releases_the_unit_lock() {
-        orchestrator.advance(instanceId);
-        completeBuildNode();
-        orchestrator.onTaskCompleted(taskIds(NodeType.TEST_DEPLOY).get(0),
-            NodeTaskStatus.SUCCESS, null, null);
-        orchestrator.advance(instanceId);
-        assertThat(nodeStatus(NodeType.VERIFY)).isEqualTo("SUCCESS");
-        assertThat(starts(NodeType.PROD_DEPLOY)).isEqualTo(1);
+        enterLastNode();
 
         orchestrator.onTaskCompleted(taskIds(NodeType.PROD_DEPLOY).get(0),
             NodeTaskStatus.SUCCESS, null, null);
 
+        assertThat(nodeStatus(NodeType.PROD_DEPLOY)).isEqualTo("SUCCESS");
         assertThat(instanceStatus()).isEqualTo("DONE");
         assertThat(unitLockRows())
             .as("a terminal instance deletes its deploy_unit_lock row after the commit")
             .isZero();
         assertThat(unitLockService.acquire(unitId, OTHER_INSTANCE_ID)).isTrue();
+    }
+
+    @Test
+    void missing_handler_for_the_next_node_pauses_without_rolling_the_completion_back() {
+        orchestrator.advance(instanceId);
+        List<Long> buildTasks = taskIds(NodeType.BUILD);
+        orchestrator.onTaskCompleted(buildTasks.get(0), NodeTaskStatus.SUCCESS, null, null);
+        orchestrator.onTaskCompleted(buildTasks.get(1), NodeTaskStatus.SUCCESS, null, null);
+
+        // The production registry only ships BUILD and TEST_DEPLOY (phase 1 boundary), so
+        // TEST_DEPLOY is now the next node while no handler is registered for it.
+        handlers.clear();
+        handlers.register(new CountingHandler(NodeType.BUILD));
+        orchestrator.onTaskCompleted(buildTasks.get(2), NodeTaskStatus.SUCCESS, "sha256:pause",
+            null);
+
+        assertThat(nodeStatus(NodeType.BUILD))
+            .as("the completion that was already written is not rolled back")
+            .isEqualTo("SUCCESS");
+        assertThat(nodeStatus(NodeType.TEST_DEPLOY)).isEqualTo("PENDING");
+        assertThat(instanceStatus()).isEqualTo("PAUSED");
+        assertThat(currentNode()).isEqualTo("TEST_DEPLOY");
+        assertThat(statusReason()).contains("TEST_DEPLOY").contains("NodeHandler");
+        assertThat(unitLockRows())
+            .as("a paused pipeline no longer holds the deployment unit")
+            .isZero();
+        assertThat(recorder.instanceFinished)
+            .anySatisfy(event -> assertThat(event.status()).isEqualTo(InstanceStatus.PAUSED));
+        assertThat(recorder.nodeCompleted)
+            .anySatisfy(event -> {
+                assertThat(event.nodeType()).isEqualTo(NodeType.BUILD);
+                assertThat(event.status()).isEqualTo(NodeStatus.SUCCESS);
+            });
+
+        // A replay (reconcile advance repair or a duplicate callback) must not loop on the
+        // blocked node entry.
+        orchestrator.advance(instanceId);
+        assertThat(instanceStatus()).isEqualTo("PAUSED");
+        assertThat(nodeStatus(NodeType.BUILD)).isEqualTo("SUCCESS");
+        assertThat(nodeStatus(NodeType.TEST_DEPLOY)).isEqualTo("PENDING");
+        assertThat(recorder.instanceFinished)
+            .filteredOn(event -> event.status() == InstanceStatus.PAUSED)
+            .as("the pause event is published once")
+            .hasSize(1);
     }
 
     @Test
@@ -576,6 +625,24 @@ class OrchestratorTest {
         }
     }
 
+    /**
+     * Seeds the instance at the last node ({@code PROD_DEPLOY}): the three earlier nodes and
+     * their tasks succeeded, the last node is {@code RUNNING}. Reaching it through the pipeline
+     * is impossible by design in phase 1 (no VERIFY/PROD_DEPLOY handler, and a check-only node
+     * never completes), so the terminal state is exercised from the state it really has.
+     */
+    private void enterLastNode() {
+        jdbc.update("UPDATE pipeline_instance SET status = 'RUNNING',"
+            + " current_node = 'PROD_DEPLOY', start_at = NOW(3) WHERE id = ?", instanceId);
+        jdbc.update("UPDATE pipeline_node SET status = 'SUCCESS', started_at = NOW(3),"
+            + " finished_at = NOW(3) WHERE instance_id = ?"
+            + " AND node_type IN ('BUILD', 'TEST_DEPLOY', 'VERIFY')", instanceId);
+        jdbc.update("UPDATE pipeline_node SET status = 'RUNNING', started_at = NOW(3)"
+            + " WHERE instance_id = ? AND node_type = 'PROD_DEPLOY'", instanceId);
+        jdbc.update("UPDATE node_task SET status = 'SUCCESS', finished_at = NOW(3)"
+            + " WHERE instance_id = ? AND node_type <> 'PROD_DEPLOY'", instanceId);
+    }
+
     private void registerCountingHandlers() {
         for (NodeType type : NodeType.values()) {
             handlers.register(new CountingHandler(type));
@@ -644,6 +711,11 @@ class OrchestratorTest {
 
     private String instanceStatus() {
         return jdbc.queryForObject("SELECT status FROM pipeline_instance WHERE id = ?",
+            String.class, instanceId);
+    }
+
+    private String statusReason() {
+        return jdbc.queryForObject("SELECT status_reason FROM pipeline_instance WHERE id = ?",
             String.class, instanceId);
     }
 

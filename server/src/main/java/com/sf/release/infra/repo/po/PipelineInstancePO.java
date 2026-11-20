@@ -30,6 +30,7 @@ public class PipelineInstancePO {
     private String triggerType;
     private String currentNode;
     private String status;
+    private String statusReason;
     private String imageDigest;
     private String commitSha;
     private Instant startAt;
@@ -45,6 +46,7 @@ public class PipelineInstancePO {
         po.triggerType = instance.triggerType().name();
         po.currentNode = instance.currentNode() == null ? null : instance.currentNode().name();
         po.status = instance.status().name();
+        po.statusReason = instance.statusReason();
         po.imageDigest = instance.imageDigest();
         po.commitSha = instance.commitSha();
         po.startAt = instance.startAt();
@@ -75,6 +77,7 @@ public class PipelineInstancePO {
             startAt,
             endAt,
             createdAt,
+            statusReason,
             nodes);
     }
 
@@ -132,6 +135,15 @@ public class PipelineInstancePO {
 
     public void setStatus(String status) {
         this.status = status;
+    }
+
+    /** Explanation stored when the instance is {@code PAUSED} (V13); null otherwise. */
+    public String getStatusReason() {
+        return statusReason;
+    }
+
+    public void setStatusReason(String statusReason) {
+        this.statusReason = statusReason;
     }
 
     public String getImageDigest() {

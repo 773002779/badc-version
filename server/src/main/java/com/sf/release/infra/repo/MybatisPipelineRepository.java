@@ -41,6 +41,7 @@ public class MybatisPipelineRepository implements PipelineRepository {
     private static final int MAX_SUMMARY_LENGTH = 500;
     private static final int MAX_DIGEST_LENGTH = 80;
     private static final int MAX_COMMIT_SHA_LENGTH = 40;
+    private static final int MAX_STATUS_REASON_LENGTH = 255;
 
     private final PipelineInstanceMapper instanceMapper;
     private final PipelineNodeMapper nodeMapper;
@@ -221,6 +222,24 @@ public class MybatisPipelineRepository implements PipelineRepository {
             .in(PipelineInstancePO::getStatus, InstanceStatus.PENDING.name(),
                 InstanceStatus.RUNNING.name())
             .set(PipelineInstancePO::getStatus, status.name())
+            .set(PipelineInstancePO::getEndAt, now)) == 1;
+    }
+
+    /**
+     * {@code PENDING/RUNNING → PAUSED}: the node the pipeline cannot enter becomes the current
+     * node and the reason is stored for operators. The status CAS is what makes a second
+     * caller (another thread, a replayed reconcile advance) a no-op instead of a duplicate
+     * pause event.
+     */
+    @Override
+    public boolean pauseInstance(long instanceId, NodeType blockedNode, String reason, Instant now) {
+        return instanceMapper.update(null, Wrappers.<PipelineInstancePO>lambdaUpdate()
+            .eq(PipelineInstancePO::getId, instanceId)
+            .in(PipelineInstancePO::getStatus, InstanceStatus.PENDING.name(),
+                InstanceStatus.RUNNING.name())
+            .set(PipelineInstancePO::getStatus, InstanceStatus.PAUSED.name())
+            .set(PipelineInstancePO::getCurrentNode, blockedNode.name())
+            .set(PipelineInstancePO::getStatusReason, truncate(reason, MAX_STATUS_REASON_LENGTH))
             .set(PipelineInstancePO::getEndAt, now)) == 1;
     }
 

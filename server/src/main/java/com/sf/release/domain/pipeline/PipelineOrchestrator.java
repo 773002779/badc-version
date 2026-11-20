@@ -42,13 +42,22 @@ import java.util.Set;
  *       short instance lease. The handler's existence is validated inside the transaction, so a
  *       missing handler rolls the entry back and fails loudly instead of silently skipping.</li>
  *   <li>The running node completes only when every counted task is {@code SUCCESS} (or
- *       {@code SKIPPED}). Counting uses the <strong>latest attempt</strong> of every logical
+ *       {@code SKIPPED}) <em>and at least one counted task exists</em>. Counting uses the
+ *       <strong>latest attempt</strong> of every logical
  *       {@code (task_type, batch_no, target_id)} key (design §5.4 keeps old rows) and ignores
  *       {@code CHECK} tasks, whose results arrive asynchronously and must not gate {@code VERIFY}
  *       completion (design §5.2 rule 4). The same rules are mirrored in the SQL completion
- *       guard.</li>
+ *       guard. A node with no counted task (for example a {@code VERIFY} node that only carries
+ *       {@code CHECK} tasks) therefore never completes on its own; its completion belongs to the
+ *       gate/check path.</li>
  *   <li>On completion, the next node of the instance starts; after the last node the instance
- *       becomes {@code DONE}. Events are published inside the same transaction.</li>
+ *       becomes {@code DONE}. When the next node has no registered {@link NodeHandler} (phase 1:
+ *       {@code VERIFY}/{@code PROD_DEPLOY}), the current node completion is <strong>kept</strong>
+ *       and the instance becomes {@link InstanceStatus#PAUSED} with {@code current_node} = the
+ *       blocked node and a stored reason instead of an exception. The handler availability is
+ *       checked before the completion is written, so a missing handler can never roll back work
+ *       already done; a paused instance is not advanced again. Events are published inside the
+ *       same transaction.</li>
  *   <li>A {@code FAILED}/{@code TIMEOUT} task (latest attempt, non-{@code CHECK}) fails the node
  *       and the instance, skips the still-{@code PENDING} siblings of that node, keeps every
  *       already-{@code SUCCESS} row and never starts the next node (production batches keep their
@@ -76,8 +85,8 @@ public final class PipelineOrchestrator {
     private static final Set<NodeTaskStatus> FAILING = EnumSet.of(
         NodeTaskStatus.FAILED, NodeTaskStatus.TIMEOUT);
     private static final Set<InstanceStatus> TERMINAL = EnumSet.of(
-        InstanceStatus.DONE, InstanceStatus.FAILED, InstanceStatus.CLOSED,
-        InstanceStatus.TERMINATED);
+        InstanceStatus.PAUSED, InstanceStatus.DONE, InstanceStatus.FAILED,
+        InstanceStatus.CLOSED, InstanceStatus.TERMINATED);
 
     private final PipelineRepository repository;
     private final NodeTaskCompletionService completionService;
@@ -256,6 +265,11 @@ public final class PipelineOrchestrator {
         if (!allTasksSucceeded(current.tasks())) {
             return AdvanceOutcome.idle(instanceId, context);
         }
+        // Decide the next step *before* writing the completion. A missing handler is not an
+        // error to throw here: throwing inside this transaction would roll back the node
+        // completion and its event, and reconcile would replay the same failure forever.
+        PipelineNode next = nextNode(instance, current);
+        boolean nextHasHandler = next != null && handlerRegistry.handler(next.nodeType()) != null;
         if (!repository.finishNodeIfComplete(current.id(), now)) {
             // The SQL guard found a non-success latest attempt or another advance already
             // completed the node.
@@ -266,7 +280,6 @@ public final class PipelineOrchestrator {
         eventBus.publish(new NodeCompletedEvent(instanceId, context.orderId(),
             current.nodeType(), NodeStatus.SUCCESS, null, now));
 
-        PipelineNode next = nextNode(instance, current);
         if (next == null) {
             if (repository.finishInstance(instanceId, InstanceStatus.DONE, now)) {
                 log.info("pipeline finished: instanceId={}, status=DONE", instanceId);
@@ -277,17 +290,56 @@ public final class PipelineOrchestrator {
             log.debug("pipeline {} was already finished by another caller", instanceId);
             return AdvanceOutcome.idle(instanceId, context);
         }
+        if (!nextHasHandler) {
+            return pauseAtMissingHandler(instance, next, context, now);
+        }
         return enterNode(instance, next, context, now);
     }
 
     /**
+     * Keeps the just-completed node and stops the instance in {@link InstanceStatus#PAUSED} at
+     * {@code blocked} because no {@link NodeHandler} is registered for it (phase 1 boundary:
+     * {@code VERIFY} and {@code PROD_DEPLOY} arrive with later tasks).
+     *
+     * <p>The pause is the same transaction as the node completion, so the work done so far is
+     * committed instead of rolled back. The status CAS makes the outcome idempotent: a second
+     * caller finds a {@code PAUSED} instance, releases only a still-held unit lease and does not
+     * publish a second pause event.
+     */
+    private AdvanceOutcome pauseAtMissingHandler(PipelineInstance instance, PipelineNode blocked,
+                                                 PipelineRepository.InstanceContext context,
+                                                 Instant now) {
+        String reason = "节点 " + blocked.nodeType()
+            + " 没有注册 NodeHandler，流水线停在 " + blocked.nodeType() + " 之前（PAUSED）";
+        if (!repository.pauseInstance(instance.id(), blocked.nodeType(), reason, now)) {
+            log.debug("pipeline {} could not be paused at {} (already left RUNNING)", instance.id(),
+                blocked.nodeType());
+            return AdvanceOutcome.idle(instance.id(), context);
+        }
+        log.warn("pipeline paused: no NodeHandler registered for the next node:"
+                + " instanceId={}, node={}, reason={}",
+            instance.id(), blocked.nodeType(), reason);
+        eventBus.publish(new InstanceFinishedEvent(instance.id(), context.orderId(),
+            InstanceStatus.PAUSED, reason, now));
+        // A paused pipeline holds no unit: treat it like a stopped instance for the lease.
+        return AdvanceOutcome.terminal(instance.id(), context);
+    }
+
+    /**
      * Enters {@code node}: validates the handler (inside the transaction, so a missing handler
-     * rolls back), moves the instance, flips the node to {@code RUNNING} and returns the entry
-     * for invocation after the commit.
+     * for the very first node of a fresh instance rolls back and fails loudly), moves the
+     * instance, flips the node to {@code RUNNING} and returns the entry for invocation after the
+     * commit.
+     *
+     * <p>This throw is only reachable for the {@code PENDING → RUNNING} start of a new instance:
+     * when a <em>running</em> node completes and the next node has no handler, the caller pauses
+     * the instance instead (see {@link #pauseAtMissingHandler}) so the completion is never
+     * rolled back.
      */
     private AdvanceOutcome enterNode(PipelineInstance instance, PipelineNode node,
                                      PipelineRepository.InstanceContext context, Instant now) {
-        // Fail inside the transaction: a missing handler must leave the pipeline untouched.
+        // Fail inside the transaction: a missing handler at instance start must leave the
+        // pipeline untouched and surface as a wiring error.
         handlerRegistry.require(node.nodeType());
         boolean first = instance.status() == InstanceStatus.PENDING;
         boolean moved = first
@@ -528,17 +580,25 @@ public final class PipelineOrchestrator {
      * Completion fold: only the latest attempt of each logical task key counts, and
      * {@code CHECK} results never gate the node (they are evaluated by the gate engine).
      * A latest {@code SKIPPED} attempt is neutral, as before.
+     *
+     * <p><strong>At least one counted task is required.</strong> A node whose latest attempts
+     * are all {@code CHECK} tasks is <em>not</em> complete: an empty (or check-only) node must
+     * never auto-complete and silently let the pipeline skip a gate/verify step. The same rule
+     * is mirrored by {@code PipelineNodeMapper.completeIfAllTasksSucceeded}.
      */
     private static boolean allTasksSucceeded(List<NodeTask> tasks) {
+        int counted = 0;
         for (NodeTask task : latestAttempts(tasks).values()) {
-            if (task.taskType() == TaskType.CHECK || task.status() == NodeTaskStatus.SKIPPED) {
+            if (task.taskType() == TaskType.CHECK) {
                 continue;
             }
-            if (task.status() != NodeTaskStatus.SUCCESS) {
+            counted++;
+            if (task.status() != NodeTaskStatus.SUCCESS
+                    && task.status() != NodeTaskStatus.SKIPPED) {
                 return false;
             }
         }
-        return true;
+        return counted > 0;
     }
 
     /** Failure fold with the same latest-attempt/{@code CHECK}-exclusion rules. */
@@ -602,7 +662,7 @@ public final class PipelineOrchestrator {
             instance.execType(), instance.triggerType(), node.nodeType(),
             InstanceStatus.RUNNING, instance.imageDigest(), instance.commitSha(),
             instance.startAt() == null ? now : instance.startAt(), null,
-            instance.createdAt(), nodes);
+            instance.createdAt(), instance.statusReason(), nodes);
     }
 
     /** Logical task identity used by the latest-attempt fold. */

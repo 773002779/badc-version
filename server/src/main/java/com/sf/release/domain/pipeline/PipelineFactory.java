@@ -108,7 +108,7 @@ public final class PipelineFactory {
 
         return new PipelineInstance(null, order.id(), newPipelineNo(now),
             ExecType.ONLINE, TriggerType.INITIAL, NodeType.BUILD, InstanceStatus.PENDING,
-            null, null, null, null, now, nodes);
+            null, null, null, null, now, null, nodes);
     }
 
     /**
@@ -147,7 +147,7 @@ public final class PipelineFactory {
         }
         return new PipelineInstance(null, base.orderId(), base.pipelineNo(), ExecType.ONLINE,
             triggerType, fromNode, InstanceStatus.PENDING, imageDigest, commitSha,
-            null, null, base.createdAt(), nodes);
+            null, null, base.createdAt(), null, nodes);
     }
 
     /**
