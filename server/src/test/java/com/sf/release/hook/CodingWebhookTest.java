@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sf.release.application.ItemAppService;
 import com.sf.release.application.ItemAppService.CreateItemCmd;
 import com.sf.release.application.PublishAppService;
+import com.sf.release.domain.engine.JobKind;
 import com.sf.release.domain.pipeline.NodeHandler;
 import com.sf.release.domain.pipeline.NodeHandlerRegistry;
 import com.sf.release.domain.pipeline.NodeTaskStatus;
@@ -290,6 +291,85 @@ class CodingWebhookTest {
         assertThat(starts(NodeType.TEST_DEPLOY)).isEqualTo(1);
     }
 
+    // ------------------------------------------------------------------ kind (I1)
+    // A build job and a deploy job are different CODING namespaces: the callback must state its
+    // kind, a delivery without one is rejected before any write, and the lookup is scoped to the
+    // matching task family.
+
+    @Test
+    void a_delivery_without_kind_is_rejected_with_400_and_writes_nothing() throws Exception {
+        byte[] body = webhookWithoutKind("evt-nokind", EXTERNAL_ID, "SUCCESS");
+
+        mvc.perform(post(PATH).contentType(MediaType.APPLICATION_JSON)
+                .header(SIGNATURE_HEADER, sign(body)).content(body))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.code").value(40000))
+            .andExpect(jsonPath("$.message")
+                .value(org.hamcrest.Matchers.containsString("kind")));
+
+        assertThat(dedupCount("evt-nokind")).isZero();
+        assertThat(taskStatus(imageBuildTaskId))
+            .as("a rejected delivery never touches the task")
+            .isEqualTo("WAITING_EXTERNAL");
+        assertThat(starts(NodeType.TEST_DEPLOY)).isZero();
+    }
+
+    @Test
+    void a_delivery_with_an_unknown_kind_is_rejected_with_400_and_writes_nothing() throws Exception {
+        byte[] body = json.writeValueAsBytes(json.createObjectNode()
+            .put("eventId", "evt-badkind")
+            .put("externalId", EXTERNAL_ID)
+            .put("kind", "TICKET")
+            .put("status", "SUCCESS")
+            .put("digest", DIGEST));
+
+        mvc.perform(post(PATH).contentType(MediaType.APPLICATION_JSON)
+                .header(SIGNATURE_HEADER, sign(body)).content(body))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.code").value(40000));
+
+        assertThat(dedupCount("evt-badkind")).isZero();
+        assertThat(taskStatus(imageBuildTaskId)).isEqualTo("WAITING_EXTERNAL");
+    }
+
+    @Test
+    void a_deploy_callback_never_resolves_a_build_task_with_the_same_external_id()
+        throws Exception {
+        byte[] body = webhook("evt-kind", EXTERNAL_ID, JobKind.DEPLOY, "SUCCESS");
+
+        mvc.perform(post(PATH).contentType(MediaType.APPLICATION_JSON)
+                .header(SIGNATURE_HEADER, sign(body)).content(body))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.outcome").value("IGNORED"));
+
+        assertThat(dedupCount("evt-kind"))
+            .as("a valid delivery is recorded, unlike a malformed one")
+            .isEqualTo(1);
+        assertThat(taskStatus(imageBuildTaskId))
+            .as("the DEPLOY lookup does not see BUILD tasks")
+            .isEqualTo("WAITING_EXTERNAL");
+        assertThat(nodeStatus(NodeType.BUILD)).isEqualTo("RUNNING");
+        assertThat(starts(NodeType.TEST_DEPLOY)).isZero();
+    }
+
+    @Test
+    void a_deploy_kind_callback_resolves_the_deploy_task() throws Exception {
+        long deployTask = jdbc.queryForList(
+            "SELECT id FROM node_task WHERE instance_id = ? AND node_type = 'TEST_DEPLOY'"
+                + " ORDER BY id", Long.class, instanceId).get(0);
+        transactionRunner.inTransaction(() -> repository.markTaskWaitingExternal(deployTask,
+            "ext-deploy-1", null, Instant.now().plus(Duration.ofHours(1)), Instant.now()));
+
+        byte[] body = webhook("evt-deploy-1", "ext-deploy-1", JobKind.DEPLOY, "SUCCESS");
+        mvc.perform(post(PATH).contentType(MediaType.APPLICATION_JSON)
+                .header(SIGNATURE_HEADER, sign(body)).content(body))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.outcome").value("ACCEPTED"));
+
+        assertThat(taskStatus(deployTask)).isEqualTo("SUCCESS");
+        assertThat(taskStatus(imageBuildTaskId)).isEqualTo("WAITING_EXTERNAL");
+    }
+
     // ------------------------------------------------------------------ body size limit
 
     @Test
@@ -345,6 +425,25 @@ class CodingWebhookTest {
     // ------------------------------------------------------------------ fixtures and helpers
 
     private byte[] webhook(String eventId, String externalId, String status) {
+        return webhook(eventId, externalId, JobKind.BUILD, status);
+    }
+
+    private byte[] webhook(String eventId, String externalId, JobKind kind, String status) {
+        try {
+            JsonNode body = json.createObjectNode()
+                .put("eventId", eventId)
+                .put("externalId", externalId)
+                .put("kind", kind.name())
+                .put("status", status)
+                .put("digest", DIGEST);
+            return json.writeValueAsBytes(body);
+        } catch (Exception ex) {
+            throw new IllegalStateException(ex);
+        }
+    }
+
+    /** A signed-but-not-mappable delivery: the required {@code kind} field is absent. */
+    private byte[] webhookWithoutKind(String eventId, String externalId, String status) {
         try {
             JsonNode body = json.createObjectNode()
                 .put("eventId", eventId)
@@ -363,6 +462,7 @@ class CodingWebhookTest {
         return json.writeValueAsBytes(json.createObjectNode()
             .put("eventId", "evt-big")
             .put("externalId", EXTERNAL_ID)
+            .put("kind", JobKind.BUILD.name())
             .put("status", "SUCCESS")
             .put("digest", DIGEST)
             .put("pad", padding));

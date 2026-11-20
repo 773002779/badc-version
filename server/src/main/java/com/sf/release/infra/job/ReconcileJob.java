@@ -22,8 +22,10 @@ import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.infra.engine.EngineRegistry;
 import com.sf.release.infra.repo.NodeTaskMapper;
 import com.sf.release.infra.repo.PipelineInstanceMapper;
+import com.sf.release.infra.repo.PipelineNodeMapper;
 import com.sf.release.infra.repo.po.NodeTaskPO;
 import com.sf.release.infra.repo.po.PipelineInstancePO;
+import com.sf.release.infra.repo.po.PipelineNodePO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -70,6 +72,11 @@ import java.util.Set;
  * stop, not a dropped advance: replaying it would re-enter the same blocked node forever. The
  * candidate query only selects {@code RUNNING} rows and the loop double-checks the status.
  *
+ * <p><strong>Stuck nodes.</strong> A RUNNING node whose every counted task is still
+ * {@code PENDING} after ten minutes is reported with an ERROR naming the instance and the node
+ * (I4). Nothing is changed: a handler may still be starting, and restarting a handler needs the
+ * row-level entry claim that is P3.
+ *
  * <p><strong>Listener failures.</strong> Unresolved {@code pipeline_item_failure} rows (V12) are
  * replayed through {@link ItemFailureRepairer}: a successful replay sets {@code resolved_at}, a
  * third failed attempt logs ERROR and leaves the row for operations, and every later round warns
@@ -100,6 +107,13 @@ public class ReconcileJob {
     /** Consecutive failed queries that escalate a task to TIMEOUT (design §6.3). */
     static final int FAILURE_LIMIT = 3;
 
+    /**
+     * A RUNNING node whose every counted task is still PENDING after this long is reported as
+     * stuck (I4). Ten minutes is far beyond a normal entry-to-first-trigger latency, so it is a
+     * real anomaly rather than a slow engine call.
+     */
+    static final Duration STUCK_NODE_AGE = Duration.ofMinutes(10);
+
     /** Upper bound of tasks/instances handled per round, so one round cannot run unbounded. */
     static final int SCAN_LIMIT = 200;
 
@@ -114,6 +128,7 @@ public class ReconcileJob {
     private final PipelineRepository repository;
     private final PipelineOrchestrator orchestrator;
     private final NodeTaskMapper taskMapper;
+    private final PipelineNodeMapper nodeMapper;
     private final PipelineInstanceMapper instanceMapper;
     private final ItemFailureRepairer failureRepairer;
     private final Duration roundDeadline;
@@ -125,10 +140,11 @@ public class ReconcileJob {
                         PipelineRepository repository,
                         PipelineOrchestrator orchestrator,
                         NodeTaskMapper taskMapper,
+                        PipelineNodeMapper nodeMapper,
                         PipelineInstanceMapper instanceMapper,
                         ItemFailureRepairer failureRepairer) {
-        this(lock, engines, engineType, repository, orchestrator, taskMapper, instanceMapper,
-            failureRepairer, DEFAULT_ROUND_DEADLINE, DEFAULT_RENEW_INTERVAL);
+        this(lock, engines, engineType, repository, orchestrator, taskMapper, nodeMapper,
+            instanceMapper, failureRepairer, DEFAULT_ROUND_DEADLINE, DEFAULT_RENEW_INTERVAL);
     }
 
     /**
@@ -145,6 +161,7 @@ public class ReconcileJob {
                         PipelineRepository repository,
                         PipelineOrchestrator orchestrator,
                         NodeTaskMapper taskMapper,
+                        PipelineNodeMapper nodeMapper,
                         PipelineInstanceMapper instanceMapper,
                         ItemFailureRepairer failureRepairer,
                         Duration roundDeadline,
@@ -164,6 +181,7 @@ public class ReconcileJob {
         this.repository = repository;
         this.orchestrator = orchestrator;
         this.taskMapper = taskMapper;
+        this.nodeMapper = nodeMapper;
         this.instanceMapper = instanceMapper;
         this.failureRepairer = failureRepairer;
         this.roundDeadline = roundDeadline;
@@ -182,9 +200,11 @@ public class ReconcileJob {
             int polled = reconcileWaitingTasks(round);
             int resolved = round.held() ? drainItemFailures(round) : 0;
             int repaired = round.held() ? repairRunningInstances(round) : 0;
-            if (polled > 0 || repaired > 0 || resolved > 0) {
+            int stuck = round.held() ? reportStuckNodes(round) : 0;
+            if (polled > 0 || repaired > 0 || resolved > 0 || stuck > 0) {
                 log.info("reconcile round finished: polledTasks={}, repairedInstances={},"
-                    + " resolvedItemFailures={}", polled, repaired, resolved);
+                    + " resolvedItemFailures={}, stuckNodes={}", polled, repaired, resolved,
+                    stuck);
             }
         } catch (RuntimeException ex) {
             // The scheduler must never die because one round hit a transient DB/engine error.
@@ -420,6 +440,42 @@ public class ReconcileJob {
             }
         }
         return true;
+    }
+
+    // ------------------------------------------------------------------ stuck node detection
+
+    /**
+     * Reports nodes that were entered but whose every counted task is still {@code PENDING} after
+     * {@link #STUCK_NODE_AGE} (I4). No state is changed: the row-level entry claim that would let
+     * a node handler be started safely is P3, and inventing a failure here could kill a pipeline
+     * whose handler is simply slow to commit its first trigger. The ERROR names the instance and
+     * the node so operations can act on it.
+     */
+    private int reportStuckNodes(Round round) {
+        Instant now = Instant.now();
+        if (round.expired(now)) {
+            log.warn("reconcile round deadline ({} min) reached before the stuck-node scan",
+                roundDeadline.toMinutes());
+            return 0;
+        }
+        if (!round.ensureLease(now)) {
+            return 0;
+        }
+        List<PipelineNodePO> stuck;
+        try {
+            stuck = nodeMapper.selectStuckNodes(now.minus(STUCK_NODE_AGE), SCAN_LIMIT);
+        } catch (RuntimeException ex) {
+            log.error("reconcile stuck-node scan failed; the next round retries", ex);
+            return 0;
+        }
+        for (PipelineNodePO node : stuck) {
+            log.error("reconcile: pipeline node stuck with every counted task PENDING for more"
+                    + " than {} minutes; no state change (row-level entry claim is P3):"
+                    + " instanceId={}, node={}, startedAt={}",
+                STUCK_NODE_AGE.toMinutes(), node.getInstanceId(), node.getNodeType(),
+                node.getStartedAt());
+        }
+        return stuck.size();
     }
 
     // ------------------------------------------------------------------ helpers

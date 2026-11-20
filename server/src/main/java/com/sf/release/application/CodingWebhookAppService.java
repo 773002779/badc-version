@@ -4,8 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sf.release.common.Masker;
 import com.sf.release.domain.engine.EngineStatus;
+import com.sf.release.domain.engine.JobKind;
 import com.sf.release.domain.pipeline.NodeTaskStatus;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
+import com.sf.release.domain.pipeline.TaskType;
+import com.sf.release.infra.engine.CodingProperties;
 import com.sf.release.infra.engine.CodingStatusMapper;
 import com.sf.release.infra.engine.WebhookVerifier;
 import com.sf.release.infra.repo.EngineEventDedupMapper;
@@ -20,6 +23,8 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.EnumSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -27,11 +32,20 @@ import java.util.Set;
  * event id, map the vendor status, then hand a terminal result to the orchestrator.
  *
  * <p><strong>Order matters.</strong> Signature verification is the first statement and it works
- * on the raw bytes; a rejected request performs <em>no</em> database write. The {@code event_id}
- * row is inserted before any task write, so a duplicate delivery is acknowledged without a
- * second advance. The dedup row and the task completion are separate transactions on purpose:
- * a crash after the insert loses the event for the callback path, but the 30s reconcile query
- * is the durable backstop (design §5.2/§6.3). The row also makes vendor retries cheap.
+ * on the raw bytes; a rejected request performs <em>no</em> database write. The payload is then
+ * parsed against the configurable field mapping ({@code coding.webhook}), including the required
+ * job {@code kind} ({@code BUILD}/{@code DEPLOY}); a missing or unknown kind is rejected as a
+ * malformed delivery (HTTP 400) <em>before</em> the dedup insert, so nothing is recorded. The
+ * {@code event_id} row is inserted before any task write, so a duplicate delivery is
+ * acknowledged without a second advance. The dedup row and the task completion are separate
+ * transactions on purpose: a crash after the insert loses the event for the callback path, but
+ * the 30s reconcile query is the durable backstop (design §5.2/§6.3). The row also makes vendor
+ * retries cheap.
+ *
+ * <p><strong>Kind scopes the lookup.</strong> The task is resolved by
+ * {@code (external_id, kind)}: a {@code BUILD} callback only matches the build-chain tasks and a
+ * {@code DEPLOY} callback only the deploy tasks, because the two CODING namespaces may reuse
+ * numeric ids. A callback of the wrong kind finds no task and changes nothing.
  *
  * <p><strong>Status vocabulary.</strong> The word is mapped by {@link CodingStatusMapper}, i.e.
  * by {@code coding.statusMapping}; the webhook and the poll path cannot disagree. {@code
@@ -64,6 +78,7 @@ public class CodingWebhookAppService {
     private final EngineEventDedupMapper dedupMapper;
     private final NodeTaskMapper taskMapper;
     private final CodingStatusMapper statusMapper;
+    private final CodingProperties properties;
     private final PipelineOrchestrator orchestrator;
     private final ObjectMapper objectMapper;
 
@@ -71,12 +86,14 @@ public class CodingWebhookAppService {
                                    EngineEventDedupMapper dedupMapper,
                                    NodeTaskMapper taskMapper,
                                    CodingStatusMapper statusMapper,
+                                   CodingProperties properties,
                                    PipelineOrchestrator orchestrator,
                                    ObjectMapper objectMapper) {
         this.verifier = verifier;
         this.dedupMapper = dedupMapper;
         this.taskMapper = taskMapper;
         this.statusMapper = statusMapper;
+        this.properties = properties;
         this.orchestrator = orchestrator;
         this.objectMapper = objectMapper;
     }
@@ -126,10 +143,11 @@ public class CodingWebhookAppService {
     // ------------------------------------------------------------------ payload handling
 
     private WebhookResult process(Payload payload) {
-        NodeTaskPO task = taskMapper.selectLatestByExternalId(payload.externalId());
+        NodeTaskPO task = taskMapper.selectLatestByExternalId(payload.externalId(),
+            taskTypesOf(payload.kind()));
         if (task == null) {
-            log.warn("coding webhook event {} references no node_task: externalId={}",
-                payload.eventId(), payload.externalId());
+            log.warn("coding webhook event {} references no {} node_task: externalId={}",
+                payload.eventId(), payload.kind(), payload.externalId());
             return new WebhookResult(Outcome.IGNORED, payload.eventId(), "任务不存在");
         }
         EngineStatus engineStatus = statusMapper.map(payload.status(), "webhook");
@@ -181,11 +199,20 @@ public class CodingWebhookAppService {
             throw new MalformedPayloadException("请求体不是 JSON 对象");
         }
         JsonNode data = root.path("data").isObject() ? root.path("data") : root;
-        String eventId = text(root, data, "eventId", "event_id", "id");
-        String externalId = text(root, data, "externalId", "external_id", "jobId", "job_id");
-        String status = text(root, data, "status", "state", "statusWord");
-        String digest = text(root, data, "digest", "imageDigest", "image_digest");
-        String message = text(root, data, "message", "reason");
+        CodingProperties.Webhook mapping =
+            properties == null || properties.getWebhook() == null
+                ? new CodingProperties.Webhook() : properties.getWebhook();
+        String eventId = text(root, data, mapping.getEventIdField(),
+            "eventId", "event_id", "id");
+        String externalId = text(root, data, mapping.getExternalIdField(),
+            "externalId", "external_id", "jobId", "job_id");
+        String status = text(root, data, mapping.getStatusField(),
+            "status", "state", "statusWord");
+        String kindWord = text(root, data, mapping.getKindField(),
+            "kind", "jobKind", "job_kind");
+        String digest = text(root, data, mapping.getDigestField(),
+            "digest", "imageDigest", "image_digest");
+        String message = text(root, data, mapping.getMessageField(), "message", "reason");
         if (eventId == null) {
             throw new MalformedPayloadException("缺少 eventId");
         }
@@ -195,13 +222,39 @@ public class CodingWebhookAppService {
         if (status == null) {
             throw new MalformedPayloadException("缺少 status");
         }
+        if (kindWord == null) {
+            throw new MalformedPayloadException("缺少 kind（BUILD/DEPLOY），拒绝内联猜测任务类型");
+        }
+        JobKind kind = parseKind(kindWord);
         if (eventId.length() > MAX_EVENT_ID_LENGTH) {
             throw new MalformedPayloadException("eventId 长度超限");
         }
         if (externalId.length() > MAX_EXTERNAL_ID_LENGTH) {
             throw new MalformedPayloadException("externalId 长度超限");
         }
-        return new Payload(eventId, externalId, status, digest, message);
+        return new Payload(eventId, externalId, status, kind, digest, message);
+    }
+
+    /** {@code BUILD}/{@code DEPLOY}, case-insensitive; anything else is an invalid delivery. */
+    private static JobKind parseKind(String raw) {
+        try {
+            return JobKind.valueOf(raw.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ex) {
+            throw new MalformedPayloadException("kind 不合法：" + raw + "（期望 BUILD 或 DEPLOY）");
+        }
+    }
+
+    /**
+     * The node-task types of one engine job family: a {@code BUILD} callback can only resolve
+     * the build chain, a {@code DEPLOY} callback only the deploy tasks. This is the same split
+     * the reconcile query uses, expressed in the task vocabulary the webhook looks up.
+     */
+    static List<String> taskTypesOf(JobKind kind) {
+        return switch (kind) {
+            case BUILD -> List.of(TaskType.CODE_CHECK.name(), TaskType.PKG_BUILD.name(),
+                TaskType.IMG_BUILD.name());
+            case DEPLOY -> List.of(TaskType.DEPLOY.name(), TaskType.ROLLBACK.name());
+        };
     }
 
     private static NodeTaskStatus nodeStatusOf(EngineStatus status) {
@@ -234,9 +287,16 @@ public class CodingWebhookAppService {
         }
     }
 
-    private static String text(JsonNode root, JsonNode data, String... names) {
-        for (String name : names) {
-            String value = textOf(root.get(name));
+    private static String text(JsonNode root, JsonNode data, String preferred, String... aliases) {
+        String value = textOf(root.get(preferred));
+        if (value == null) {
+            value = textOf(data.get(preferred));
+        }
+        if (value != null) {
+            return value;
+        }
+        for (String name : aliases) {
+            value = textOf(root.get(name));
             if (value == null) {
                 value = textOf(data.get(name));
             }
@@ -284,8 +344,8 @@ public class CodingWebhookAppService {
     }
 
     /** Canonical payload of the callback; see the report for the documented field aliases. */
-    private record Payload(String eventId, String externalId, String status, String digest,
-                           String message) {
+    private record Payload(String eventId, String externalId, String status, JobKind kind,
+                           String digest, String message) {
     }
 
     /** A verification-passing body that cannot be mapped to the contract. */

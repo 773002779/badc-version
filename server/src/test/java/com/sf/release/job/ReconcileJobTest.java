@@ -27,6 +27,7 @@ import com.sf.release.infra.engine.EngineRegistry;
 import com.sf.release.infra.job.ReconcileJob;
 import com.sf.release.infra.repo.NodeTaskMapper;
 import com.sf.release.infra.repo.PipelineInstanceMapper;
+import com.sf.release.infra.repo.PipelineNodeMapper;
 import com.sf.release.infra.security.TestUserContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -77,6 +78,7 @@ class ReconcileJobTest {
     @Autowired PipelineRepository repository;
     @Autowired TransactionRunner transactionRunner;
     @Autowired NodeTaskMapper taskMapper;
+    @Autowired PipelineNodeMapper nodeMapper;
     @Autowired PipelineInstanceMapper instanceMapper;
     @Autowired DistributedLock distributedLock;
     @Autowired ItemFailureRepairer failureRepairer;
@@ -132,7 +134,7 @@ class ReconcileJobTest {
 
         engine = new StubEngine();
         job = new ReconcileJob(distributedLock, new EngineRegistry(List.of(engine)), "CODING",
-            repository, orchestrator, taskMapper, instanceMapper, failureRepairer);
+            repository, orchestrator, taskMapper, nodeMapper, instanceMapper, failureRepairer);
     }
 
     @AfterEach
@@ -285,8 +287,8 @@ class ReconcileJobTest {
         waitingBuildTask(Duration.ofMinutes(5), Duration.ofHours(1));
         ProbeLock probe = new ProbeLock();
         ReconcileJob bounded = new ReconcileJob(probe, new EngineRegistry(List.of(engine)),
-            "CODING", repository, orchestrator, taskMapper, instanceMapper, failureRepairer,
-            Duration.ZERO, Duration.ofMinutes(1));
+            "CODING", repository, orchestrator, taskMapper, nodeMapper, instanceMapper,
+            failureRepairer, Duration.ZERO, Duration.ofMinutes(1));
 
         bounded.run();
 
@@ -305,8 +307,8 @@ class ReconcileJobTest {
         ProbeLock probe = new ProbeLock();
         probe.renewResult = false;
         ReconcileJob bounded = new ReconcileJob(probe, new EngineRegistry(List.of(engine)),
-            "CODING", repository, orchestrator, taskMapper, instanceMapper, failureRepairer,
-            Duration.ofMinutes(10), Duration.ZERO);
+            "CODING", repository, orchestrator, taskMapper, nodeMapper, instanceMapper,
+            failureRepairer, Duration.ofMinutes(10), Duration.ZERO);
 
         bounded.run();
 
@@ -316,6 +318,37 @@ class ReconcileJobTest {
             .as("an unconditional unlock would steal the new holder's lease")
             .isZero();
         assertThat(output.getAll()).contains("could not be renewed");
+    }
+
+    // ------------------------------------------------------------------ stuck node detection (I4)
+
+    @Test
+    void a_node_with_only_pending_tasks_older_than_ten_minutes_is_reported_without_state_change(
+            CapturedOutput output) {
+        jdbc.update("UPDATE pipeline_node SET started_at = ? WHERE instance_id = ?"
+                + " AND node_type = 'BUILD'",
+            Timestamp.from(Instant.now().minus(Duration.ofMinutes(11))), instanceId);
+
+        job.run();
+
+        assertThat(output.getAll())
+            .as("the stuck node is an ERROR naming the instance and the node")
+            .contains("stuck")
+            .contains("instanceId=" + instanceId)
+            .contains("BUILD");
+        assertThat(nodeStatus(NodeType.BUILD)).isEqualTo("RUNNING");
+        assertThat(instanceStatus()).isEqualTo("RUNNING");
+        assertThat(taskIds(NodeType.BUILD))
+            .allSatisfy(taskId -> assertThat(taskStatus(taskId)).isEqualTo("PENDING"));
+    }
+
+    @Test
+    void a_freshly_entered_node_with_pending_tasks_is_not_reported_stuck(CapturedOutput output) {
+        // Entered moments ago: the handler may still be committing its first trigger.
+        job.run();
+
+        assertThat(output.getAll()).doesNotContain("stuck");
+        assertThat(nodeStatus(NodeType.BUILD)).isEqualTo("RUNNING");
     }
 
     // ------------------------------------------------------------------ item failure repair

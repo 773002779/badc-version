@@ -23,6 +23,7 @@ public class CodingProperties {
 
     private Map<String, Endpoint> endpoints = new LinkedHashMap<>();
     private Map<String, List<String>> statusMapping = new LinkedHashMap<>();
+    private Webhook webhook = new Webhook();
 
     public Map<String, Endpoint> getEndpoints() {
         return endpoints;
@@ -38,6 +39,82 @@ public class CodingProperties {
 
     public void setStatusMapping(Map<String, List<String>> statusMapping) {
         this.statusMapping = statusMapping == null ? new LinkedHashMap<>() : new LinkedHashMap<>(statusMapping);
+    }
+
+    public Webhook getWebhook() {
+        return webhook;
+    }
+
+    public void setWebhook(Webhook webhook) {
+        this.webhook = webhook == null ? new Webhook() : webhook;
+    }
+
+    /**
+     * Field names of the CODING webhook payload, configurable in {@code coding-endpoints.yml}
+     * under {@code coding.webhook}. The defaults are the field names documented for the phase-1
+     * contract; a tenant that wraps them differently only needs a YAML change.
+     *
+     * <p><strong>{@code kind} is required.</strong> A callback tells which engine job family it
+     * belongs to ({@code BUILD} or {@code DEPLOY}), because an external id alone does not: build
+     * and deploy jobs are different CODING namespaces. A delivery without a parseable kind is
+     * rejected with HTTP 400 before any database write.
+     */
+    public static class Webhook {
+
+        private String eventIdField = "eventId";
+        private String externalIdField = "externalId";
+        private String statusField = "status";
+        private String kindField = "kind";
+        private String digestField = "digest";
+        private String messageField = "message";
+
+        public String getEventIdField() {
+            return eventIdField;
+        }
+
+        public void setEventIdField(String eventIdField) {
+            this.eventIdField = eventIdField;
+        }
+
+        public String getExternalIdField() {
+            return externalIdField;
+        }
+
+        public void setExternalIdField(String externalIdField) {
+            this.externalIdField = externalIdField;
+        }
+
+        public String getStatusField() {
+            return statusField;
+        }
+
+        public void setStatusField(String statusField) {
+            this.statusField = statusField;
+        }
+
+        public String getKindField() {
+            return kindField;
+        }
+
+        public void setKindField(String kindField) {
+            this.kindField = kindField;
+        }
+
+        public String getDigestField() {
+            return digestField;
+        }
+
+        public void setDigestField(String digestField) {
+            this.digestField = digestField;
+        }
+
+        public String getMessageField() {
+            return messageField;
+        }
+
+        public void setMessageField(String messageField) {
+            this.messageField = messageField;
+        }
     }
 
     /** One endpoint template: HTTP method, URL pattern and optional JSONPath mappings. */

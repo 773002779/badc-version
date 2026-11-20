@@ -45,13 +45,24 @@ public interface NodeTaskMapper extends BaseMapper<NodeTaskPO> {
                                         @Param("limit") int limit);
 
     /**
-     * The most recent task row carrying {@code externalId}. The column is indexed but not
-     * unique (a retried task keeps the old row), so the callback resolves the latest row and the
-     * completion service's CAS makes a late callback a no-op.
+     * The most recent task row carrying {@code externalId} <em>of one engine job family</em>.
+     * The column is indexed but not unique (a retried task keeps the old row), so the callback
+     * resolves the latest row and the completion service's CAS makes a late callback a no-op.
+     *
+     * <p><strong>Kind-scoped on purpose.</strong> Build and deploy jobs are different CODING
+     * namespaces and their ids may collide; a build callback must never complete a deploy task
+     * (or the other way round). {@code taskTypes} is the family's task-type vocabulary, so a
+     * callback for the wrong kind simply finds no row.
+     *
+     * @param taskTypes the task types of the callback kind; must not be empty
      */
-    @Select("SELECT * FROM node_task WHERE external_id = #{externalId}"
-        + " ORDER BY id DESC LIMIT 1")
-    NodeTaskPO selectLatestByExternalId(@Param("externalId") String externalId);
+    @Select("<script>SELECT * FROM node_task WHERE external_id = #{externalId}"
+        + " AND task_type IN"
+        + " <foreach collection='taskTypes' item='taskType' open='(' separator=',' close=')'>"
+        + "#{taskType}</foreach>"
+        + " ORDER BY id DESC LIMIT 1</script>")
+    NodeTaskPO selectLatestByExternalId(@Param("externalId") String externalId,
+                                       @Param("taskTypes") List<String> taskTypes);
 
     /** The current consecutive-failure counter of one task, for the reconcile escalation. */
     @Select("SELECT query_failures FROM node_task WHERE id = #{taskId}")

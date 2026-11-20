@@ -36,10 +36,13 @@ import org.springframework.stereotype.Component;
  * effect. A transition that throws (corrupt row, unexpected DB error) is caught, logged and
  * recorded in {@code pipeline_item_failure} through
  * {@link ItemFailureAppService#record}; the 30s reconcile replays it
- * ({@link com.sf.release.domain.pipeline.port.ItemFailureRepairer}). A deliberately rejected
- * transition (late/duplicate event) is a WARN and is not recorded: retrying it forever would
- * only produce noise. Idempotency is unchanged: {@code allowedEvents} is checked before the
- * transition and the write is a {@code row_version} CAS.
+ * ({@link com.sf.release.domain.pipeline.port.ItemFailureRepairer}). A lost {@code row_version}
+ * CAS ({@code CAS_LOST}) is recorded the same way — the event was meant to apply and the current
+ * row may accept it — so a transient concurrent write cannot silently drop a state change. A
+ * deliberately rejected transition ({@code NOT_ALLOWED}: late/duplicate event) is a WARN and is
+ * not recorded: retrying it forever would only produce noise. Idempotency is unchanged:
+ * {@code allowedEvents} is checked before the transition and the write is a {@code row_version}
+ * CAS.
  */
 @Component
 public class PipelineEventListener {
@@ -99,8 +102,17 @@ public class PipelineEventListener {
                 case NOT_ALLOWED -> log.warn("item {} does not accept {} (instanceId={},"
                         + " node={}, nodeStatus={}); skipped", itemId, itemEvent,
                     event.instanceId(), event.nodeType(), event.status());
-                case CAS_LOST -> log.warn("item {} state CAS lost for {} (instanceId={})",
-                    itemId, itemEvent, event.instanceId());
+                case CAS_LOST -> {
+                    // A lost row_version CAS is not a rejected event: the transition was meant
+                    // to happen and another writer got there first. Record it so the 30s drain
+                    // replays it against the now-current row (it may be legal from the new
+                    // state), exactly like a thrown transition. The record is a REQUIRES_NEW
+                    // insert, so the pipeline transaction keeps committing.
+                    log.warn("item state CAS lost, recorded for repair: instanceId={}, itemId={}, event={}",
+                        event.instanceId(), itemId, itemEvent);
+                    failureService.record(event.instanceId(), itemId, itemEvent.name(),
+                        "state transition CAS lost: row_version changed concurrently");
+                }
             }
         } catch (RuntimeException ex) {
             // Persist instead of only logging: a swallowed listener failure must still have a

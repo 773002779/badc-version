@@ -8,6 +8,7 @@ import com.sf.release.infra.engine.EngineRegistry;
 import com.sf.release.infra.job.ReconcileJob;
 import com.sf.release.infra.repo.NodeTaskMapper;
 import com.sf.release.infra.repo.PipelineInstanceMapper;
+import com.sf.release.infra.repo.PipelineNodeMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -30,10 +31,11 @@ public class JobConfig {
                                      PipelineRepository repository,
                                      PipelineOrchestrator orchestrator,
                                      NodeTaskMapper taskMapper,
+                                     PipelineNodeMapper nodeMapper,
                                      PipelineInstanceMapper instanceMapper,
                                      ItemFailureRepairer failureRepairer,
                                      @Value("${release.engine.type:CODING}") String engineType) {
         return new ReconcileJob(lock, engines, engineType, repository, orchestrator, taskMapper,
-            instanceMapper, failureRepairer);
+            nodeMapper, instanceMapper, failureRepairer);
     }
 }

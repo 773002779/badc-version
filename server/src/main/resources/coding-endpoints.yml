@@ -103,3 +103,21 @@ coding:
     SUCCESS: [SUCCESS, FINISHED]
     FAILED: [FAILED, ERROR]
     CANCELED: [CANCELED, CANCELLED]
+
+  # CODING webhook payload mapping (tech design §6.3). The field names below are the
+  # documented default contract; rename one here when the tenant wraps its callback
+  # differently, no code change is needed.
+  #
+  # kind (default field "kind", values BUILD or DEPLOY, case-insensitive) is REQUIRED: a build
+  # job and a deploy job have separate CODING namespaces, so the external id alone cannot tell
+  # which node_task a callback belongs to. A delivery with a missing or unknown kind is
+  # rejected with HTTP 400 and never touches the database (no dedup row, no task write). The
+  # kind also scopes the task lookup: BUILD only matches the build-chain tasks
+  # (CODE_CHECK/PKG_BUILD/IMG_BUILD), DEPLOY only DEPLOY/ROLLBACK.
+  webhook:
+    eventIdField: eventId
+    externalIdField: externalId
+    statusField: status
+    kindField: kind
+    digestField: digest
+    messageField: message
