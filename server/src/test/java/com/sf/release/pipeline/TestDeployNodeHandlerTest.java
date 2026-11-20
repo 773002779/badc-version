@@ -12,11 +12,13 @@ import com.sf.release.domain.engine.JobKind;
 import com.sf.release.domain.engine.TriggerResult;
 import com.sf.release.domain.pipeline.NodeHandler;
 import com.sf.release.domain.pipeline.NodeHandlerRegistry;
+import com.sf.release.domain.pipeline.NodeTask;
 import com.sf.release.domain.pipeline.NodeTaskCompletionService;
 import com.sf.release.domain.pipeline.NodeTaskStatus;
 import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
+import com.sf.release.domain.pipeline.TaskType;
 import com.sf.release.domain.pipeline.event.NodeTaskCompletedEvent;
 import com.sf.release.domain.pipeline.event.TestEnvReadyEvent;
 import com.sf.release.domain.pipeline.handler.TestDeployNodeHandler;
@@ -43,11 +45,16 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The TEST_DEPLOY node against the real test schema (MySQL, Flyway V1-V8) with a stub
+ * The TEST_DEPLOY node against the real test schema (MySQL, Flyway V1-V9) with a stub
  * {@link CicdEngine}.
  *
  * <p>Entering {@code TEST_DEPLOY} deploys the image built by {@code BUILD} to <em>every</em>
@@ -84,6 +91,7 @@ class TestDeployNodeHandlerTest {
     @Autowired EventRecorder recorder;
 
     private StubEngine engine;
+    private TestDeployNodeHandler handler;
     private long instanceId;
     private long unitId;
     private long testDeOne;
@@ -130,8 +138,9 @@ class TestDeployNodeHandlerTest {
         engine = new StubEngine();
         recorder.clear();
         handlers.clear();
-        handlers.register(new TestDeployNodeHandler(engine, repository, transactionRunner,
-            completionService, eventBus));
+        handler = new TestDeployNodeHandler(engine, repository, transactionRunner,
+            completionService, eventBus);
+        handlers.register(handler);
         handlers.register(noop(NodeType.BUILD));
         handlers.register(noop(NodeType.VERIFY));
         handlers.register(noop(NodeType.PROD_DEPLOY));
@@ -235,6 +244,9 @@ class TestDeployNodeHandlerTest {
         assertThat(event.publishNo()).isEqualTo(publishNo);
         assertThat(event.instanceId()).isEqualTo(instanceId);
         assertThat(event.readyAt()).isNotNull();
+        assertThat(testReadyAt())
+            .as("the durable ready claim is written with the event")
+            .isNotNull();
 
         assertThat(taskStatus(taskIdFor(testDeOne))).isEqualTo("SUCCESS");
         assertThat(taskStatus(taskIdFor(testDeTwo))).isEqualTo("SUCCESS");
@@ -246,6 +258,155 @@ class TestDeployNodeHandlerTest {
         assertThat(recorder.testEnvReady)
             .as("a duplicate completion callback publishes nothing")
             .hasSize(1);
+
+        handler.onTaskCompleted(repository.loadInstance(instanceId),
+            repository.loadTask(taskIdFor(testDeTwo)));
+        assertThat(recorder.testEnvReady)
+            .as("the durable claim suppresses a second publication even off the callback path")
+            .hasSize(1);
+    }
+
+    @Test
+    void only_one_concurrent_claim_of_the_ready_marker_wins() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<Boolean>> claims = new ArrayList<>();
+            for (int attempt = 0; attempt < 2; attempt++) {
+                claims.add(pool.submit(() -> {
+                    start.await();
+                    return repository.claimTestReady(instanceId);
+                }));
+            }
+            start.countDown();
+
+            long winners = 0;
+            for (Future<Boolean> claim : claims) {
+                if (claim.get(10, TimeUnit.SECONDS)) {
+                    winners++;
+                }
+            }
+            assertThat(winners)
+                .as("the test_ready_at compare-and-set lets exactly one concurrent claim win")
+                .isEqualTo(1);
+            assertThat(testReadyAt()).isNotNull();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void ready_event_is_published_once_under_concurrent_completions() throws Exception {
+        enterTestDeploy();
+        long firstTask = taskIdFor(testDeOne);
+        long secondTask = taskIdFor(testDeTwo);
+        jdbc.update("UPDATE node_task SET status = 'SUCCESS', finished_at = NOW(3)"
+            + " WHERE id IN (?, ?)", firstTask, secondTask);
+        PipelineInstance current = repository.loadInstance(instanceId);
+        NodeTask completedFirst = repository.loadTask(firstTask);
+        NodeTask completedSecond = repository.loadTask(secondTask);
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<?>> calls = List.of(
+                pool.submit(() -> {
+                    start.await();
+                    handler.onTaskCompleted(current, completedFirst);
+                    return null;
+                }),
+                pool.submit(() -> {
+                    start.await();
+                    handler.onTaskCompleted(current, completedSecond);
+                    return null;
+                }));
+            start.countDown();
+            for (Future<?> call : calls) {
+                call.get(10, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(recorder.testEnvReady)
+            .as("two concurrent completion hooks claim the event once")
+            .hasSize(1);
+        assertThat(testReadyAt()).isNotNull();
+
+        handler.onTaskCompleted(repository.loadInstance(instanceId), completedSecond);
+        assertThat(recorder.testEnvReady).hasSize(1);
+    }
+
+    @Test
+    void empty_test_deploy_node_never_claims_ready() {
+        jdbc.update("DELETE FROM node_task WHERE instance_id = ?"
+            + " AND node_type = 'TEST_DEPLOY'", instanceId);
+        NodeTask completed = new NodeTask(0L, instanceId, NodeType.TEST_DEPLOY, TaskType.DEPLOY,
+            0, testDeOne, NodeTaskStatus.SUCCESS, 0, null, null, null, null, null, null, null);
+
+        handler.onTaskCompleted(repository.loadInstance(instanceId), completed);
+
+        assertThat(recorder.testEnvReady).isEmpty();
+        assertThat(testReadyAt()).isNull();
+    }
+
+    @Test
+    void a_skipped_deploy_is_neutral_for_readiness() {
+        enterTestDeploy();
+        jdbc.update("UPDATE node_task SET status = 'SKIPPED', finished_at = NOW(3)"
+            + " WHERE id = ?", taskIdFor(testDeTwo));
+
+        orchestrator.onTaskCompleted(taskIdFor(testDeOne), NodeTaskStatus.SUCCESS, null, null);
+
+        assertThat(recorder.testEnvReady)
+            .as("SKIPPED is neutral in the orchestrator fold, so a completable node is ready")
+            .hasSize(1);
+        assertThat(taskStatus(taskIdFor(testDeOne))).isEqualTo("SUCCESS");
+        assertThat(taskStatus(taskIdFor(testDeTwo))).isEqualTo("SKIPPED");
+        assertThat(nodeStatus(NodeType.TEST_DEPLOY)).isEqualTo("SUCCESS");
+    }
+
+    @Test
+    void missing_test_deploy_binding_fails_the_tasks_without_calling_the_engine() {
+        jdbc.update("UPDATE coding_task_binding SET enabled = 0"
+            + " WHERE unit_id = ? AND task_kind = 'TEST_DEPLOY'", unitId);
+
+        enterTestDeploy();
+
+        assertThat(engine.deployCalls)
+            .as("no deploy may be sent with a null plan id")
+            .isEmpty();
+        assertThat(taskStatus(taskIdFor(testDeOne))).isEqualTo("FAILED");
+        assertThat(taskStatus(taskIdFor(testDeTwo))).isEqualTo("FAILED");
+        assertThat(resultSummary(taskIdFor(testDeOne)))
+            .contains("UNIT_NOT_CONFIGURED")
+            .contains("TEST_DEPLOY");
+        assertThat(recorder.taskCompleted)
+            .filteredOn(event -> event.status() == NodeTaskStatus.FAILED)
+            .as("every affected deploy task fails through the completion service")
+            .hasSize(2);
+        assertThat(recorder.testEnvReady).isEmpty();
+        assertThat(testReadyAt()).isNull();
+        assertThat(nodeStatus(NodeType.TEST_DEPLOY)).isEqualTo("FAILED");
+        assertThat(instanceStatus()).isEqualTo("FAILED");
+    }
+
+    @Test
+    void missing_built_image_digest_fails_the_tasks_without_calling_the_engine() {
+        enterTestDeploy(null);
+
+        assertThat(engine.deployCalls)
+            .as("a deploy without the built image must not reach the engine")
+            .isEmpty();
+        assertThat(taskStatus(taskIdFor(testDeOne))).isEqualTo("FAILED");
+        assertThat(taskStatus(taskIdFor(testDeTwo))).isEqualTo("FAILED");
+        assertThat(resultSummary(taskIdFor(testDeOne)))
+            .contains("STATE_NOT_ALLOWED")
+            .contains("image digest");
+        assertThat(recorder.testEnvReady).isEmpty();
+        assertThat(testReadyAt()).isNull();
+        assertThat(nodeStatus(NodeType.TEST_DEPLOY)).isEqualTo("FAILED");
+        assertThat(instanceStatus()).isEqualTo("FAILED");
     }
 
     @Test
@@ -333,8 +494,12 @@ class TestDeployNodeHandlerTest {
      * commit.
      */
     private void enterTestDeploy() {
+        enterTestDeploy(DIGEST);
+    }
+
+    private void enterTestDeploy(String imageDigest) {
         jdbc.update("UPDATE pipeline_instance SET current_node = 'TEST_DEPLOY', image_digest = ?"
-            + " WHERE id = ?", DIGEST, instanceId);
+            + " WHERE id = ?", imageDigest, instanceId);
         jdbc.update("UPDATE pipeline_node SET status = 'SUCCESS', started_at = NOW(3),"
             + " finished_at = NOW(3) WHERE instance_id = ? AND node_type = 'BUILD'", instanceId);
         jdbc.update("UPDATE node_task SET status = 'SUCCESS', started_at = NOW(3),"
@@ -394,6 +559,13 @@ class TestDeployNodeHandlerTest {
     private String instanceImageDigest() {
         return jdbc.queryForObject("SELECT image_digest FROM pipeline_instance WHERE id = ?",
             String.class, instanceId);
+    }
+
+    private Instant testReadyAt() {
+        java.sql.Timestamp value = jdbc.queryForObject(
+            "SELECT test_ready_at FROM pipeline_instance WHERE id = ?",
+            java.sql.Timestamp.class, instanceId);
+        return value == null ? null : value.toInstant();
     }
 
     private void givenUser(String userId) {

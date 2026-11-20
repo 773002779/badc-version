@@ -92,6 +92,17 @@ public interface PipelineRepository {
     DeployContext deployContextOf(long instanceId);
 
     /**
+     * Durably claims the once-only {@code TestEnvReadyEvent} publication of an instance: the
+     * first caller sets {@code pipeline_instance.test_ready_at} and wins, every later caller —
+     * another thread, another application instance, a retry — loses. The compare-and-set is the
+     * exactly-once guarantee because the completion hook that observes readiness runs outside
+     * the instance lock and an in-process flag would not survive a restart.
+     *
+     * @return {@code true} when this call claimed the publication
+     */
+    boolean claimTestReady(long instanceId);
+
+    /**
      * Records the commit an engine trigger reported for this instance, so later steps of the
      * chain build the same commit. Only a reported (non-blank) commit is written.
      */

@@ -1,5 +1,7 @@
 package com.sf.release.domain.pipeline.handler;
 
+import com.sf.release.common.BizError;
+import com.sf.release.common.BizException;
 import com.sf.release.domain.engine.CicdEngine;
 import com.sf.release.domain.engine.DeployCmd;
 import com.sf.release.domain.engine.EngineException;
@@ -26,8 +28,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Executes the {@code TEST_DEPLOY} node: one independent deploy per configured TEST DE
@@ -42,10 +42,14 @@ import java.util.concurrent.ConcurrentHashMap;
  * recovery path of Task 14 — triggers only the latest attempt of a task still {@code PENDING},
  * so an already running deploy is never triggered twice.
  *
- * <p><strong>Image.</strong> The command carries the image the instance already built
- * ({@code image_digest}/{@code image_tag}); the TEST_DEPLOY node never rebuilds. The deploy plan
+ * <p><strong>Image and plan.</strong> The command carries the image the instance already built
+ * ({@code image_digest}; the schema has no image tag column and {@code DeployCmd} carries no
+ * tag yet); the TEST_DEPLOY node never rebuilds. The deploy plan
  * is the unit's enabled {@code TEST_DEPLOY} binding and the DE coordinates come from
- * {@code env_de} rows with {@code env_kind = TEST}.
+ * {@code env_de} rows with {@code env_kind = TEST}. A missing binding or a missing built image
+ * is a configuration/state failure: the startable deploy tasks are marked {@code FAILED} with a
+ * {@code UNIT_NOT_CONFIGURED}/{@code STATE_NOT_ALLOWED} reason and the handler aborts before any
+ * engine call — a deploy is never sent with a null plan or a null image.
  *
  * <p><strong>Failures.</strong> An {@link EngineException} on one DE marks only that task
  * {@code FAILED} through {@link NodeTaskCompletionService} (so the normal completion event is
@@ -56,9 +60,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * orchestrator; this handler does not fail the sibling records.
  *
  * <p><strong>Ready event.</strong> {@link TestEnvReadyEvent} is published at most once per
- * instance, from {@link #onTaskCompleted(PipelineInstance, NodeTask)} after the completion
- * transaction committed, and only when every latest-attempt {@code DEPLOY} task of the node is
- * {@code SUCCESS}. A partial success publishes nothing.
+ * instance through the durable {@link PipelineRepository#claimTestReady(long)} compare-and-set
+ * on {@code pipeline_instance.test_ready_at}, from
+ * {@link #onTaskCompleted(PipelineInstance, NodeTask)} after the completion transaction
+ * committed, and only when every latest-attempt {@code DEPLOY} task of the node is
+ * {@code SUCCESS} (a latest {@code SKIPPED} is neutral, mirroring the orchestrator's completion
+ * fold). A partial success publishes nothing; a node without any deploy task claims nothing.
  *
  * <p><strong>Persistence boundaries.</strong> No pipeline row lock is held while the engine call
  * runs: the command is resolved first, the HTTP call happens outside a transaction, and the
@@ -78,14 +85,6 @@ public final class TestDeployNodeHandler implements NodeHandler {
     private final TransactionRunner transactionRunner;
     private final NodeTaskCompletionService completionService;
     private final PipelineEventBus eventBus;
-
-    /**
-     * Instances whose ready event this process already published. The completion hook runs
-     * after the completing transaction but outside the instance lock, so the last two DE
-     * callbacks could otherwise both observe "all succeeded". Publishing is idempotent per
-     * instance and notification-only, so a duplicate is worse than a replay.
-     */
-    private final Set<Long> readyPublished = ConcurrentHashMap.newKeySet();
 
     public TestDeployNodeHandler(CicdEngine engine, PipelineRepository repository,
                                  TransactionRunner transactionRunner,
@@ -128,9 +127,17 @@ public final class TestDeployNodeHandler implements NodeHandler {
             return;
         }
         PipelineRepository.DeployContext context = repository.deployContextOf(current.id());
-        if (current.imageDigest() == null) {
-            log.warn("deploying without a built image digest: instanceId={}, pipelineNo={}",
-                current.id(), current.pipelineNo());
+        if (context.planId() == null || context.planId().isBlank()) {
+            String reason = "UNIT_NOT_CONFIGURED: no enabled TEST_DEPLOY binding for unit "
+                + context.unitId();
+            failDeploys(startable, reason);
+            throw new BizException(BizError.UNIT_NOT_CONFIGURED, reason);
+        }
+        if (current.imageDigest() == null || current.imageDigest().isBlank()) {
+            String reason = "STATE_NOT_ALLOWED: the pipeline instance has no built image"
+                + " digest, refusing to deploy";
+            failDeploys(startable, reason);
+            throw new BizException(BizError.STATE_NOT_ALLOWED, reason);
         }
         for (NodeTask task : startable) {
             PipelineRepository.DeployTarget target = context.targetOf(task.targetId());
@@ -186,9 +193,11 @@ public final class TestDeployNodeHandler implements NodeHandler {
     }
 
     /**
-     * Re-reads the committed aggregate in its own short transaction and publishes
-     * {@link TestEnvReadyEvent} when the node's latest-attempt deploy tasks all succeeded. The
-     * publication happens after that read transaction returns, so it is strictly post-commit.
+     * Re-reads the committed aggregate in its own short transaction and, when the node's
+     * latest-attempt deploy tasks are all successful, claims the durable exactly-once
+     * publication before publishing {@link TestEnvReadyEvent}. The claim is a compare-and-set on
+     * {@code pipeline_instance.test_ready_at}: only one thread or application instance can win,
+     * so a concurrent completion callback cannot publish a second event.
      */
     private void publishReadyIfAllDeploysSucceeded(PipelineInstance instance) {
         PipelineInstance current = transactionRunner.inTransaction(
@@ -203,7 +212,7 @@ public final class TestDeployNodeHandler implements NodeHandler {
         PipelineRepository.DeployContext context = repository.deployContextOf(current.id());
         Instant now = Instant.now();
         TestEnvReadyEvent event = new TestEnvReadyEvent(context.publishNo(), current.id(), now);
-        if (!readyPublished.add(current.id())) {
+        if (!repository.claimTestReady(current.id())) {
             log.debug("test env ready event already published: instanceId={}", current.id());
             return;
         }
@@ -242,18 +251,38 @@ public final class TestDeployNodeHandler implements NodeHandler {
         return latest;
     }
 
-    /** Every latest-attempt deploy task succeeded; no TEST DE at all is not a ready environment. */
+    /**
+     * Every latest-attempt deploy task is {@code SUCCESS} or neutral {@code SKIPPED}. The
+     * {@code SKIPPED} rule mirrors the orchestrator's completion fold, so a node the orchestrator
+     * may complete as {@code SUCCESS} can also publish the ready event. A node without any
+     * deploy task is not a ready environment and never claims the event.
+     */
     private static boolean allDeploysSucceeded(PipelineNode node) {
         Map<DeployKey, NodeTask> latest = latestDeploys(node);
         if (latest.isEmpty()) {
             return false;
         }
         for (NodeTask task : latest.values()) {
-            if (task.status() != NodeTaskStatus.SUCCESS) {
+            if (task.status() != NodeTaskStatus.SUCCESS
+                    && task.status() != NodeTaskStatus.SKIPPED) {
                 return false;
             }
         }
         return true;
+    }
+
+    /**
+     * Marks the affected deploy tasks {@code FAILED} through the completion service in one short
+     * transaction, so a configuration failure publishes the usual completion events instead of
+     * silently dropping the tasks.
+     */
+    private void failDeploys(List<NodeTask> tasks, String summary) {
+        transactionRunner.inTransaction(() -> {
+            for (NodeTask task : tasks) {
+                completionService.apply(task.id(), NodeTaskStatus.FAILED, null, summary);
+            }
+            return null;
+        });
     }
 
     /**

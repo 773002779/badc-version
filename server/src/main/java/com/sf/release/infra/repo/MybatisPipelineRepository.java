@@ -272,6 +272,11 @@ public class MybatisPipelineRepository implements PipelineRepository {
     }
 
     @Override
+    public boolean claimTestReady(long instanceId) {
+        return instanceMapper.claimTestReady(instanceId, Instant.now()) == 1;
+    }
+
+    @Override
     public boolean recordCommit(long instanceId, String commitSha) {
         String commit = trimToNull(commitSha);
         if (commit == null) {
