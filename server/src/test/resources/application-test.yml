@@ -5,3 +5,9 @@ spring:
     password: root
   flyway:
     clean-disabled: false
+
+# Deterministic test-only credential key. In production the cipher reads the real
+# CODING_CRED_KEY environment variable; the value is published in the test resources on
+# purpose (Base64 of the 32 ASCII bytes 0123456789abcdef0123456789abcdef) and is not a
+# secret. An OS environment variable takes precedence over this property.
+CODING_CRED_KEY: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="

@@ -1,0 +1,260 @@
+package com.sf.release.engine;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sf.release.application.CodingConnAppService;
+import com.sf.release.application.CodingConnAppService.CodingConnView;
+import com.sf.release.common.BizError;
+import com.sf.release.common.BizException;
+import com.sf.release.domain.resource.CodingConn;
+import com.sf.release.domain.resource.CodingScope;
+import com.sf.release.infra.crypto.CredentialCipher;
+import com.sf.release.infra.engine.CodingProbe;
+import com.sf.release.infra.engine.ProbeResult;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.context.annotation.Bean;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.ActiveProfiles;
+
+import static com.sf.release.domain.resource.CodingScope.GLOBAL;
+import static com.sf.release.domain.resource.CodingScope.SUBSYSTEM;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+/**
+ * Task 6 CODING connection configuration against the real test schema.
+ *
+ * <p>Secrets are asserted three ways: the database column, the application log stream and
+ * the returned view never carry the plaintext token. The connection test seam is a fake
+ * {@link CodingProbe}: no HTTP call is made in this task.
+ */
+@SpringBootTest
+@ActiveProfiles("test")
+@ExtendWith(OutputCaptureExtension.class)
+class CodingConnServiceTest {
+
+    private static final String BASE_URL = "https://coding.example.com";
+    private static final int PARAM_INVALID_CODE = 40000;
+
+    @Autowired CodingConnAppService connService;
+    @Autowired JdbcTemplate jdbc;
+    @Autowired CredentialCipher cipher;
+    @Autowired ObjectMapper objectMapper;
+    @Autowired FakeCodingProbe fakeProbe;
+
+    private long subsystemId;
+
+    @BeforeEach
+    void resetFixtures() {
+        fakeProbe.reset();
+        jdbc.update("DELETE FROM coding_conn");
+        jdbc.update("DELETE FROM subsystem");
+        subsystemId = givenSubsystem("SCC-QUOTA");
+    }
+
+    @Test
+    void save_encrypts_and_get_returns_only_a_masked_hint() throws Exception {
+        CodingConnView saved = connService.save(
+            GLOBAL, null, BASE_URL, "team-a", "project-a", "tok-123");
+
+        String stored = storedCipher();
+        assertThat(stored).doesNotContain("tok-123");
+        assertThat(cipher.decrypt(stored)).isEqualTo("tok-123");
+
+        CodingConnView view = connService.get(GLOBAL, null);
+        assertThat(view.id()).isEqualTo(saved.id());
+        assertThat(view.scope()).isEqualTo("GLOBAL");
+        assertThat(view.subsystemId()).isZero();
+        assertThat(view.baseUrl()).isEqualTo(BASE_URL);
+        assertThat(view.team()).isEqualTo("team-a");
+        assertThat(view.project()).isEqualTo("project-a");
+        assertThat(view.tokenHint()).isEqualTo("tok-***");
+        assertThat(view.createdAt()).isNotNull();
+        assertThat(view.updatedAt()).isNotNull();
+
+        // The read model itself and its JSON serialisation never carry the token.
+        assertThat(view.toString()).doesNotContain("tok-123");
+        assertThat(objectMapper.writeValueAsString(view)).doesNotContain("tok-123");
+    }
+
+    @Test
+    void token_never_appears_in_db_or_logs(CapturedOutput output) {
+        String token = "SUPER-SECRET";
+        connService.save(GLOBAL, null, BASE_URL, "team-a", "project-a", token);
+        connService.get(GLOBAL, null);
+        long id = connService.get(GLOBAL, null).id();
+        connService.test(id);
+
+        assertThat(storedCipher()).doesNotContain(token);
+        assertThat(output.getAll())
+            .as("the log capture must really include the service output, otherwise the "
+                + "no-leak assertion would be vacuous")
+            .contains("coding connection saved")
+            .doesNotContain(token);
+    }
+
+    @Test
+    void save_upserts_by_scope_and_keeps_a_single_row() {
+        CodingConnView first = connService.save(
+            GLOBAL, null, BASE_URL, "team-a", "project-a", "tok-123");
+        CodingConnView second = connService.save(
+            GLOBAL, 0L, BASE_URL + "/v2", "team-b", "project-b", "tok-456");
+
+        assertThat(second.id()).isEqualTo(first.id());
+        assertThat(rowCount()).isEqualTo(1);
+        assertThat(storedCipher()).doesNotContain("tok-123");
+        assertThat(cipher.decrypt(storedCipher())).isEqualTo("tok-456");
+
+        CodingConnView view = connService.get(GLOBAL, 0L);
+        assertThat(view.id()).isEqualTo(first.id());
+        assertThat(view.baseUrl()).isEqualTo(BASE_URL + "/v2");
+        assertThat(view.team()).isEqualTo("team-b");
+        assertThat(view.project()).isEqualTo("project-b");
+        assertThat(view.tokenHint()).isEqualTo("tok-***");
+
+        // The database unique key is the final guard for a concurrent first save.
+        assertThatThrownBy(() -> jdbc.update(
+            "INSERT INTO coding_conn (scope, subsystem_id, base_url, team, project,"
+                + " credential_cipher, created_at, updated_at)"
+                + " VALUES ('GLOBAL', 0, ?, 'team', 'project', 'AAAA', NOW(3), NOW(3))", BASE_URL))
+            .isInstanceOf(DuplicateKeyException.class);
+    }
+
+    @Test
+    void global_scope_stores_zero_subsystem_id_and_subsystem_scope_validates() {
+        connService.save(GLOBAL, null, BASE_URL, "team-a", "project-a", "tok-123");
+
+        Integer globalId = jdbc.queryForObject(
+            "SELECT subsystem_id FROM coding_conn WHERE scope = 'GLOBAL'", Integer.class);
+        assertThat(globalId).as("GLOBAL rows use the NOT NULL DEFAULT 0 sentinel").isZero();
+        assertThat(jdbc.queryForObject(
+            "SELECT IS_NULLABLE FROM information_schema.columns"
+                + " WHERE table_schema = DATABASE() AND table_name = 'coding_conn'"
+                + " AND column_name = 'subsystem_id'", String.class)).isEqualTo("NO");
+
+        CodingConnView subsystemView = connService.save(
+            SUBSYSTEM, subsystemId, BASE_URL, "team-a", "project-a", "tok-789");
+        assertThat(subsystemView.scope()).isEqualTo("SUBSYSTEM");
+        assertThat(subsystemView.subsystemId()).isEqualTo(subsystemId);
+        assertThat(connService.get(SUBSYSTEM, subsystemId).tokenHint()).isEqualTo("tok-***");
+        assertThat(rowCount()).isEqualTo(2);
+
+        assertThatThrownBy(() -> connService.save(
+            SUBSYSTEM, null, BASE_URL, "team-a", "project-a", "tok-000"))
+            .as("SUBSYSTEM scope needs a subsystem id")
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.PARAM_INVALID)
+            .satisfies(error -> assertThat(((BizError) error).getCode())
+                .isEqualTo(PARAM_INVALID_CODE));
+        assertThatThrownBy(() -> connService.save(
+            SUBSYSTEM, 999_999L, BASE_URL, "team-a", "project-a", "tok-000"))
+            .as("an unknown subsystem cannot own a connection")
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.PARAM_INVALID);
+        assertThat(rowCount()).isEqualTo(2);
+    }
+
+    @Test
+    void save_rejects_blank_token_and_unknown_connection_is_param_invalid() {
+        assertThatThrownBy(() -> connService.save(
+            GLOBAL, null, BASE_URL, "team-a", "project-a", "   "))
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.PARAM_INVALID)
+            .satisfies(error -> assertThat(((BizError) error).getCode())
+                .isEqualTo(PARAM_INVALID_CODE));
+        assertThat(rowCount()).isZero();
+
+        assertThatThrownBy(() -> connService.get(GLOBAL, null))
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.PARAM_INVALID);
+        assertThatThrownBy(() -> connService.test(999_999L))
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.PARAM_INVALID);
+    }
+
+    @Test
+    void test_delegates_to_the_injected_probe_and_propagates_failed() {
+        long id = connService.save(
+            SUBSYSTEM, subsystemId, BASE_URL, "team-a", "project-a", "tok-123").id();
+
+        fakeProbe.respondWith(ProbeResult.failed("凭证无效：401"));
+
+        ProbeResult result = connService.test(id);
+
+        assertThat(result.status()).isEqualTo(ProbeResult.Status.FAILED);
+        assertThat(result.message()).isEqualTo("凭证无效：401");
+        assertThat(fakeProbe.lastConn()).isNotNull();
+        assertThat(fakeProbe.lastConn().id()).isEqualTo(id);
+        assertThat(fakeProbe.lastConn().scope()).isEqualTo(SUBSYSTEM);
+        assertThat(fakeProbe.lastConn().subsystemId()).isEqualTo(subsystemId);
+        assertThat(fakeProbe.lastConn().baseUrl()).isEqualTo(BASE_URL);
+        assertThat(fakeProbe.lastToken()).as("the service decrypts before probing")
+            .isEqualTo("tok-123");
+    }
+
+    private String storedCipher() {
+        return jdbc.queryForObject(
+            "SELECT credential_cipher FROM coding_conn LIMIT 1", String.class);
+    }
+
+    private int rowCount() {
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM coding_conn", Integer.class);
+        return count == null ? 0 : count;
+    }
+
+    private long givenSubsystem(String name) {
+        jdbc.update("INSERT INTO subsystem (name, owner_id, status, created_at, updated_at)"
+            + " VALUES (?, '01388007', 'ACTIVE', NOW(3), NOW(3))", name);
+        Long id = jdbc.queryForObject("SELECT id FROM subsystem WHERE name = ?", Long.class, name);
+        return id == null ? 0L : id;
+    }
+
+    /** Hand-written probe seam: captures its arguments and returns a canned result. */
+    static final class FakeCodingProbe implements CodingProbe {
+
+        private ProbeResult next = ProbeResult.failed("probe not stubbed");
+        private CodingConn lastConn;
+        private String lastToken;
+
+        @Override
+        public ProbeResult probe(CodingConn conn, String credential) {
+            this.lastConn = conn;
+            this.lastToken = credential;
+            return next;
+        }
+
+        void respondWith(ProbeResult result) {
+            this.next = result;
+        }
+
+        void reset() {
+            this.next = ProbeResult.failed("probe not stubbed");
+            this.lastConn = null;
+            this.lastToken = null;
+        }
+
+        CodingConn lastConn() {
+            return lastConn;
+        }
+
+        String lastToken() {
+            return lastToken;
+        }
+    }
+
+    @TestConfiguration
+    static class FakeProbeConfiguration {
+
+        @Bean
+        FakeCodingProbe fakeCodingProbe() {
+            return new FakeCodingProbe();
+        }
+    }
+}
