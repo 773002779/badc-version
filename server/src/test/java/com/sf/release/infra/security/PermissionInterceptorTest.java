@@ -5,6 +5,7 @@ import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.DataScope;
 import com.sf.release.common.security.Permissions;
+import com.sf.release.common.security.Public;
 import com.sf.release.common.security.RequirePerm;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -14,6 +15,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -35,6 +37,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
+@ActiveProfiles("test")
 class PermissionInterceptorTest {
 
     private static final String USER_HEADER = "X-User-Id";
@@ -78,6 +81,12 @@ class PermissionInterceptorTest {
         @GetMapping("/whoami")
         public ApiResponse<String> whoami() {
             return ApiResponse.ok(UserContext.current().userId());
+        }
+
+        @Public
+        @GetMapping("/public")
+        public ApiResponse<String> publicProbe() {
+            return ApiResponse.ok("public-ok");
         }
     }
 
@@ -190,23 +199,58 @@ class PermissionInterceptorTest {
     }
 
     @Test
-    void no_scope_rows_means_unrestricted() throws Exception {
+    void empty_scope_denies_unit_access() throws Exception {
         givenUser("u-dev", ACTIVE, "DEV");
 
         mvc.perform(probe("/security-probe/unit", "u-dev").param("unitId", "42"))
            .andExpect(status().isOk())
+           .andExpect(jsonPath("$.code").value(40009))
+           .andExpect(jsonPath("$.traceId").isNotEmpty());
+    }
+
+    @Test
+    void explicit_all_units_marker_allows_any_unit() throws Exception {
+        // ADMIN role is the seeded unrestricted marker.
+        givenUser("u-admin", ACTIVE, "ADMIN");
+        mvc.perform(probe("/security-probe/unit", "u-admin").param("unitId", "42"))
+           .andExpect(status().isOk())
            .andExpect(jsonPath("$.code").value(0))
            .andExpect(jsonPath("$.data").value("unit-42"));
+
+        // An explicit scope_type='ALL' row grants unrestricted access to any role.
+        givenUser("u-dev", ACTIVE, "DEV");
+        givenAllScope("u-dev");
+        mvc.perform(probe("/security-probe/unit", "u-dev").param("unitId", "7"))
+           .andExpect(status().isOk())
+           .andExpect(jsonPath("$.code").value(0))
+           .andExpect(jsonPath("$.data").value("unit-7"));
+    }
+
+    @Test
+    void public_endpoint_is_reachable_without_identity() throws Exception {
+        mvc.perform(get("/security-probe/public"))
+           .andExpect(status().isOk())
+           .andExpect(jsonPath("$.code").value(0))
+           .andExpect(jsonPath("$.data").value("public-ok"));
+
+        // A normal handler without an identity is still rejected.
+        mvc.perform(probe("/security-probe/publish", null))
+           .andExpect(status().isOk())
+           .andExpect(jsonPath("$.code").value(40009));
+
+        assertThatThrownBy(UserContext::current).isInstanceOf(BizException.class);
     }
 
     @Test
     void annotation_contract_is_runtime_visible() throws Exception {
         Method publish = SecurityProbeController.class.getDeclaredMethod("publish");
         Method unit = SecurityProbeController.class.getDeclaredMethod("unit", long.class);
+        Method publicProbe = SecurityProbeController.class.getDeclaredMethod("publicProbe");
 
         assertThat(publish.getAnnotation(RequirePerm.class).value()).isEqualTo("release:publish");
         assertThat(unit.getAnnotation(RequirePerm.class).value()).isEqualTo("item:create");
         assertThat(unit.getAnnotation(DataScope.class)).isNotNull();
+        assertThat(publicProbe.getAnnotation(Public.class)).isNotNull();
     }
 
     @Test
@@ -231,6 +275,11 @@ class PermissionInterceptorTest {
     private void givenUnitScope(String userId, long unitId) {
         jdbc.update("INSERT INTO user_scope (user_id, scope_type, scope_id) VALUES (?, 'UNIT', ?)",
             userId, unitId);
+    }
+
+    private void givenAllScope(String userId) {
+        jdbc.update("INSERT INTO user_scope (user_id, scope_type, scope_id) VALUES (?, 'ALL', 0)",
+            userId);
     }
 
     private void grant(String role, String perm) {

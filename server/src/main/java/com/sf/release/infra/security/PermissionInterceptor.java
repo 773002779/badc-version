@@ -3,6 +3,7 @@ package com.sf.release.infra.security;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
+import com.sf.release.common.security.Public;
 import com.sf.release.common.security.RequirePerm;
 import com.sf.release.common.security.Roles;
 import jakarta.servlet.http.HttpServletRequest;
@@ -16,7 +17,8 @@ import java.util.Set;
 
 /**
  * Authenticates every MVC request from the temporary {@code X-User-Id} header and
- * enforces {@link RequirePerm}.
+ * enforces {@link RequirePerm}, except handlers marked {@link Public} which skip identity
+ * resolution entirely and must authenticate themselves (HMAC webhook, Task 14).
  *
  * <p>Failures throw {@link BizException} with {@link BizError#FORBIDDEN} (40009) and are
  * rendered by the existing {@code GlobalExceptionHandler}; the interceptor does not build
@@ -44,6 +46,11 @@ public class PermissionInterceptor implements HandlerInterceptor {
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
         if (!(handler instanceof HandlerMethod handlerMethod)) {
             // Static resources, 404s and preflight requests have no protected handler method.
+            return true;
+        }
+        if (handlerMethod.getMethodAnnotation(Public.class) != null) {
+            // Machine-to-machine endpoints authenticate themselves (e.g. the CODING
+            // webhook verifies its HMAC signature in Task 14); no user context is set.
             return true;
         }
 

@@ -10,8 +10,9 @@ import java.util.Map;
  * this method before reading or mutating deployment-unit data; Task 5 adds the MyBatis
  * interceptor that injects {@code unit_id IN (...)} for {@code @DataScope} queries.
  *
- * <p>A user without configured unit scope is unrestricted (empty whitelist, see
- * {@link CurrentUser}); a non-empty whitelist rejects every other unit with
+ * <p><strong>Fail-closed:</strong> only a caller with {@link CurrentUser#allUnits()} may
+ * access an arbitrary unit. Otherwise the unit must be present in the configured
+ * whitelist; an empty whitelist denies every unit. Rejections use
  * {@link BizError#FORBIDDEN} (40009).
  */
 public final class ScopeGuard {
@@ -21,7 +22,10 @@ public final class ScopeGuard {
 
     public static void assertUnitInScope(long unitId) {
         CurrentUser user = UserContext.current();
-        if (!user.scopeUnitIds().isEmpty() && !user.scopeUnitIds().contains(unitId)) {
+        if (user.allUnits()) {
+            return;
+        }
+        if (!user.scopeUnitIds().contains(unitId)) {
             throw new BizException(BizError.FORBIDDEN, "无权访问该部署单元", Map.of("unitId", unitId));
         }
     }
