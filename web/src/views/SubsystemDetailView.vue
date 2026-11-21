@@ -9,6 +9,7 @@ import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
 import EmptyState from '../components/EmptyState.vue'
 import KeyValue from '../components/KeyValue.vue'
+import StatusDot from '../components/StatusDot.vue'
 
 const route = useRoute()
 const id = Number(route.params.id)
@@ -74,7 +75,9 @@ async function submit() {
         <KeyValue label="系统 ID" :value="subsystem?.id" mono />
         <KeyValue label="负责人" :value="subsystem?.ownerId" />
         <KeyValue label="授权代理" :value="subsystem?.agentId" />
-        <KeyValue label="状态" :value="subsystem?.status" />
+        <KeyValue label="状态">
+            <StatusDot :status="subsystem?.status" />
+          </KeyValue>
         <KeyValue label="CODING 项目" :value="subsystem?.codingProject" mono />
         <KeyValue label="Git 仓库" :value="subsystem?.gitUrl" mono />
         <KeyValue label="描述" :value="subsystem?.description" />
@@ -92,7 +95,11 @@ async function submit() {
           <el-table-column prop="ownerId" label="owner" width="110" />
           <el-table-column prop="frameworkTemplate" label="框架模板" width="120" />
           <el-table-column prop="branchMode" label="分支模式" width="110" />
-          <el-table-column prop="status" label="状态" width="90" />
+          <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <StatusDot :status="row.status" />
+          </template>
+        </el-table-column>
         </el-table>
         <EmptyState v-else-if="!loading" title="还没有部署单元" hint="部署单元是构建与部署的最小单位。" />
         <div v-else style="padding: 24px"><el-skeleton :rows="4" animated /></div>

@@ -6,6 +6,7 @@ import {
   addTaskMembers,
   createItem,
   getTask,
+  listCodingTasks,
   listTaskItems,
   listUnits,
   publishItem
@@ -32,6 +33,11 @@ const publishing = ref<number | null>(null)
 
 const itemDialog = ref(false)
 const itemForm = reactive({ unitId: undefined as number | undefined, version: '', planReleaseDate: '' })
+// The branch is not an input (C21): it comes from the unit's BUILD binding, so the dialog
+// shows what the server will use and blocks the submit when nothing is configured.
+const unitBranch = ref<string | null>(null)
+const branchLoading = ref(false)
+const branchReady = computed(() => Boolean(unitBranch.value))
 const memberDialog = ref(false)
 const memberForm = reactive({ userId: '', role: 'TEST' })
 
@@ -63,11 +69,48 @@ function openItemDialog() {
   itemForm.version = ''
   itemForm.planReleaseDate = ''
   itemDialog.value = true
+  loadUnitBranch()
+}
+
+/** Reads the unit's read-only branch so the dialog can say what will be built. */
+async function loadUnitBranch() {
+  const unitId = itemForm.unitId
+  unitBranch.value = null
+  if (!unitId) {
+    return
+  }
+  branchLoading.value = true
+  try {
+    const bindings = await listCodingTasks(unitId)
+    const build = bindings.find((b) => b.taskKind === 'BUILD' && b.enabled !== false)
+    if (!build?.paramsJson) {
+      unitBranch.value = null
+      return
+    }
+    const params = JSON.parse(build.paramsJson) as { branch?: unknown }
+    unitBranch.value = typeof params.branch === 'string' ? params.branch : null
+  } catch {
+    unitBranch.value = null
+  } finally {
+    if (itemForm.unitId === unitId) {
+      branchLoading.value = false
+    }
+  }
+}
+
+function goToUnit() {
+  if (itemForm.unitId) {
+    router.push(`/units/${itemForm.unitId}`)
+  }
 }
 
 async function submitItem() {
   if (!itemForm.unitId || !itemForm.version.trim() || !itemForm.planReleaseDate) {
     ElMessage.warning('部署单元、变更原因与计划发布时间必填')
+    return
+  }
+  if (!branchReady.value) {
+    ElMessage.warning('该单元没有只读分支，请先在单元详情页配置 BUILD 的只读分支')
     return
   }
   try {
@@ -81,7 +124,17 @@ async function submitItem() {
     ElMessage.success('变更项已创建（分支由 CODING 构建任务带出）')
     await load()
   } catch (e) {
-    ElMessage.error(e instanceof ApiError ? e.message : '创建失败')
+    if (e instanceof ApiError) {
+      const missing = (e.detail as { missing?: string[] } | undefined)?.missing
+      if (missing?.includes('BUILD_BRANCH')) {
+        ElMessage.error('该单元的构建任务没有只读分支（40011），先在单元详情页填写后再创建')
+        unitBranch.value = null
+        return
+      }
+      ElMessage.error(e.message)
+    } else {
+      ElMessage.error('创建失败')
+    }
   }
 }
 
@@ -230,11 +283,21 @@ async function submitMember() {
     <el-dialog v-model="itemDialog" title="新建变更项" width="520px">
       <el-form label-position="top">
         <el-form-item label="部署单元" required>
-          <el-select v-model="itemForm.unitId" placeholder="选择部署单元" style="width: 100%">
+          <el-select
+            v-model="itemForm.unitId"
+            placeholder="选择部署单元"
+            style="width: 100%"
+            @change="loadUnitBranch"
+          >
             <el-option v-for="u in units" :key="u.id" :label="`${u.name} · ${u.type}`" :value="u.id" />
           </el-select>
-          <div class="weak small" style="margin-top: 6px">
-            分支不在此录入：由该单元 BUILD 任务绑定里的只读分支带出（C21）。
+          <div v-if="branchLoading" class="weak small" style="margin-top: 6px">读取只读分支…</div>
+          <div v-else-if="unitBranch" class="branch-hint small">
+            只读分支 <code class="mono">{{ unitBranch }}</code>（来自 BUILD 任务绑定，不可在此修改）
+          </div>
+          <div v-else class="branch-missing small">
+            该单元的 BUILD 绑定没有只读分支，创建会被拒绝（40011）。
+            <el-button text type="primary" size="small" @click="goToUnit">去配置</el-button>
           </div>
         </el-form-item>
         <div class="grid grid-2">
@@ -248,7 +311,7 @@ async function submitMember() {
       </el-form>
       <template #footer>
         <el-button @click="itemDialog = false">取消</el-button>
-        <el-button type="primary" @click="submitItem">创建</el-button>
+        <el-button type="primary" :disabled="!branchReady" @click="submitItem">创建</el-button>
       </template>
     </el-dialog>
 
@@ -291,6 +354,17 @@ async function submitMember() {
   color: var(--accent);
   font-size: 11px;
   font-weight: 600;
+}
+.branch-hint {
+  margin-top: 6px;
+  color: var(--text-2);
+}
+.branch-hint code {
+  color: var(--text);
+}
+.branch-missing {
+  margin-top: 6px;
+  color: var(--warn);
 }
 @media (max-width: 960px) {
   .grid {

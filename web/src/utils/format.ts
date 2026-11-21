@@ -21,6 +21,9 @@ const LABELS: Record<string, string> = {
   SUCCESS: '成功',
   TIMEOUT: '超时',
   SKIPPED: '已跳过',
+  // lifecycle of a unit / subsystem
+  ACTIVE: '启用',
+  INACTIVE: '停用',
   // gate
   TEST_PENDING: '待测试',
   TEST_PASS: '测试通过',
@@ -52,6 +55,8 @@ export function statusLabel(status?: string | null, domain: StatusDomain = 'item
 export type Tone = 'neutral' | 'accent' | 'success' | 'danger' | 'warn'
 
 const TONES: Record<string, Tone> = {
+  ACTIVE: 'success',
+  INACTIVE: 'neutral',
   PENDING: 'neutral',
   CLOSED: 'neutral',
   TERMINATED: 'neutral',

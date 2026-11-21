@@ -7,6 +7,7 @@ import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
 import EmptyState from '../components/EmptyState.vue'
+import StatusDot from '../components/StatusDot.vue'
 
 const rows = ref<PageResult<SubsystemView> | null>(null)
 const loading = ref(false)
@@ -84,7 +85,11 @@ async function submit() {
         <el-table-column prop="codingProject" label="CODING 项目" min-width="140">
           <template #default="{ row }"><span class="mono">{{ row.codingProject || '—' }}</span></template>
         </el-table-column>
-        <el-table-column prop="status" label="状态" width="100" />
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <StatusDot :status="row.status" />
+          </template>
+        </el-table-column>
       </el-table>
       <EmptyState v-else-if="!loading" title="还没有系统" hint="先建系统，再建部署单元。" />
       <div v-else style="padding: 24px"><el-skeleton :rows="4" animated /></div>

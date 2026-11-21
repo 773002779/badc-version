@@ -9,6 +9,7 @@ import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
 import EmptyState from '../components/EmptyState.vue'
 import KeyValue from '../components/KeyValue.vue'
+import StatusDot from '../components/StatusDot.vue'
 import { formatDateTime } from '../utils/format'
 
 const route = useRoute()
@@ -281,7 +282,9 @@ async function submitDe() {
           <KeyValue label="标签" :value="unit?.tag" />
           <KeyValue label="模块路径" :value="unit?.modulePath" mono />
           <KeyValue label="镜像" :value="unit?.imageName" mono />
-          <KeyValue label="状态" :value="unit?.status" />
+          <KeyValue label="状态">
+            <StatusDot :status="unit?.status" />
+          </KeyValue>
           <KeyValue label="创建时间" :value="formatDateTime(unit?.createdAt)" mono />
         </DataSection>
 

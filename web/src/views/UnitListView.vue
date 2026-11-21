@@ -6,6 +6,7 @@ import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
 import EmptyState from '../components/EmptyState.vue'
+import StatusDot from '../components/StatusDot.vue'
 
 const rows = ref<PageResult<UnitView> | null>(null)
 const subsystems = ref<SubsystemView[]>([])
@@ -111,7 +112,11 @@ const subsystemName = (id: number) => subsystems.value.find((s) => s.id === id)?
         <el-table-column prop="ownerId" label="owner" width="110" />
         <el-table-column prop="frameworkTemplate" label="框架" width="120" />
         <el-table-column prop="branchMode" label="分支模式" width="110" />
-        <el-table-column prop="status" label="状态" width="90" />
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <StatusDot :status="row.status" />
+          </template>
+        </el-table-column>
       </el-table>
       <EmptyState v-else-if="!loading" title="还没有部署单元" hint="从某个系统详情页新建。" />
       <div v-else style="padding: 24px"><el-skeleton :rows="4" animated /></div>
