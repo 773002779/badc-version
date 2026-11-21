@@ -257,3 +257,10 @@ Ruling R5: PAUSED is terminal and has no resume/alert — P2 must add resume and
 Ruling R6: params_json.branch is the reserved read-only-branch key — ratify at bind time / add a dedicated column in P2.
 Ruling R7: benign duplicate callbacks that lose the item CAS are recorded and count toward attempts — resolve NOT_ALLOWED replays instead of consuming attempts in P2.
 Ruling R8: taskTypesOf has no AUTO_TEST family — extend with the gate task.
+POST-P1 FOLLOW-UP LOG
+R1/R2/R3 applied in e99f181: V15 widens release_item.base_commit to VARCHAR(64); the publish auto-start + reconcile fix rides the same commit; C20 covers ITEM_CREATE.
+Follow-up c8ed3d2 (R6 partial): GET /units/{id}/coding-tasks exposes the unit's bindings so the settings form reads before it writes. Scope is fail-closed (40009 for an unscoped caller), ordering is by task_kind, and enabled is a primitive boolean. R6 itself stays open: the branch key is still a convention inside params_json, not a column.
+Ruling R9: params_json is a MySQL JSON column, so the server never stores the posted text verbatim — reads come back normalized (spacing, key order). Callers must treat it as a document (parse and read params.branch); no test may assert byte equality with the posted string.
+Follow-up 212ead5: P1 frontend (web/) delivered in the graphite style with light/dark themes, screenshots in docs/design/shots. Design note: Element Plus ships its dark palette on html.dark (0,1,1), so the token block must use :root[data-theme=...] or dark mode silently falls back to Element Plus blue.
+Environment note: on Windows `mvn verify` fails at spring-boot:repackage while a service started from target/*.jar is running (file lock). Stop the service first, or use scripts/start.ps1 -Rebuild which builds before starting. This is a tooling artifact, not a build defect: 308 tests / BUILD SUCCESS with the service stopped.
+Still open after P1: R4 (webhook kind must be confirmed against the real CODING payload), R5 (PAUSED has no resume/alert), R6 (branch key is a convention), R7 (replayed callbacks consume attempts), R8 (taskTypesOf lacks AUTO_TEST), I8 (Idempotency-Key deferred to P2).
