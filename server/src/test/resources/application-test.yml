@@ -3,6 +3,11 @@ spring:
     url: "jdbc:mysql://127.0.0.1:3306/release_pipeline_test?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true"
     username: root
     password: root
+    hikari:
+      # Several cached Spring contexts share one MySQL server; keep every pool tiny so the
+      # suite never exhausts max_connections.
+      maximum-pool-size: 2
+      minimum-idle: 0
   flyway:
     clean-disabled: false
 
@@ -26,3 +31,6 @@ release:
     enabled: false
   redis:
     enabled: false
+  pipeline:
+    # Tests drive node handlers themselves; a committed instance stays PENDING until they do.
+    auto-start: false

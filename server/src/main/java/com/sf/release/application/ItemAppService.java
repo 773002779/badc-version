@@ -134,11 +134,29 @@ public class ItemAppService {
             throw new BizException(BizError.PARAM_INVALID, "部署单元不能为空",
                 Map.of("unitId", "不能为空"));
         }
+        // Existence first: an unknown task/unit must read as "not found" (40000), not as a
+        // configuration/scope failure of a row that does not exist.
+        requireTaskExists(taskId);
+        requireUnitExists(unitId);
         ScopeGuard.assertUnitInScope(unitId);
         String branch = requireBindingBranch(unitId);
         ReleaseItemPO po = insert(taskId,
             new CreateItemCmd(unitId, branch, version, planReleaseDate));
         return new ItemCreated(po.getId(), po.getCrid());
+    }
+
+    private void requireTaskExists(long taskId) {
+        if (taskMapper.selectById(taskId) == null) {
+            throw new BizException(BizError.PARAM_INVALID, "发布任务不存在",
+                Map.of("taskId", taskId));
+        }
+    }
+
+    private void requireUnitExists(long unitId) {
+        if (unitMapper.selectById(unitId) == null) {
+            throw new BizException(BizError.PARAM_INVALID, "部署单元不存在",
+                Map.of("unitId", unitId));
+        }
     }
 
     private ReleaseItemPO insert(long taskId, CreateItemCmd cmd) {

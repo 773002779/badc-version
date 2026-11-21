@@ -97,6 +97,7 @@ class PermissionInterceptorTest {
         jdbc.update("DELETE FROM app_user");
         // Do not touch the shipped role -> permission seed; only drop rows a test adds.
         jdbc.update("DELETE FROM role_permission WHERE role IN ('OPS', 'OPS_LEAD') AND perm = 'release:publish'");
+        jdbc.update("DELETE FROM role_permission WHERE role IN ('OPS', 'OPS_LEAD') AND perm = 'item:create'");
         UserContext.clear();
     }
 
@@ -143,6 +144,26 @@ class PermissionInterceptorTest {
             mvc.perform(probe("/security-probe/publish", userId))
                .andExpect(status().isOk())
                .andExpect(jsonPath("$.code").value(40009));
+        }
+    }
+
+    @Test
+    void ops_cannot_create_a_code_change_item() throws Exception {
+        givenUser("u-ops-item", ACTIVE, "OPS");
+        givenUser("u-ops-item-lead", ACTIVE, "OPS_LEAD");
+        // Grant the permission through the mapping anyway: C20 also covers item creation.
+        grant("OPS", "item:create");
+        grant("OPS_LEAD", "item:create");
+
+        for (String userId : new String[] {"u-ops-item", "u-ops-item-lead"}) {
+            assertThat(authProvider.authenticate(userId).orElseThrow().hasPerm("item:create"))
+                .as("%s really holds item:create through the mapping", userId)
+                .isTrue();
+
+            mvc.perform(probe("/security-probe/unit?unitId=1", userId))
+               .andExpect(status().isOk())
+               .andExpect(jsonPath("$.code").value(40009))
+               .andExpect(jsonPath("$.message").value("运维角色不得发起代码版本发布或变更项"));
         }
     }
 

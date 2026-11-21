@@ -128,6 +128,29 @@ class ItemControllerTest {
     }
 
     @Test
+    void unknown_unit_or_task_is_40000_and_never_a_configuration_error() throws Exception {
+        String unknownUnit = objectMapper.createObjectNode()
+            .put("taskId", taskId).put("unitId", 999_999L)
+            .put("version", "变更原因").put("planReleaseDate", "2026-11-25").toString();
+        mvc.perform(post(ITEMS).header(USER_HEADER, DEV)
+                .contentType(MediaType.APPLICATION_JSON).content(unknownUnit))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(40000))
+            .andExpect(jsonPath("$.data.unitId").value(999_999));
+
+        String unknownTask = objectMapper.createObjectNode()
+            .put("taskId", 888_888L).put("unitId", unitId)
+            .put("version", "变更原因").put("planReleaseDate", "2026-11-25").toString();
+        mvc.perform(post(ITEMS).header(USER_HEADER, DEV)
+                .contentType(MediaType.APPLICATION_JSON).content(unknownTask))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(40000))
+            .andExpect(jsonPath("$.data.taskId").value(888_888));
+
+        assertThat(itemCount()).isZero();
+    }
+
+    @Test
     void create_on_a_unit_without_a_binding_branch_is_40011_naming_the_missing_set()
         throws Exception {
         long unitWithoutBranch = givenUnit(givenSubsystem("SCC-T2-NOBRANCH"), "t2-nobranch-api");

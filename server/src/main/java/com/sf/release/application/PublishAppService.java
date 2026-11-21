@@ -9,6 +9,7 @@ import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineFactory;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineNode;
+import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.ReleaseOrder;
 import com.sf.release.domain.pipeline.TriggerType;
 import com.sf.release.domain.pipeline.port.GitCommitProbe;
@@ -35,6 +36,7 @@ import com.sf.release.infra.repo.po.ReleaseOrderPO;
 import com.sf.release.infra.security.ScopeGuard;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -93,6 +95,12 @@ public class PublishAppService {
     private static final Logger log = LoggerFactory.getLogger(PublishAppService.class);
 
     private static final int PUBLISH_NO_RANDOM_LENGTH = 6;
+
+    /**
+     * Git reports 40 hex (SHA-1) or 64 hex (SHA-256); the column is {@code VARCHAR(64)} since
+     * migration V15. A longer value is a contract violation, never something to truncate.
+     */
+    private static final int MAX_BASE_COMMIT_LENGTH = 64;
     private static final DateTimeFormatter PUBLISH_DATE =
         DateTimeFormatter.ofPattern("yyyyMMdd", Locale.ROOT);
 
@@ -111,7 +119,15 @@ public class PublishAppService {
     private final UnitAppService unitAppService;
     private final UnitLockService unitLockService;
     private final GitCommitProbe commitProbe;
+    private final PipelineOrchestrator orchestrator;
     private final TransactionTemplate transactionTemplate;
+
+    /**
+     * Whether publishing starts the pipeline immediately. Enabled in every real deployment; the
+     * test profile turns it off so tests can drive node handlers deterministically. With it off a
+     * committed instance stays PENDING until the reconcile pass enters its first node.
+     */
+    private final boolean autoStart;
 
     public PublishAppService(ReleaseItemMapper itemMapper,
                              EnvDeMapper envDeMapper,
@@ -122,6 +138,8 @@ public class PublishAppService {
                              UnitAppService unitAppService,
                              UnitLockService unitLockService,
                              GitCommitProbe commitProbe,
+                             PipelineOrchestrator orchestrator,
+                             @Value("${release.pipeline.auto-start:true}") boolean autoStart,
                              PlatformTransactionManager transactionManager) {
         this.itemMapper = itemMapper;
         this.envDeMapper = envDeMapper;
@@ -132,6 +150,8 @@ public class PublishAppService {
         this.unitAppService = unitAppService;
         this.unitLockService = unitLockService;
         this.commitProbe = commitProbe;
+        this.orchestrator = orchestrator;
+        this.autoStart = autoStart;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -168,9 +188,16 @@ public class PublishAppService {
             throw unitLocked(unitId, itemId);
         }
         try {
-            PublishResult result = transactionTemplate.execute(
+            Published published = transactionTemplate.execute(
                 tx -> publishInTransaction(itemId, unitId, envDes, baseCommit));
-            return Objects.requireNonNull(result, "publish result");
+            Published result = Objects.requireNonNull(published, "publish result");
+            // The instance is committed; now start it. Starting is outside the transaction on
+            // purpose (node handlers make outbound engine calls) and must never undo the publish:
+            // a failure here is logged, and the reconcile pass enters an unstarted node later.
+            if (autoStart) {
+                startPipeline(result.instanceId());
+            }
+            return result.result();
         } catch (LockLostException ex) {
             // The lock row is no longer ours (bindInstance reported it lost). Releasing here
             // could delete a new holder's row/key, so the release call is skipped entirely.
@@ -210,7 +237,7 @@ public class PublishAppService {
         }
     }
 
-    private PublishResult publishInTransaction(long itemId, long unitId, List<EnvDe> envDes,
+    private Published publishInTransaction(long itemId, long unitId, List<EnvDe> envDes,
                                                String baseCommit) {
         ReleaseItem current = loadItem(itemId);
         ItemStatus next = ItemStateMachine.transit(current, ItemEvent.PUBLISH);
@@ -239,10 +266,36 @@ public class PublishAppService {
         ReleaseOrder persistedOrder = order.withId(orderPo.getId());
 
         PipelineInstance instance = PipelineFactory.createOnline(persistedOrder, current, envDes);
-        persistInstance(instance, unitId, itemId);
+        long instanceId = persistInstance(instance, unitId, itemId);
         log.info("release published: itemId={}, unitId={}, publishNo={}, pipelineNo={}",
             itemId, unitId, persistedOrder.publishNo(), instance.pipelineNo());
-        return new PublishResult(persistedOrder.publishNo(), instance.pipelineNo());
+        return new Published(new PublishResult(persistedOrder.publishNo(), instance.pipelineNo()),
+            instanceId);
+    }
+
+    /**
+     * Starts the freshly committed pipeline by entering its first node. Runs outside the publish
+     * transaction because node handlers call the CI engine.
+     *
+     * <p>A failure here must not invalidate the publish: the instance and its nodes are committed,
+     * the reconcile pass enters any {@code PENDING} instance whose node was never entered, and the
+     * unit lock is released by the orchestrator once the instance is terminal.
+     */
+    private void startPipeline(long instanceId) {
+        try {
+            orchestrator.advance(instanceId);
+        } catch (RuntimeException ex) {
+            log.error("pipeline did not start; reconcile will enter its first node: instanceId={}",
+                instanceId, ex);
+        }
+    }
+
+    /** Internal carrier: the business result plus the instance the caller must start. */
+    private record Published(PublishResult result, long instanceId) {
+    }
+
+    /** A persisted rerun instance together with the row id needed to start it. */
+    public record CreatedInstance(PipelineInstance instance, long instanceId) {
     }
 
     /**
@@ -254,20 +307,20 @@ public class PublishAppService {
      * lock bind have a single implementation. A lost lock surfaces as the internal
      * {@link LockLostException}, whose business failure the caller rethrows.
      */
-    PipelineInstance createRerunInstance(ReleaseOrder order, ReleaseItem item, long unitId,
+    CreatedInstance createRerunInstance(ReleaseOrder order, ReleaseItem item, long unitId,
                                                 TriggerType triggerType, NodeType fromNode,
                                                 String imageDigest, String commitSha,
                                                 PipelineInstance previous) {
         List<EnvDe> envDes = loadEnvDes(unitId);
         PipelineInstance instance = PipelineFactory.createRerun(order, item, envDes,
             triggerType, fromNode, imageDigest, commitSha, previous);
-        persistInstance(instance, unitId, item.id());
+        long instanceId = persistInstance(instance, unitId, item.id());
         log.info("rerun pipeline created: itemId={}, unitId={}, publishNo={}, pipelineNo={},"
                 + " triggerType={}, fromNode={}, imageDigest={}",
             item.id(), unitId, order.publishNo(), instance.pipelineNo(),
             instance.triggerType(), instance.currentNode(), imageDigest == null ? "<none>"
                 : imageDigest);
-        return instance;
+        return new CreatedInstance(instance, instanceId);
     }
 
     private List<EnvDe> loadEnvDes(long unitId) {
@@ -281,7 +334,7 @@ public class PublishAppService {
     }
 
     /** Inserts the instance, binds the unit lock to it and pre-generates every node and task. */
-    private void persistInstance(PipelineInstance instance, long unitId, long itemId) {
+    private long persistInstance(PipelineInstance instance, long unitId, long itemId) {
         PipelineInstancePO instancePo = PipelineInstancePO.of(instance);
         instanceMapper.insert(instancePo);
         long instanceId = instancePo.getId();
@@ -296,6 +349,7 @@ public class PublishAppService {
                 taskMapper.insert(NodeTaskPO.of(task, instanceId));
             }
         }
+        return instanceId;
     }
 
     /**
@@ -330,6 +384,16 @@ public class PublishAppService {
                 log.warn("could not observe the branch head commit; base_commit stays NULL:"
                         + " itemId={}, unitId={}, branch={}",
                     item.id(), item.unitId(), item.sourceBranch());
+                return null;
+            }
+            if (head.length() > MAX_BASE_COMMIT_LENGTH) {
+                // Never truncate a commit id: a shortened value silently breaks the rerun
+                // comparison. Degrade the baseline instead, exactly like a probe failure.
+                log.warn("observed branch head is longer than {} chars; base_commit stays NULL:"
+                        + " itemId={}, unitId={}, branch={}, length={}",
+                    MAX_BASE_COMMIT_LENGTH, item.id(), item.unitId(), item.sourceBranch(),
+                    head.length());
+                return null;
             }
             return head;
         } catch (RuntimeException ex) {

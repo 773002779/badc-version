@@ -36,6 +36,14 @@ public class PermissionInterceptor implements HandlerInterceptor {
      */
     private static final Set<String> CODE_RELEASE_BLOCKED_ROLES = Set.of(Roles.OPS, Roles.OPS_LEAD);
 
+    /**
+     * C20 / FR-B-01: ops roles never initiate a code-version change. That covers both the publish
+     * action and creating the change item itself, and it is enforced here rather than left to the
+     * data-driven role mapping so a mapping edit cannot open the door.
+     */
+    private static final Set<String> CODE_RELEASE_BLOCKED_PERMS =
+        Set.of(Permissions.RELEASE_PUBLISH, Permissions.ITEM_CREATE);
+
     private final AuthProvider authProvider;
 
     public PermissionInterceptor(AuthProvider authProvider) {
@@ -79,10 +87,10 @@ public class PermissionInterceptor implements HandlerInterceptor {
     }
 
     private static void assertPermitted(CurrentUser user, String perm) {
-        if (Permissions.RELEASE_PUBLISH.equals(perm)
+        if (CODE_RELEASE_BLOCKED_PERMS.contains(perm)
                 && user.roles().stream().anyMatch(CODE_RELEASE_BLOCKED_ROLES::contains)) {
             throw new BizException(BizError.FORBIDDEN,
-                "运维角色不得发起代码版本发布", Map.of("perm", perm));
+                "运维角色不得发起代码版本发布或变更项", Map.of("perm", perm));
         }
         if (!user.hasPerm(perm)) {
             throw new BizException(BizError.FORBIDDEN, "缺少权限点：" + perm, Map.of("perm", perm));

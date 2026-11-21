@@ -1,4 +1,4 @@
-﻿# build
+# build
 server/target/
 server/*/target/
 # ide
@@ -14,3 +14,6 @@ web/dist/
 *.log
 .env
 .env.local
+# local run artifacts
+.run/
+logs/

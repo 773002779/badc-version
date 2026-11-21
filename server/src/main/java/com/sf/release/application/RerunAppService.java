@@ -6,6 +6,7 @@ import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
+import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.ReleaseOrder;
 import com.sf.release.domain.pipeline.RerunPlan;
 import com.sf.release.domain.pipeline.RerunPlanner;
@@ -26,6 +27,7 @@ import com.sf.release.infra.security.ScopeGuard;
 import com.sf.release.infra.security.UserContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -77,6 +79,9 @@ public class RerunAppService {
 
     private static final Logger log = LoggerFactory.getLogger(RerunAppService.class);
 
+    /** Git reports 40 hex (SHA-1) or 64 hex (SHA-256); the baseline column is VARCHAR(64). */
+    private static final int MAX_COMMIT_LENGTH = 64;
+
     private static final Set<ItemStatus> RERUNNABLE =
         EnumSet.of(ItemStatus.FAILED, ItemStatus.GATE_FAILED);
 
@@ -87,6 +92,9 @@ public class RerunAppService {
     private final RerunPlanner rerunPlanner;
     private final PublishAppService publishAppService;
     private final UnitLockService unitLockService;
+    private final PipelineOrchestrator orchestrator;
+    /** Mirrors publish: tests turn the immediate start off and drive the nodes themselves. */
+    private final boolean autoStart;
     private final TransactionTemplate transactionTemplate;
 
     public RerunAppService(ReleaseItemMapper itemMapper,
@@ -96,6 +104,8 @@ public class RerunAppService {
                            RerunPlanner rerunPlanner,
                            PublishAppService publishAppService,
                            UnitLockService unitLockService,
+                           PipelineOrchestrator orchestrator,
+                           @Value("${release.pipeline.auto-start:true}") boolean autoStart,
                            PlatformTransactionManager transactionManager) {
         this.itemMapper = itemMapper;
         this.orderMapper = orderMapper;
@@ -104,6 +114,8 @@ public class RerunAppService {
         this.rerunPlanner = rerunPlanner;
         this.publishAppService = publishAppService;
         this.unitLockService = unitLockService;
+        this.orchestrator = orchestrator;
+        this.autoStart = autoStart;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -139,7 +151,7 @@ public class RerunAppService {
         // Without a baseline commit the decision is always a conservative full rerun (the planner
         // reports degraded), so there is no reason to call the engine first.
         String observedHead = item.baseCommit() == null
-            ? null : trimToNull(commitProbe.headSha(item.unitId(), item.sourceBranch()));
+            ? null : validHeadOrNull(commitProbe.headSha(item.unitId(), item.sourceBranch()));
         RerunPlan plan = rerunPlanner.decide(item, observedHead, previous);
 
         boolean reusableImage = previous != null && previous.imageDigest() != null
@@ -162,9 +174,19 @@ public class RerunAppService {
             throw publishAppService.unitLocked(unitId, itemId);
         }
         try {
-            RerunResult result = transactionTemplate.execute(tx -> rerunInTransaction(
+            Started started = transactionTemplate.execute(tx -> rerunInTransaction(
                 itemId, order, previous, plan, full, revoke, fromNode, observedHead));
-            return Objects.requireNonNull(result, "rerun result");
+            Started startedResult = Objects.requireNonNull(started, "rerun result");
+            // The instance is committed; start it outside the transaction, mirroring publish.
+            try {
+                if (autoStart) {
+                    orchestrator.advance(startedResult.instanceId());
+                }
+            } catch (RuntimeException ex) {
+                log.error("rerun pipeline did not start; reconcile enters its node later:"
+                    + " instanceId={}", startedResult.instanceId(), ex);
+            }
+            return startedResult.result();
         } catch (PublishAppService.LockLostException ex) {
             // The lock row is no longer ours (bindInstance reported it lost). Mirroring the
             // publish path, releasing here could delete a new holder's row/key, so the release
@@ -178,7 +200,7 @@ public class RerunAppService {
         }
     }
 
-    private RerunResult rerunInTransaction(long itemId, ReleaseOrder order,
+    private Started rerunInTransaction(long itemId, ReleaseOrder order,
                                            PipelineInstance previous, RerunPlan plan,
                                            boolean full, boolean revoke, NodeType fromNode,
                                            String observedHead) {
@@ -212,8 +234,9 @@ public class RerunAppService {
         String imageDigest = full || previous == null ? null : previous.imageDigest();
         String commitSha = full || previous == null ? null : previous.commitSha();
         TriggerType triggerType = full ? TriggerType.RERUN_FULL : TriggerType.RERUN_FROM_NODE;
-        PipelineInstance instance = publishAppService.createRerunInstance(order, current,
-            current.unitId(), triggerType, fromNode, imageDigest, commitSha, previous);
+        PublishAppService.CreatedInstance created = publishAppService.createRerunInstance(order,
+            current, current.unitId(), triggerType, fromNode, imageDigest, commitSha, previous);
+        PipelineInstance instance = created.instance();
 
         if (revoke) {
             // The item update above cleared the pass; record the acting user for the audit trail.
@@ -226,7 +249,12 @@ public class RerunAppService {
                 + " fromNode={}, degraded={}, transactionRevokedTestPass={}",
             itemId, order.publishNo(), instance.pipelineNo(), full, fromNode,
             plan.degraded(), revoke);
-        return new RerunResult(instance.pipelineNo(), full, revoke, plan.degraded());
+        return new Started(new RerunResult(instance.pipelineNo(), full, revoke, plan.degraded()),
+            created.instanceId());
+    }
+
+    /** Internal carrier: the business result plus the instance the caller must start. */
+    private record Started(RerunResult result, long instanceId) {
     }
 
     private void requireRerunnable(ReleaseItem item) {
@@ -264,6 +292,24 @@ public class RerunAppService {
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    /**
+     * The observed branch head, or {@code null} when it is absent or longer than the
+     * {@code VARCHAR(64)} baseline column. A commit id is never truncated: an over-long value
+     * degrades the decision to a conservative full rerun instead of corrupting the baseline.
+     */
+    private static String validHeadOrNull(String value) {
+        String trimmed = trimToNull(value);
+        if (trimmed == null) {
+            return null;
+        }
+        if (trimmed.length() > MAX_COMMIT_LENGTH) {
+            log.warn("observed branch head is longer than {} chars; baseline not refreshed: length={}",
+                MAX_COMMIT_LENGTH, trimmed.length());
+            return null;
+        }
+        return trimmed;
     }
 
     /**

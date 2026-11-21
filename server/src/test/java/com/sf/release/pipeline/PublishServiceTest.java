@@ -213,6 +213,31 @@ class PublishServiceTest {
     }
 
     @Test
+    void sha256_sized_head_is_stored_whole() {
+        String sha256 = "d".repeat(64);
+        when(commitProbe.headSha(unitId, BRANCH)).thenReturn(sha256);
+
+        publishService.publish(itemId);
+
+        assertThat(baseCommit())
+            .as("a 64-char head fits the VARCHAR(64) baseline without truncation")
+            .isEqualTo(sha256);
+    }
+
+    @Test
+    void over_long_head_degrades_to_null_instead_of_being_truncated(CapturedOutput output) {
+        when(commitProbe.headSha(unitId, BRANCH)).thenReturn("e".repeat(65));
+
+        publishService.publish(itemId);
+
+        assertThat(itemStatus()).isEqualTo("BUILDING");
+        assertThat(baseCommit()).as("a commit id is never truncated").isNull();
+        assertThat(output.getAll())
+            .contains("longer than 64 chars")
+            .contains("base_commit stays NULL");
+    }
+
+    @Test
     void instance_has_four_nodes_in_order_and_expected_tasks() {
         PublishResult result = publishService.publish(itemId);
         long instanceId = instanceId(result.pipelineNo());

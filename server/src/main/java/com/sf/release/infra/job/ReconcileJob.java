@@ -369,9 +369,14 @@ public class ReconcileJob {
     // ------------------------------------------------------------------ advance repair
 
     private int repairRunningInstances(Round round) {
+        // PENDING is included on purpose: publish/rerun commit the instance and then start it.
+        // A crash (or a handler that threw before the first node was entered) between those two
+        // steps leaves a PENDING instance nobody would ever start; this pass re-enters its first
+        // node, and entering a node is CAS-guarded so a replay is harmless.
         List<PipelineInstancePO> running = instanceMapper.selectList(
             Wrappers.<PipelineInstancePO>lambdaQuery()
-                .eq(PipelineInstancePO::getStatus, InstanceStatus.RUNNING.name())
+                .in(PipelineInstancePO::getStatus, InstanceStatus.PENDING.name(),
+                    InstanceStatus.RUNNING.name())
                 .orderByAsc(PipelineInstancePO::getId)
                 .last("LIMIT " + SCAN_LIMIT));
         int repaired = 0;
@@ -397,7 +402,19 @@ public class ReconcileJob {
                     continue;
                 }
                 PipelineNode current = instance.node(instance.currentNode());
-                if (current == null || current.status() != NodeStatus.RUNNING) {
+                if (current == null) {
+                    continue;
+                }
+                if (current.status() == NodeStatus.PENDING) {
+                    // The instance was committed but its first node was never entered: this is the
+                    // publish/rerun -> start gap, repaired by entering the node again.
+                    log.info("reconcile entering an unstarted node: instanceId={}, node={}",
+                        instanceId, current.nodeType());
+                    orchestrator.advance(instanceId);
+                    repaired++;
+                    continue;
+                }
+                if (current.status() != NodeStatus.RUNNING) {
                     continue;
                 }
                 if (!nodeLooksComplete(current)) {
