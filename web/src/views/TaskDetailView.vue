@@ -201,7 +201,7 @@ async function submitMember() {
       <div class="stack">
         <DataSection title="任务信息">
           <KeyValue label="任务 ID" :value="task?.id" mono />
-          <KeyValue label="子系统" :value="task?.subsystemName" />
+          <KeyValue label="系统" :value="task?.subsystemName" />
           <KeyValue label="创建人" :value="task?.creator" />
           <KeyValue label="预计完成" :value="task?.planFinishDate" />
           <KeyValue label="目的" :value="task?.purpose" />

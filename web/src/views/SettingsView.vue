@@ -77,7 +77,7 @@ onMounted(checkBackend)
             </span>
             <span v-else class="weak">检测中…</span>
           </KeyValue>
-          <KeyValue v-if="backend?.ok" label="子系统数" :value="backend.subsystems" mono />
+          <KeyValue v-if="backend?.ok" label="系统数" :value="backend.subsystems" mono />
         </DataSection>
 
         <DataSection title="对接状态">

@@ -72,7 +72,7 @@ function openCreate() {
 
 async function submitCreate() {
   if (!form.name.trim() || !form.subsystemId) {
-    ElMessage.warning('任务名称与所属子系统必填')
+    ElMessage.warning('任务名称与所属系统必填')
     return
   }
   saving.value = true
@@ -105,7 +105,7 @@ async function submitCreate() {
     <DataSection title="发布任务" flush>
       <template #actions>
         <div class="row wrap">
-          <el-select v-model="filters.subsystemId" clearable placeholder="全部子系统" style="width: 180px" @change="search">
+          <el-select v-model="filters.subsystemId" clearable placeholder="全部系统" style="width: 180px" @change="search">
             <el-option v-for="s in subsystems" :key="s.id" :label="s.name" :value="s.id" />
           </el-select>
           <el-select v-model="filters.status" clearable placeholder="全部状态" style="width: 140px" @change="search">
@@ -173,8 +173,8 @@ async function submitCreate() {
         <el-form-item label="任务名称" required>
           <el-input v-model="form.name" placeholder="例如 202611-V1.2.0" maxlength="128" />
         </el-form-item>
-        <el-form-item label="所属子系统" required>
-          <el-select v-model="form.subsystemId" placeholder="选择子系统" style="width: 100%">
+        <el-form-item label="所属系统" required>
+          <el-select v-model="form.subsystemId" placeholder="选择系统" style="width: 100%">
             <el-option v-for="s in subsystems" :key="s.id" :label="s.name" :value="s.id" />
           </el-select>
         </el-form-item>

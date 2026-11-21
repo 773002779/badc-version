@@ -100,12 +100,12 @@ public class TaskAppService {
             throw new BizException(BizError.PARAM_INVALID, "创建参数不能为空");
         }
         if (cmd.subsystemId() == null) {
-            throw new BizException(BizError.PARAM_INVALID, "所属子系统不能为空",
+            throw new BizException(BizError.PARAM_INVALID, "所属系统不能为空",
                 Map.of("subsystemId", "不能为空"));
         }
         String name = requireText(cmd.name(), NAME_MAX_LENGTH, "name", "任务名称");
         if (subsystemMapper.selectById(cmd.subsystemId()) == null) {
-            throw new BizException(BizError.PARAM_INVALID, "所属子系统不存在",
+            throw new BizException(BizError.PARAM_INVALID, "所属系统不存在",
                 Map.of("subsystemId", cmd.subsystemId()));
         }
         requireNameAvailable(cmd.subsystemId(), name);

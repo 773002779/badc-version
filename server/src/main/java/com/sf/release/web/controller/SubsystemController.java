@@ -22,7 +22,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 子系统管理 endpoints. Every handler is authenticated by {@code PermissionInterceptor};
+ * 系统管理 endpoints. Every handler is authenticated by {@code PermissionInterceptor};
  * mutations additionally require the {@code setting:manage} permission point, because
  * resource administration is an ADMIN responsibility in phase 1. Read endpoints are open
  * to any authenticated employee.

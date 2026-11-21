@@ -40,7 +40,7 @@ src/
   api/        http 封装、类型、接口
   components/ StatusDot / PageHeader / DataSection / EmptyState / StepBar / KeyValue
   styles/     tokens.css（设计令牌 + Element Plus 变量映射）、base.css（布局与基础样式）
-  views/      总览、任务、任务详情、发布内容、子系统、部署单元、设置
+  views/      总览、任务、任务详情、发布内容、系统、部署单元、设置
   theme.ts    明暗切换（localStorage 持久化）
 ```
 

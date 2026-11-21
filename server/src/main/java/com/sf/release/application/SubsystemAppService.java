@@ -161,7 +161,7 @@ public class SubsystemAppService {
     }
 
     private static BizException notFound(long id) {
-        return new BizException(BizError.PARAM_INVALID, "子系统不存在", Map.of("id", id));
+        return new BizException(BizError.PARAM_INVALID, "系统不存在", Map.of("id", id));
     }
 
     private void requireNameAvailable(String name, Long excludingId) {
@@ -177,19 +177,19 @@ public class SubsystemAppService {
     }
 
     private static BizException duplicateName(String name) {
-        return new BizException(BizError.DUPLICATE_NAME, "子系统名称已存在：" + name,
+        return new BizException(BizError.DUPLICATE_NAME, "系统名称已存在：" + name,
             Map.of("name", name));
     }
 
     private static String requireName(String raw) {
         String name = trimToNull(raw);
         if (name == null) {
-            throw new BizException(BizError.PARAM_INVALID, "子系统名称不能为空",
+            throw new BizException(BizError.PARAM_INVALID, "系统名称不能为空",
                 Map.of("name", "名称不能为空"));
         }
         if (name.length() > NAME_MAX_LENGTH) {
             throw new BizException(BizError.PARAM_INVALID,
-                "子系统名称长度不能超过 " + NAME_MAX_LENGTH, Map.of("name", name));
+                "系统名称长度不能超过 " + NAME_MAX_LENGTH, Map.of("name", name));
         }
         return name;
     }

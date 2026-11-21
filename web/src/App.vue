@@ -64,7 +64,7 @@ const initial = computed(() => (userId.value || '?').slice(0, 1).toUpperCase())
         <el-icon><Tickets /></el-icon><span>任务</span>
       </router-link>
       <router-link class="nav-item" to="/subsystems">
-        <el-icon><Grid /></el-icon><span>子系统</span>
+        <el-icon><Grid /></el-icon><span>系统</span>
       </router-link>
       <router-link class="nav-item" to="/units">
         <el-icon><Monitor /></el-icon><span>部署单元</span>

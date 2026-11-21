@@ -19,7 +19,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * HTTP seam of 子系统管理: JSON mapping, validation envelope, permission enforcement and
+ * HTTP seam of 系统管理: JSON mapping, validation envelope, permission enforcement and
  * the {@code /subsystems} contract, using the real interceptor and test schema.
  */
 @SpringBootTest

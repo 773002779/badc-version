@@ -79,7 +79,7 @@ public class CodingConnAppService {
         long effectiveSubsystemId = requireSubsystemId(effectiveScope, subsystemId);
         if (effectiveScope == CodingScope.SUBSYSTEM
                 && subsystemMapper.selectById(effectiveSubsystemId) == null) {
-            throw new BizException(BizError.PARAM_INVALID, "所属子系统不存在",
+            throw new BizException(BizError.PARAM_INVALID, "所属系统不存在",
                 Map.of("subsystemId", effectiveSubsystemId));
         }
         String normalizedBaseUrl = requireBaseUrl(baseUrl);
@@ -189,7 +189,7 @@ public class CodingConnAppService {
             return CodingConn.GLOBAL_SUBSYSTEM_ID;
         }
         if (subsystemId == null || subsystemId <= 0) {
-            throw new BizException(BizError.PARAM_INVALID, "子系统连接必须指定子系统",
+            throw new BizException(BizError.PARAM_INVALID, "系统连接必须指定系统",
                 Map.of("subsystemId", String.valueOf(subsystemId)));
         }
         return subsystemId;

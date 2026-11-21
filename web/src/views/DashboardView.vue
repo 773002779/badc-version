@@ -138,7 +138,7 @@ function openTask(id: number) {
       <DataSection title="开始使用">
         <ol class="howto">
           <li>
-            <span>登记子系统与部署单元</span>
+            <span>登记系统与部署单元</span>
             <router-link to="/units">部署单元 →</router-link>
           </li>
           <li>

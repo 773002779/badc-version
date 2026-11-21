@@ -27,7 +27,7 @@ public final class TaskDtos {
         @Size(max = 128, message = "任务名称长度不能超过 128")
         String name,
 
-        @NotNull(message = "所属子系统不能为空")
+        @NotNull(message = "所属系统不能为空")
         Long subsystemId,
 
         LocalDate planFinishDate,

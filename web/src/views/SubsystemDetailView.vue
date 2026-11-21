@@ -62,7 +62,7 @@ async function submit() {
 
 <template>
   <div>
-    <PageHeader :title="subsystem?.name ?? '子系统详情'" description="基本信息与下属部署单元。">
+    <PageHeader :title="subsystem?.name ?? '系统详情'" description="基本信息与下属部署单元。">
       <el-button @click="load">刷新</el-button>
       <el-button type="primary" @click="dialog = true">新建部署单元</el-button>
     </PageHeader>
@@ -71,7 +71,7 @@ async function submit() {
 
     <div class="grid" style="grid-template-columns: 360px minmax(0, 1fr)">
       <DataSection title="基本信息">
-        <KeyValue label="子系统 ID" :value="subsystem?.id" mono />
+        <KeyValue label="系统 ID" :value="subsystem?.id" mono />
         <KeyValue label="负责人" :value="subsystem?.ownerId" />
         <KeyValue label="授权代理" :value="subsystem?.agentId" />
         <KeyValue label="状态" :value="subsystem?.status" />

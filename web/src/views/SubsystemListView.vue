@@ -48,7 +48,7 @@ async function submit() {
     })
     dialog.value = false
     draft.name = ''
-    ElMessage.success('子系统已创建')
+    ElMessage.success('系统已创建')
     await load()
   } catch (e) {
     ElMessage.error(e instanceof ApiError ? e.message : '创建失败')
@@ -60,20 +60,20 @@ async function submit() {
 
 <template>
   <div>
-    <PageHeader title="子系统" description="研发组织单元，下挂部署单元与二方库。">
-      <el-button type="primary" @click="dialog = true">新建子系统</el-button>
+    <PageHeader title="系统" description="研发组织单元，下挂部署单元与二方库。">
+      <el-button type="primary" @click="dialog = true">新建系统</el-button>
     </PageHeader>
 
     <el-alert v-if="error" type="error" :closable="false" show-icon :title="error" style="margin-bottom: 16px" />
 
-    <DataSection title="全部子系统" :subtitle="`${rows?.total ?? 0} 个`" flush>
+    <DataSection title="全部系统" :subtitle="`${rows?.total ?? 0} 个`" flush>
       <template #actions>
         <el-input v-model="keyword" placeholder="名称" clearable style="width: 180px" @keyup.enter="load" @clear="load" />
         <el-button @click="load">查询</el-button>
       </template>
 
       <el-table v-if="rows && rows.records.length" :data="rows.records" row-key="id" style="width: 100%">
-        <el-table-column prop="name" label="子系统" min-width="200">
+        <el-table-column prop="name" label="系统" min-width="200">
           <template #default="{ row }">
             <router-link :to="`/subsystems/${row.id}`" class="strong">{{ row.name }}</router-link>
             <div class="weak small">{{ row.description || '—' }}</div>
@@ -86,11 +86,11 @@ async function submit() {
         </el-table-column>
         <el-table-column prop="status" label="状态" width="100" />
       </el-table>
-      <EmptyState v-else-if="!loading" title="还没有子系统" hint="先建子系统，再建部署单元。" />
+      <EmptyState v-else-if="!loading" title="还没有系统" hint="先建系统，再建部署单元。" />
       <div v-else style="padding: 24px"><el-skeleton :rows="4" animated /></div>
     </DataSection>
 
-    <el-dialog v-model="dialog" title="新建子系统" width="560px">
+    <el-dialog v-model="dialog" title="新建系统" width="560px">
       <el-form label-position="top">
         <div class="grid grid-2">
           <el-form-item label="名称" required>
