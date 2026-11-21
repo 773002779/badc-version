@@ -1,4 +1,4 @@
-﻿# SDD ledger — plan: docs/superpowers/plans/2026-11-21-release-pipeline-p1-foundation.md
+# SDD ledger — plan: docs/superpowers/plans/2026-11-21-release-pipeline-p1-foundation.md
 
 Started: 2026-11-21  Branch: feat/p1-foundation
 Spec: docs/requirements/发版流水线-需求规格说明书.md (v1.4)
@@ -271,3 +271,27 @@ Ruling R10: `deploy_unit.module` and `deploy_unit.tag` (V16) are labels only —
 Ruling R11: unit edit is a full replacement of the editable fields (subsystem link immutable). A field left blank is cleared, so the edit dialog sends every field it shows and the rule is printed in the dialog.
 Ruling R12: the CODING task picker asks the engine (`job.list`) instead of trusting the user's memory of an id. The project comes from the system (`subsystem.coding_project`), never from the request; a system without a project fails with 40000 before any network call, and an unreachable connection propagates as 50001 so the UI can fall back to typing. An empty list therefore always means "the project has no jobs".
 Ruling R13: `job.list` is an optional engine capability (default method on CicdEngine throwing ENGINE_UNAVAILABLE). `responseList` + `itemId` are required for that action; a response without an array is an error, not an empty list.
+
+P2 ROUND (2026-11-22): 门禁 / 验证确认 / 生产准入
+Scope: P2 计划 T1-T10. Both servers started with scripts\dev.ps1; 349 backend tests green; web build green; all 22 screenshots console-error free.
+
+Decisions D1-D6 were adopted with their suggested defaults, with three refinements the implementation forced:
+Ruling R14: 检查能力挂在 CicdEngine.startCheck/queryCheck（默认实现抛 ENGINE_UNAVAILABLE），不另开 GateEngine 端口。检查与构建/部署用同一 CODING 租户、同一套鉴权/脱敏/HTTPS 校验；复制一条 HTTP 管线只会多一份要同步维护的实现。动作名 check.start / check.env.start / check.query；两个 start 是因为占位符缺失在 resolver 里是硬错误，一个 body 同时渲染镜像级与 DE 级不可能。
+Ruling R15: 判定用「最高等级」而不是逐项 pass/fail；一个检查报 PASS 但等级是 S1 仍然阻断（等级是事实，状态词是引擎的意见）。未映射的等级返回「无等级」，绝不退化成 NONE。
+Ruling R16: 中危阻断不结束变更项（停在测试中、VERIFY 节点继续等待），高危/失效/测试不通过才进 GATE_FAILED。理由：后者可挽回，前者只能靠重跑；「一有中危就整体重跑」把豁免流程变成摆设。
+Ruling R17: 两道门各占一列（V19：gate_status=检查、test_status=测试）。P1 把两组值塞在一列，P2 实测发现「记录检查结果会覆盖测试不通过」——这是建模错误，不是实现瑕疵。迁移把历史 TEST_* 值映射为 CHECK_RUNNING，历史通过人/原因仍在。
+Ruling R18: 准入不足用 40002 GATE_BLOCKED（带 missing 列表），不是计划里写的 40011：40011 是「单元未配置」，混用会让前端无法区分缺配置与门禁未过。
+Ruling R19: P2 不开放「提交生产发布」入口，只给准入判定。提交后没有审批流（P3）会把状态推到待执行却无路可走；计划 T5 的意图（准入判定 + 缺项可解释）已由 GET /items/{id}/gate/admission 覆盖。
+Ruling R20: 检查在 VERIFY 节点进入时一次性触发（草案是构建成功即触发镜像级检查）。提前触发是性能优化，不影响判定时机；记为 P3 优化项。
+Ruling R21: 豁免审批人 = gate:waive（V18 补 OPS_LEAD 映射），且不能自审（40008），管理员也不例外；有效期必填、上限 90 天；同一变更项同时只允许一张生效/待审单。到期由每日 00:05 的扫描处理，且把检查结果一并置 INVALID（§4.6「豁免到期 → 视为 CHECK_INVALID」）。
+Ruling R22: 测试通过/不通过需要 gate:test-pass 且是任务内 TEST 成员（ADMIN 可 break-glass）；撤回需要 gate:test-revoke 且只有通过人本人；通过前要求 test_ready_at 已置位（测试环境就绪）。不通过的原因落 test_fail_reason，所有人可见。
+Ruling R23: 节点处理器新增两个可选钩子 mayComplete / failureReason（默认 false/null，P1 行为不变）。VERIFY 因此可以在门禁满足时完成、在终局阻断时失败：一个卡在 RUNNING 且没人能处理的节点比一个明确失败、释放单元锁、可以重跑的节点更糟。
+Ruling R24: 实例 FAILED 也写 status_reason（新增 failInstance 端口）。P1 只有 PAUSED 有原因，失败的实例只能去翻日志——这直接违反「按钮灰着也要给理由」。
+Ruling R25: 新增 GET /api/v1/me（身份 + 生效权限点）。没有它，页面只能「隐藏按钮」或「点完再报 40009」，两者都不满足「禁用并说明原因」。
+
+Deviations / residuals carried forward:
+- 生产批次执行与「门禁失效 → 后续批次暂停」的批次级动作仍是 P3：P2 的失效只作用于未发生的动作（撤回准入、把已完成的检查置 INVALID），从不碰已 SUCCESS 的任务行。
+- resume 只能恢复「门禁重新满足」的暂停；P2 里唯一的暂停是 PROD_DEPLOY 无处理器，请求会被明确拒绝（40001 「尚未交付」），不静默失败。
+- R5（PAUSED 无恢复入口）在接口层关闭；「有告警」仍待 P3 的通知能力。
+- R7（重放的 NOT_ALLOWED 事件消耗 attempts）未动；R8（taskTypesOf 缺 AUTO_TEST）仍开着；I8（Idempotency-Key）仍留给 P3。
+- 检查明细的环境级检查目前只针对第一个 TEST DE（行模型是一检查一行的聚合），多 DE 逐环境检查属 P3。

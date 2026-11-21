@@ -1,10 +1,16 @@
 # 发版流水线 · P2 实施计划（门禁 / 验证确认 / 生产准入）
 
-> **状态**：待评审。P1 已交付（构建 + 测试部署，`VERIFY` 处 `PAUSED`）；本计划把流水线从「测试部署完成」推进到「可提交生产」，并补齐门禁的判定、豁免、撤回与失效语义。
+> **状态**：已执行（2026-11-22）。T1–T7、T9、T10 全部落地，T8 交付前端面板；决策 D1–D6 按建议默认值采纳，
+> 实施中被迫做的三处修正（门禁拆两列、中危不结束变更项、准入用 40002）记在台账的 **P2 ROUND**。
+> 验证：`mvn -o verify` 349 tests / BUILD SUCCESS；`npm run build` 通过；22 张截图 console error = 0。
 >
-> **Spec**：`docs/requirements/发版流水线-需求规格说明书.md` v1.5（C9 / C16 / C18 / C19 / C23、4.3 门禁并行时序、4.6 门禁失效、FR-P-04）
-> **Tech design**：`docs/tech-design/发版流水线-技术方案-v1.0.md`（§5.2 状态机、§6 CODING 集成层、§7 门禁）
-> **P1 台账**：`docs/superpowers/plans/2026-11-21-p1-execution-ledger.md`（R5 明确要求 P2 补 PAUSED 的恢复与告警）
+> **交付形态**：`VERIFY` 节点从「PAUSED 边界」变成真正可执行的节点；门禁面板见
+> `docs/design/frontend-p1-design.md` §8 与 `docs/design/shots/release-gate-*.png`。
+> 本地看面板：`scripts/demo-gate.sql`（把一个已存在的执行改成「检查已回传」，可选 pass / waiver 两种）。
+>
+> **Spec**：`docs/requirements/发版流水线-需求规格说明书.md` v1.6（C9 / C16 / C18 / C19 / C23、4.3 门禁并行时序、4.6 门禁失效、FR-P-04）
+> **Tech design**：`docs/tech-design/发版流水线-技术方案-v1.0.md`（§3.3 两道门两列、§6.2.2 检查端点、§7 门禁引擎、§12.2.1 已实现接口）
+> **P1 台账**：`docs/superpowers/plans/2026-11-21-p1-execution-ledger.md`（R5 在接口层关闭；R14–R25 记录本轮裁决）
 
 ## 范围
 
@@ -126,3 +132,27 @@ T1 ──▶ T2 ──▶ T3 ──▶ T4 ──▶ T5 ──▶ T6 ──▶ T7
 - 检查未完成永远不会被当成「通过」；
 - 门禁失效只影响**未发生**的动作，已上线批次不回滚；
 - PAUSED 有原因、有恢复入口、有告警（R5 关闭）。
+---
+
+## 执行结果（2026-11-22）
+
+| 任务 | 落点 | 说明 |
+|---|---|---|
+| T1 | V17__gate.sql、V19__gate_split_test_status.sql、domain/gate/*、GateCheckPO/GateWaiverPO | 检查与豁免两张表；V19 把测试维度拆到 	est_status（原一列装不下两个正交维度） |
+| T2 | coding-endpoints.yml 的 check.start / check.env.start / check.query + CodingEngine.startCheck/queryCheck + GateCheckService + GateReconcileJob | 触发、轮询、超时、UNKNOWN 不算通过、重复回传是覆盖 |
+| T3 | GateEvaluator + GateService.evaluate | 最高等级判定、豁免快照校验、终局才推主状态、失效撤回准入 |
+| T4 | GateService.passTest/failTest/revokeTest + ReleaseTaskMemberMapper 校验 | 任一人通过（C18）、仅本人撤回（C19）、不通过必须给原因 |
+| T5 | GET /items/{id}/gate/admission | 缺项可解释；提交入口与审批留 P3 |
+| T6 | VerifyNodeHandler + NodeHandler.mayComplete/failureReason + ReleaseResumeService | PAUSED 语义从「功能边界」变成「业务状态」，并有恢复入口 |
+| T7 | RerunAppService（全量重跑置 INVALID）+ 失效撤回路径 | 只作用于未发生的动作，绝不回滚已成功批次 |
+| T8 | web/src/components/VerifyPanel.vue + ReleaseView + GET /api/v1/me | 两道门并排、结论与算式、检查分组、豁免流程、准入缺口；按钮禁用并给原因 |
+| T9 | GateWaiverService + V18__gate_waiver_role.sql + 每日到期扫描 | 不可豁免项直接拒绝；不能自审；到期置 INVALID |
+| T10 | P2BoundaryEndToEndTest（6 场景）、GateEvaluatorTest（13）、GateWaiverRulesTest（7） | 覆盖三条失败路径 + 断网 + 权限 + 豁免全流程 |
+
+**验收对照**
+
+- 四类结论（检查中 / 通过 / 阻断 / 可豁免）都能在页面看到，并与 gate_status 一一对应 —— 见两张截图；
+- 准入不足时缺口逐条列出（dmission.missing）；
+- 检查未完成永远不算通过（UNKNOWN/RUNNING → CHECK_RUNNING）；断网场景有测试；
+- 门禁失效只影响未发生的动作，已上线批次不回滚（P2 里没有批次，但代码路径不触碰 SUCCESS 任务行）；
+- PAUSED 有原因（status_reason）、有恢复入口（/releases/{publishNo}/resume），告警留给 P3 的通知能力。
