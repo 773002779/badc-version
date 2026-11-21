@@ -70,7 +70,8 @@ class UnitServiceTest {
     void create_stores_unit_and_rejects_unknown_subsystem() {
         long id = unitService.create(new CreateCmd(
             subsystemId, "quota-api", null, "DU-QUOTA", OWNER, "spring-boot",
-            "COMPATIBLE", " 配额服务 ", "outbound-os", "K8S", "IMAGE", "quota-api:latest"));
+            "COMPATIBLE", " 配额服务 ", "outbound-os", "K8S", "IMAGE", "quota-api:latest",
+            "quota", "core"));
 
         UnitView view = unitService.get(id);
         assertThat(view.subsystemId()).isEqualTo(subsystemId);
@@ -87,12 +88,15 @@ class UnitServiceTest {
         assertThat(view.deployType()).isEqualTo("K8S");
         assertThat(view.imageType()).isEqualTo("IMAGE");
         assertThat(view.imageName()).isEqualTo("quota-api:latest");
+        assertThat(view.module()).isEqualTo("quota");
+        assertThat(view.tag()).isEqualTo("core");
         assertThat(view.createdAt()).isNotNull();
         assertThat(view.updatedAt()).isNotNull();
 
         // A LIB unit is allowed too (shared shape, no deploy/env config in phase 1).
         long lib = unitService.create(new CreateCmd(
-            subsystemId, "quota-sdk", "LIB", null, OWNER, null, null, null, null, null, null, null));
+            subsystemId, "quota-sdk", "LIB", null, OWNER, null, null, null, null, null, null, null,
+            null, null));
         assertThat(unitService.get(lib).type()).isEqualTo("LIB");
         assertThatThrownBy(() -> unitService.addEnvDe(lib, env("TEST", "quota-sdk-sit", 0)))
             .as("FR-R-03: a second-party library has no deployment environment")
@@ -106,13 +110,15 @@ class UnitServiceTest {
             .satisfies(error -> assertThat(((BizError) error).getCode()).isEqualTo(PARAM_INVALID_CODE));
 
         assertThatThrownBy(() -> unitService.create(new CreateCmd(
-            subsystemId, "quota-bad-owner", null, null, INACTIVE, null, null, null, null, null, null, null)))
+            subsystemId, "quota-bad-owner", null, null, INACTIVE, null, null, null, null, null, null,
+            null, null, null)))
             .as("owner must be an ACTIVE employee")
             .isInstanceOf(BizException.class)
             .extracting("error").isEqualTo(BizError.PARAM_INVALID);
 
         assertThatThrownBy(() -> unitService.create(new CreateCmd(
-            subsystemId, "quota-api", null, null, OWNER, null, null, null, null, null, null, null)))
+            subsystemId, "quota-api", null, null, OWNER, null, null, null, null, null, null, null,
+            null, null)))
             .as("unit name is unique inside a subsystem")
             .isInstanceOf(BizException.class)
             .extracting("error").isEqualTo(BizError.DUPLICATE_NAME);
@@ -124,7 +130,7 @@ class UnitServiceTest {
 
         unitService.update(id, new UpdateCmd(" quota-api-v2 ", "LIB", "DU-QUOTA", OWNER,
             "spring-boot", "COMPATIBLE", "INACTIVE", " 配额服务 ", "outbound-os",
-            "K8S", "IMAGE", "quota-api:v2"));
+            "K8S", "IMAGE", "quota-api:v2", " quota ", " core "));
 
         UnitView view = unitService.get(id);
         assertThat(view.name()).isEqualTo("quota-api-v2");
@@ -135,6 +141,9 @@ class UnitServiceTest {
         assertThat(view.description()).isEqualTo("配额服务");
         assertThat(view.modulePath()).isEqualTo("outbound-os");
         assertThat(view.imageName()).isEqualTo("quota-api:v2");
+        // Filter-only labels are trimmed on the way in and are not part of the build contract.
+        assertThat(view.module()).isEqualTo("quota");
+        assertThat(view.tag()).isEqualTo("core");
         // The subsystem link is fixed once created.
         assertThat(view.subsystemId()).isEqualTo(subsystemId);
 
@@ -293,6 +302,41 @@ class UnitServiceTest {
         assertThatThrownBy(() -> unitService.addEnvDe(999_999L, env("PROD", "ghost", 0)))
             .isInstanceOf(BizException.class)
             .extracting("error").isEqualTo(BizError.PARAM_INVALID);
+    }
+
+    @Test
+    void module_and_tag_are_exact_filters_and_labels() {
+        long api = unitService.create(new CreateCmd(
+            subsystemId, "quota-api", null, null, OWNER, null, null, null, null, null, null, null,
+            "quota", "core"));
+        unitService.create(new CreateCmd(
+            subsystemId, "quota-worker", null, null, OWNER, null, null, null, null, null, null,
+            null, "quota", "experimental"));
+        unitService.create(new CreateCmd(
+            subsystemId, "order-api", null, null, OWNER, null, null, null, null, null, null, null,
+            "order", "core"));
+
+        assertThat(unitService.page(new PageQuery(1, 10, null, null, null, "quota", null))
+            .records()).extracting(UnitView::name).containsExactly("quota-api", "quota-worker");
+        assertThat(unitService.page(new PageQuery(1, 10, null, null, null, null, "core"))
+            .records()).extracting(UnitView::name).containsExactly("order-api", "quota-api");
+        assertThat(unitService.page(new PageQuery(1, 10, null, null, null, "quota", "core"))
+            .records()).extracting(UnitView::id).containsExactly(api);
+        assertThat(unitService.page(new PageQuery(1, 10, null, null, null, "quota-", null)).total())
+            .as("module is an exact label, not a prefix search")
+            .isZero();
+
+        // A label longer than its column is rejected instead of being silently truncated.
+        assertThatThrownBy(() -> unitService.create(new CreateCmd(
+            subsystemId, "quota-long", null, null, OWNER, null, null, null, null, null, null, null,
+            "x".repeat(65), null)))
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.PARAM_INVALID);
+
+        // update() is a full replacement: omitted labels are cleared, like every other field.
+        unitService.update(api, new UpdateCmd("quota-api", OWNER));
+        assertThat(unitService.get(api).module()).isNull();
+        assertThat(unitService.get(api).tag()).isNull();
     }
 
     @Test

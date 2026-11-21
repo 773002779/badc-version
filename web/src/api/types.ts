@@ -33,6 +33,9 @@ export interface UnitView {
   deployType?: string | null
   imageType?: string | null
   imageName?: string | null
+  /** Filter-only labels (V16): never part of a build or deploy payload. */
+  module?: string | null
+  tag?: string | null
   createdAt?: string
   updatedAt?: string
 }
@@ -140,4 +143,11 @@ export interface BindingView {
   taskId: string
   paramsJson?: string | null
   enabled?: boolean
+}
+
+/** One selectable CODING job of the system's project. */
+export interface CodingJobView {
+  taskId: string
+  name?: string | null
+  type?: string | null
 }

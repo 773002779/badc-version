@@ -12,6 +12,7 @@
 #   deploy.query : externalId
 #   deploy.logs  : externalId, offset, limit
 #   cancel       : externalId
+#   job.list     : project, jobType
 #   git.head     : unitId, branch
 #   git.changes  : unitId, branch, modulePath, baseSha
 # A missing/blank variable is an error that names the placeholder; it never renders "".
@@ -78,6 +79,18 @@ coding:
     "[cancel]":
       method: POST
       url: "/open-api/job/{externalId}/cancel"
+
+    # Lists the jobs of a CODING project so the unit form can PICK a build/deploy job instead of
+    # typing an id. `project` comes from the subsystem's CODING project, `jobType` is BUILD or
+    # DEPLOY (the CD namespace holds test/prod/daily deploy jobs alike).
+    # responseList addresses the array; itemId/itemName/itemType are evaluated per element.
+    "[job.list]":
+      method: GET
+      url: "/open-api/project/{project}/job/list?type={jobType}&page=1&pageSize=100"
+      responseList: "$.Response.Data.Jobs"
+      itemId: "$.Id"
+      itemName: "$.Name"
+      itemType: "$.Type"
 
     # Git commit probe of the rerun planner (Task 15, requirements 4.5 C15). These endpoints
     # are configuration like every other action: the real repository API paths and field names

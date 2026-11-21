@@ -1,5 +1,7 @@
 package com.sf.release.domain.engine;
 
+import java.util.List;
+
 /**
  * SPI implemented by every CI/CD engine adapter.
  *
@@ -39,4 +41,17 @@ public interface CicdEngine {
 
     /** Cancels a running job; an engine that cannot cancel reports the failure as an exception. */
     void cancel(String externalId);
+
+    /**
+     * Lists the jobs of one engine project so the user interface can offer the existing build
+     * and deploy tasks instead of asking for a raw id. {@code kind} selects the namespace
+     * (BUILD or DEPLOY) exactly like {@link #query}.
+     *
+     * <p>This is an optional capability: an adapter that cannot enumerate jobs reports
+     * {@code ENGINE_UNAVAILABLE} rather than returning an empty list, because an empty list
+     * means "this project has no jobs" and would be indistinguishable to the caller.
+     */
+    default List<EngineJob> listJobs(String project, JobKind kind) {
+        throw EngineException.unavailable("当前引擎不支持任务列表：" + name());
+    }
 }

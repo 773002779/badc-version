@@ -1,6 +1,7 @@
 import { api, qs } from './http'
 import type {
   BindingView,
+  CodingJobView,
   EnvDeView,
   ItemView,
   PageResult,
@@ -29,10 +30,38 @@ export const createSubsystem = (body: {
 
 // --------------------------------------------------------------------- units
 export const listUnits = (
-  params: { pageNo?: number; pageSize?: number; keyword?: string; subsystemId?: number; type?: string } = {}
+  params: {
+    pageNo?: number
+    pageSize?: number
+    keyword?: string
+    subsystemId?: number
+    type?: string
+    module?: string
+    tag?: string
+  } = {}
 ) => api<PageResult<UnitView>>(`/units${qs({ pageNo: 1, pageSize: 100, ...params })}`)
 
 export const getUnit = (id: number) => api<UnitView>(`/units/${id}`)
+
+export const updateUnit = (
+  id: number,
+  body: {
+    name: string
+    ownerId: string
+    type?: string
+    du?: string
+    frameworkTemplate?: string
+    branchMode?: string
+    status?: string
+    description?: string
+    modulePath?: string
+    deployType?: string
+    imageType?: string
+    imageName?: string
+    module?: string
+    tag?: string
+  }
+) => api<void>(`/units/${id}`, { method: 'PUT', body: JSON.stringify(body) })
 
 export const createUnit = (body: {
   subsystemId: number
@@ -50,6 +79,10 @@ export const createUnit = (body: {
 
 export const listCodingTasks = (unitId: number) =>
   api<BindingView[]>(`/units/${unitId}/coding-tasks`)
+
+/** Candidate jobs of the system's CODING project (BUILD or DEPLOY namespace). */
+export const listCodingJobs = (unitId: number, taskKind: string) =>
+  api<CodingJobView[]>(`/units/${unitId}/coding-jobs${qs({ taskKind })}`)
 
 export const bindCodingTasks = (
   unitId: number,

@@ -156,6 +156,35 @@ class UnitControllerTest {
             .andExpect(jsonPath("$.code").value(40009));
     }
 
+    @Test
+    void coding_jobs_endpoint_checks_the_project_before_talking_to_the_engine() throws Exception {
+        long id = createUnit(ADMIN, "quota-api", subsystemId);
+
+        // This subsystem has no CODING project, so the picker is empty for a truthful reason.
+        mvc.perform(get("/units/{id}/coding-jobs", id)
+                .param("taskKind", "BUILD")
+                .header(USER_HEADER, ADMIN))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(40000));
+
+        jdbc.update("UPDATE subsystem SET coding_project = 'quota-project' WHERE id = ?",
+            subsystemId);
+
+        // The real adapter has no connection in this profile: the UI falls back to manual input.
+        mvc.perform(get("/units/{id}/coding-jobs", id)
+                .param("taskKind", "BUILD")
+                .header(USER_HEADER, ADMIN))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(50001));
+
+        // Unknown kinds never reach the engine.
+        mvc.perform(get("/units/{id}/coding-jobs", id)
+                .param("taskKind", "NOPE")
+                .header(USER_HEADER, ADMIN))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(40000));
+    }
+
     private long createUnit(String userId, String name, long subsystemId) throws Exception {
         MvcResult result = mvc.perform(post("/units")
                 .header(USER_HEADER, userId)

@@ -33,6 +33,9 @@ public class DeployUnitPO {
     private String deployType;
     private String imageType;
     private String imageName;
+    /** Filter-only labels (V16): never part of a build or deploy payload. */
+    private String module;
+    private String tag;
     private Instant createdAt;
     private Instant updatedAt;
 
@@ -52,6 +55,8 @@ public class DeployUnitPO {
         po.deployType = unit.deployType();
         po.imageType = unit.imageType();
         po.imageName = unit.imageName();
+        po.module = unit.module();
+        po.tag = unit.tag();
         po.createdAt = unit.createdAt();
         po.updatedAt = unit.updatedAt();
         return po;
@@ -60,7 +65,7 @@ public class DeployUnitPO {
     public DeployUnit toDomain() {
         return new DeployUnit(id, subsystemId, name, type(), du, ownerId, frameworkTemplate,
             branchMode(), status(), description, modulePath, deployType, imageType, imageName,
-            createdAt, updatedAt);
+            module, tag, createdAt, updatedAt);
     }
 
     private UnitType type() {
@@ -189,6 +194,22 @@ public class DeployUnitPO {
 
     public void setImageName(String imageName) {
         this.imageName = imageName;
+    }
+
+    public String getModule() {
+        return module;
+    }
+
+    public void setModule(String module) {
+        this.module = module;
+    }
+
+    public String getTag() {
+        return tag;
+    }
+
+    public void setTag(String tag) {
+        this.tag = tag;
     }
 
     public Instant getCreatedAt() {

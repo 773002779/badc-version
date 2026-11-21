@@ -19,7 +19,7 @@ public final class UnitDtos {
 
     /** Create form: subsystem, name and owner are required, the rest is optional detail. */
     public record CreateUnitRequest(
-        @NotNull(message = "所属子系统不能为空")
+        @NotNull(message = "所属系统不能为空")
         Long subsystemId,
 
         @NotBlank(message = "名称不能为空")
@@ -55,7 +55,13 @@ public final class UnitDtos {
         String imageType,
 
         @Size(max = 255, message = "镜像名称长度不能超过 255")
-        String imageName) {
+        String imageName,
+
+        @Size(max = 64, message = "模块长度不能超过 64")
+        String module,
+
+        @Size(max = 64, message = "标签长度不能超过 64")
+        String tag) {
     }
 
     /** Edit form: the same detail fields plus the lifecycle status. */
@@ -96,7 +102,13 @@ public final class UnitDtos {
         String imageType,
 
         @Size(max = 255, message = "镜像名称长度不能超过 255")
-        String imageName) {
+        String imageName,
+
+        @Size(max = 64, message = "模块长度不能超过 64")
+        String module,
+
+        @Size(max = 64, message = "标签长度不能超过 64")
+        String tag) {
     }
 
     /** One CODING task reference. */

@@ -2,8 +2,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { addEnvDe, bindCodingTasks, getSubsystem, getUnit, listCodingTasks, listEnvDes } from '../api'
-import type { BindingView, EnvDeView, UnitView } from '../api/types'
+import { addEnvDe, bindCodingTasks, getSubsystem, getUnit, listCodingJobs, listCodingTasks, listEnvDes, updateUnit } from '../api'
+import type { BindingView, CodingJobView, EnvDeView, UnitView } from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
@@ -55,6 +55,111 @@ const missing = computed(() => checks.value.filter((c) => !c.ok).length)
 const deDialog = ref(false)
 const deForm = reactive({ envKind: 'TEST', deName: '', envTag: '', deployBatchNo: 0 })
 
+// ---- CODING job candidates -------------------------------------------------
+// The picker asks the engine which jobs the system's project has. When the connection is
+// missing the lists stay empty and the selects keep allow-create, so an id can still be typed.
+const jobOptions = reactive({ BUILD: [] as CodingJobView[], DEPLOY: [] as CodingJobView[] })
+const jobsLoading = ref(false)
+const jobsHint = ref<string | null>(null)
+
+async function loadJobs() {
+  jobsLoading.value = true
+  jobsHint.value = null
+  try {
+    const [build, deploy] = await Promise.all([listCodingJobs(id, 'BUILD'), listCodingJobs(id, 'TEST_DEPLOY')])
+    jobOptions.BUILD = build
+    jobOptions.DEPLOY = deploy
+  } catch (e) {
+    jobOptions.BUILD = []
+    jobOptions.DEPLOY = []
+    jobsHint.value =
+      e instanceof ApiError
+        ? `读取 CODING 任务失败：${e.message} 可先手动填写任务 ID。`
+        : '读取 CODING 任务失败，可先手动填写任务 ID。'
+  } finally {
+    jobsLoading.value = false
+  }
+}
+
+const optionLabel = (job: CodingJobView) => (job.name ? `${job.name} · ${job.taskId}` : job.taskId)
+
+// ---- edit dialog -----------------------------------------------------------
+const editDialog = ref(false)
+const saving = ref(false)
+const editForm = reactive({
+  name: '',
+  ownerId: '',
+  type: 'UNIT',
+  status: 'ACTIVE',
+  du: '',
+  frameworkTemplate: '',
+  branchMode: 'STANDARD',
+  description: '',
+  module: '',
+  tag: '',
+  modulePath: '',
+  deployType: '',
+  imageType: '',
+  imageName: ''
+})
+
+function openEdit() {
+  const u = unit.value
+  if (!u) return
+  editForm.name = u.name ?? ''
+  editForm.ownerId = u.ownerId ?? ''
+  editForm.type = u.type ?? 'UNIT'
+  editForm.status = u.status ?? 'ACTIVE'
+  editForm.du = u.du ?? ''
+  editForm.frameworkTemplate = u.frameworkTemplate ?? ''
+  editForm.branchMode = u.branchMode ?? 'STANDARD'
+  editForm.description = u.description ?? ''
+  editForm.module = u.module ?? ''
+  editForm.tag = u.tag ?? ''
+  editForm.modulePath = u.modulePath ?? ''
+  editForm.deployType = u.deployType ?? ''
+  editForm.imageType = u.imageType ?? ''
+  editForm.imageName = u.imageName ?? ''
+  editDialog.value = true
+}
+
+async function submitEdit() {
+  if (!editForm.name.trim()) {
+    ElMessage.warning('名称必填')
+    return
+  }
+  if (!editForm.ownerId.trim()) {
+    ElMessage.warning('负责人必填')
+    return
+  }
+  saving.value = true
+  try {
+    await updateUnit(id, {
+      name: editForm.name.trim(),
+      ownerId: editForm.ownerId.trim(),
+      type: editForm.type,
+      status: editForm.status,
+      du: editForm.du.trim() || undefined,
+      frameworkTemplate: editForm.frameworkTemplate.trim() || undefined,
+      branchMode: editForm.branchMode,
+      description: editForm.description.trim() || undefined,
+      module: editForm.module.trim() || undefined,
+      tag: editForm.tag.trim() || undefined,
+      modulePath: editForm.modulePath.trim() || undefined,
+      deployType: editForm.deployType.trim() || undefined,
+      imageType: editForm.imageType.trim() || undefined,
+      imageName: editForm.imageName.trim() || undefined
+    })
+    editDialog.value = false
+    ElMessage.success('部署单元已保存')
+    await load()
+  } catch (e) {
+    ElMessage.error(e instanceof ApiError ? e.message : '保存失败')
+  } finally {
+    saving.value = false
+  }
+}
+
 function applyBindings(list: BindingView[]) {
   const map: Record<string, BindingView> = {}
   for (const b of list) map[b.taskKind] = b
@@ -92,7 +197,10 @@ async function load() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadJobs()
+})
 
 async function saveBindings() {
   const list: Array<{ taskKind: string; taskId: string; paramsJson?: string }> = []
@@ -148,8 +256,9 @@ async function submitDe() {
   <div>
     <PageHeader
       :title="unit?.name ?? '部署单元'"
-      :description="unit ? `${unit.type} · ${subsystemName ?? '子系统 #' + unit.subsystemId} · owner ${unit.ownerId}` : ''"
+      :description="unit ? `${unit.type} · ${subsystemName ?? '系统 #' + unit.subsystemId} · owner ${unit.ownerId}` : ''"
     >
+      <el-button type="primary" @click="openEdit">编辑</el-button>
       <el-button @click="load">刷新</el-button>
     </PageHeader>
 
@@ -159,7 +268,7 @@ async function submitDe() {
       <div class="stack">
         <DataSection title="基本信息">
           <KeyValue label="单元 ID" :value="unit?.id" mono />
-          <KeyValue label="所属子系统">
+          <KeyValue label="所属系统">
             <router-link :to="`/subsystems/${unit?.subsystemId}`">
               {{ subsystemName ?? `#${unit?.subsystemId}` }}
             </router-link>
@@ -168,6 +277,8 @@ async function submitDe() {
           <KeyValue label="DU" :value="unit?.du" mono />
           <KeyValue label="框架模板" :value="unit?.frameworkTemplate" />
           <KeyValue label="分支模式" :value="unit?.branchMode" />
+          <KeyValue label="模块" :value="unit?.module" />
+          <KeyValue label="标签" :value="unit?.tag" />
           <KeyValue label="模块路径" :value="unit?.modulePath" mono />
           <KeyValue label="镜像" :value="unit?.imageName" mono />
           <KeyValue label="状态" :value="unit?.status" />
@@ -192,6 +303,7 @@ async function submitDe() {
       <div class="stack">
         <DataSection title="CODING 任务绑定" :subtitle="bindingSummary">
           <template #actions>
+            <el-button text :loading="jobsLoading" @click="loadJobs">刷新候选</el-button>
             <el-button type="primary" :loading="savingBindings" @click="saveBindings">保存</el-button>
           </template>
           <el-form label-position="top">
@@ -202,7 +314,22 @@ async function submitDe() {
                     <span v-if="hasBinding('BUILD')" class="bound">已绑定</span>
                   </span>
                 </template>
-                <el-input v-model="bindings.BUILD.taskId" placeholder="CODING CI 任务 ID" />
+                <el-select
+                  v-model="bindings.BUILD.taskId"
+                  filterable
+                  allow-create
+                  default-first-option
+                  :loading="jobsLoading"
+                  placeholder="选择 CODING 构建任务"
+                  style="width: 100%"
+                >
+                  <el-option
+                    v-for="job in jobOptions.BUILD"
+                    :key="job.taskId"
+                    :label="optionLabel(job)"
+                    :value="job.taskId"
+                  />
+                </el-select>
               </el-form-item>
               <el-form-item>
                 <template #label>
@@ -218,7 +345,22 @@ async function submitDe() {
                     <span v-if="hasBinding('TEST_DEPLOY')" class="bound">已绑定</span>
                   </span>
                 </template>
-                <el-input v-model="bindings.TEST_DEPLOY.taskId" placeholder="CODING CD 任务 ID" />
+                <el-select
+                  v-model="bindings.TEST_DEPLOY.taskId"
+                  filterable
+                  allow-create
+                  default-first-option
+                  :loading="jobsLoading"
+                  placeholder="选择 CODING 部署任务"
+                  style="width: 100%"
+                >
+                  <el-option
+                    v-for="job in jobOptions.DEPLOY"
+                    :key="job.taskId"
+                    :label="optionLabel(job)"
+                    :value="job.taskId"
+                  />
+                </el-select>
               </el-form-item>
               <el-form-item>
                 <template #label>
@@ -226,7 +368,22 @@ async function submitDe() {
                     <span v-if="hasBinding('PROD_DEPLOY')" class="bound">已绑定</span>
                   </span>
                 </template>
-                <el-input v-model="bindings.PROD_DEPLOY.taskId" placeholder="CODING CD 任务 ID" />
+                <el-select
+                  v-model="bindings.PROD_DEPLOY.taskId"
+                  filterable
+                  allow-create
+                  default-first-option
+                  :loading="jobsLoading"
+                  placeholder="选择 CODING 部署任务"
+                  style="width: 100%"
+                >
+                  <el-option
+                    v-for="job in jobOptions.DEPLOY"
+                    :key="job.taskId"
+                    :label="optionLabel(job)"
+                    :value="job.taskId"
+                  />
+                </el-select>
               </el-form-item>
               <el-form-item>
                 <template #label>
@@ -235,13 +392,33 @@ async function submitDe() {
                     <span v-else class="weak small">可选</span>
                   </span>
                 </template>
-                <el-input v-model="bindings.DAILY_DEPLOY.taskId" placeholder="留空复用测试部署" />
+                <el-select
+                  v-model="bindings.DAILY_DEPLOY.taskId"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  :loading="jobsLoading"
+                  placeholder="留空复用测试部署"
+                  style="width: 100%"
+                >
+                  <el-option
+                    v-for="job in jobOptions.DEPLOY"
+                    :key="job.taskId"
+                    :label="optionLabel(job)"
+                    :value="job.taskId"
+                  />
+                </el-select>
               </el-form-item>
             </div>
           </el-form>
+          <p v-if="jobsHint" class="jobs-hint small">{{ jobsHint }}</p>
+          <p v-else class="weak small" style="margin: 4px 0 0">
+            候选来自所属系统的 CODING 项目；列表里没有的任务可以直接输入任务 ID。
+            构建唯一、部署按环境分开；保存按类型覆盖，留空的类型保留原有绑定。
+          </p>
           <p class="weak small" style="margin: 4px 0 0">
-            构建唯一、部署按环境分开；保存按类型覆盖，留空的类型保留原有绑定。首次发布需三类绑定齐全，
-            缺少 BUILD 分支会在创建变更项时返回 40011。
+            首次发布需三类绑定齐全，缺少 BUILD 分支会在创建变更项时返回 40011。
           </p>
         </DataSection>
 
@@ -264,6 +441,73 @@ async function submitDe() {
       CODING 连接（base_url / 凭证）目前没有管理接口，需要在库表 <code class="mono">coding_conn</code> 中配置；
       端点模板在 <code class="mono">coding-endpoints.yml</code>，改配置即可，不需要改代码。
     </p>
+
+    <el-dialog v-model="editDialog" title="编辑部署单元" width="640px" top="6vh">
+      <div class="dialog-scroll">
+        <el-form label-position="top">
+        <div class="grid grid-2">
+          <el-form-item label="名称" required>
+            <el-input v-model="editForm.name" placeholder="例如 quota-api" />
+          </el-form-item>
+          <el-form-item label="负责人" required>
+            <el-input v-model="editForm.ownerId" placeholder="工号，需为在职员工" />
+          </el-form-item>
+          <el-form-item label="类型">
+            <el-select v-model="editForm.type" style="width: 100%">
+              <el-option label="部署单元" value="UNIT" />
+              <el-option label="二方库" value="LIB" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="状态">
+            <el-select v-model="editForm.status" style="width: 100%">
+              <el-option label="ACTIVE" value="ACTIVE" />
+              <el-option label="INACTIVE" value="INACTIVE" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="模块（仅筛选/标签）">
+            <el-input v-model="editForm.module" placeholder="例如 配额、计费" />
+          </el-form-item>
+          <el-form-item label="标签（仅筛选/标签）">
+            <el-input v-model="editForm.tag" placeholder="单个值，例如 core" />
+          </el-form-item>
+          <el-form-item label="DU">
+            <el-input v-model="editForm.du" placeholder="DU-QUOTA" />
+          </el-form-item>
+          <el-form-item label="框架模板">
+            <el-input v-model="editForm.frameworkTemplate" placeholder="spring-boot" />
+          </el-form-item>
+          <el-form-item label="分支模式">
+            <el-select v-model="editForm.branchMode" style="width: 100%">
+              <el-option label="STANDARD" value="STANDARD" />
+              <el-option label="COMPATIBLE" value="COMPATIBLE" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="模块路径（共库 commit 比对）">
+            <el-input v-model="editForm.modulePath" placeholder="outbound-os" />
+          </el-form-item>
+          <el-form-item label="部署类型">
+            <el-input v-model="editForm.deployType" placeholder="K8S" />
+          </el-form-item>
+          <el-form-item label="镜像类型">
+            <el-input v-model="editForm.imageType" placeholder="IMAGE" />
+          </el-form-item>
+        </div>
+        <el-form-item label="镜像名称">
+          <el-input v-model="editForm.imageName" placeholder="quota-api:latest" />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="editForm.description" type="textarea" :rows="2" placeholder="一句话说明这个单元" />
+        </el-form-item>
+        </el-form>
+        <p class="weak small" style="margin: -4px 0 0">
+          保存是整体替换：留空的可选字段会被清空。模块与标签只用于筛选和展示，不进入构建/部署参数。
+        </p>
+      </div>
+      <template #footer>
+        <el-button @click="editDialog = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="submitEdit">保存</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="deDialog" title="添加环境 DE" width="480px">
       <el-form label-position="top">
@@ -381,6 +625,15 @@ async function submitDe() {
 }
 .footnote code {
   color: var(--text-2);
+}
+.jobs-hint {
+  margin: 4px 0 0;
+  color: var(--warn);
+}
+.dialog-scroll {
+  max-height: 62vh;
+  overflow-y: auto;
+  padding-right: 6px;
 }
 
 @media (max-width: 960px) {

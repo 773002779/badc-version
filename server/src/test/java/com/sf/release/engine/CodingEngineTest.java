@@ -6,6 +6,7 @@ import com.sf.release.domain.engine.BuildCmd;
 import com.sf.release.domain.engine.CicdEngine;
 import com.sf.release.domain.engine.DeployCmd;
 import com.sf.release.domain.engine.EngineException;
+import com.sf.release.domain.engine.EngineJob;
 import com.sf.release.domain.engine.EngineResult;
 import com.sf.release.domain.engine.EngineStatus;
 import com.sf.release.domain.engine.JobKind;
@@ -188,6 +189,46 @@ class CodingEngineTest {
         assertThat(server.takeRequest().getPath()).isEqualTo("/open-api/build/j-1");
         assertThat(server.takeRequest().getPath()).isEqualTo("/open-api/build/j-1");
         assertThat(server.takeRequest().getPath()).isEqualTo("/open-api/build/j-1");
+    }
+
+    @Test
+    void list_jobs_maps_the_project_job_array_from_the_configured_expressions() throws Exception {
+        server.enqueue(new MockResponse().setBody("{\"Response\":{\"Data\":{\"Jobs\":["
+            + "{\"Id\":\"P-BUILD\",\"Name\":\"配额构建\",\"Type\":\"BUILD\"},"
+            + "{\"Id\":\"P-LINT\",\"Name\":\"静态检查\"}"
+            + "]}}}"));
+        server.enqueue(new MockResponse().setBody("{\"Response\":{\"Data\":{\"Jobs\":["
+            + "{\"Id\":\"P-TEST-DEPLOY\",\"Name\":\"测试部署\",\"Type\":\"DEPLOY\"}"
+            + "]}}}"));
+
+        var buildJobs = engine().listJobs("quota-project", JobKind.BUILD);
+        var deployJobs = engine().listJobs("quota-project", JobKind.DEPLOY);
+
+        assertThat(buildJobs).extracting(EngineJob::taskId).containsExactly("P-BUILD", "P-LINT");
+        assertThat(buildJobs.get(0).name()).isEqualTo("配额构建");
+        assertThat(buildJobs.get(0).type()).isEqualTo("BUILD");
+        assertThat(buildJobs.get(1).name()).isEqualTo("静态检查");
+        assertThat(buildJobs.get(1).type())
+            .as("a job without a type keeps null instead of a fabricated word")
+            .isNull();
+        assertThat(deployJobs).extracting(EngineJob::taskId).containsExactly("P-TEST-DEPLOY");
+
+        RecordedRequest buildRequest = server.takeRequest();
+        assertThat(buildRequest.getMethod()).isEqualTo("GET");
+        assertThat(buildRequest.getPath())
+            .isEqualTo("/open-api/project/quota-project/job/list?type=BUILD&page=1&pageSize=100");
+        assertThat(server.takeRequest().getPath())
+            .isEqualTo("/open-api/project/quota-project/job/list?type=DEPLOY&page=1&pageSize=100");
+    }
+
+    @Test
+    void list_jobs_rejects_a_response_without_an_array() {
+        server.enqueue(new MockResponse().setBody("{\"Response\":{\"Data\":{}}}"));
+
+        Throwable thrown = catchThrowable(() -> engine().listJobs("quota-project", JobKind.BUILD));
+
+        assertThat(thrown).isInstanceOf(EngineException.class);
+        assertThat(thrown.getMessage()).contains("不是数组");
     }
 
     @Test
@@ -411,8 +452,8 @@ class CodingEngineTest {
         assertThat(properties.getEndpoints())
             .containsKeys("build.start", "build.query", "build.logs",
                 "deploy.start", "deploy.query", "deploy.logs", "cancel",
-                "git.head", "git.changes")
-            .hasSize(9);
+                "git.head", "git.changes", "job.list")
+            .hasSize(10);
         assertThat(properties.getEndpoints().get("build.start").getMethod()).isEqualTo("POST");
         assertThat(properties.getEndpoints().get("build.start").getUrl())
             .isEqualTo("/open-api/build/start");

@@ -11,6 +11,10 @@ import java.time.Instant;
  * inside a shared code repository and is used by commit comparison (Task 15); it is
  * nullable because most units occupy the whole repository. Defaults mirror the DDL:
  * {@code type = UNIT}, {@code branchMode = STANDARD}, {@code status = ACTIVE}.
+ *
+ * <p>{@code module} and {@code tag} are <strong>labels only</strong>: they exist for the
+ * unit list filter and for display, never for a build or deploy decision. They are
+ * deliberately distinct from {@code modulePath}, which the commit comparison reads.
  */
 public record DeployUnit(
     Long id,
@@ -27,6 +31,8 @@ public record DeployUnit(
     String deployType,
     String imageType,
     String imageName,
+    String module,
+    String tag,
     Instant createdAt,
     Instant updatedAt) {
 
@@ -40,6 +46,8 @@ public record DeployUnit(
         deployType = trimToNull(deployType);
         imageType = trimToNull(imageType);
         imageName = trimToNull(imageName);
+        module = trimToNull(module);
+        tag = trimToNull(tag);
         type = type == null ? UnitType.UNIT : type;
         branchMode = branchMode == null ? BranchMode.STANDARD : branchMode;
         status = status == null ? UnitStatus.ACTIVE : status;

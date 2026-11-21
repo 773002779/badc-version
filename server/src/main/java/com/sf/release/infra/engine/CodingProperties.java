@@ -131,6 +131,10 @@ public class CodingProperties {
         private String responseUrl;
         private String responseCommit;
         private String responseValue;
+        private String responseList;
+        private String itemId;
+        private String itemName;
+        private String itemType;
 
         public String getMethod() {
             return method;
@@ -236,6 +240,46 @@ public class CodingProperties {
 
         public void setResponseValue(String responseValue) {
             this.responseValue = responseValue;
+        }
+
+        /**
+         * Optional JSONPath of the array a {@code job.list} response returns. The
+         * {@code item*} expressions below are evaluated against each array element, so a
+         * tenant that wraps the list differently only needs this one line changed.
+         */
+        public String getResponseList() {
+            return responseList;
+        }
+
+        public void setResponseList(String responseList) {
+            this.responseList = responseList;
+        }
+
+        /** Per-element JSONPath of the engine job id (required by {@code job.list}). */
+        public String getItemId() {
+            return itemId;
+        }
+
+        public void setItemId(String itemId) {
+            this.itemId = itemId;
+        }
+
+        /** Per-element JSONPath of the job name shown in the picker. */
+        public String getItemName() {
+            return itemName;
+        }
+
+        public void setItemName(String itemName) {
+            this.itemName = itemName;
+        }
+
+        /** Per-element JSONPath of the job type/vocabulary word, if the tenant reports one. */
+        public String getItemType() {
+            return itemType;
+        }
+
+        public void setItemType(String itemType) {
+            this.itemType = itemType;
         }
     }
 }

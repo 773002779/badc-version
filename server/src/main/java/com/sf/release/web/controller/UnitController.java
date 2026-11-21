@@ -1,5 +1,6 @@
 package com.sf.release.web.controller;
 
+import com.sf.release.application.CodingJobQueryService;
 import com.sf.release.application.UnitAppService;
 import com.sf.release.application.UnitAppService.BindingCmd;
 import com.sf.release.application.UnitAppService.CreateCmd;
@@ -45,9 +46,12 @@ import java.util.List;
 public class UnitController {
 
     private final UnitAppService unitAppService;
+    private final CodingJobQueryService codingJobQueryService;
 
-    public UnitController(UnitAppService unitAppService) {
+    public UnitController(UnitAppService unitAppService,
+                          CodingJobQueryService codingJobQueryService) {
         this.unitAppService = unitAppService;
+        this.codingJobQueryService = codingJobQueryService;
     }
 
     @DataScope
@@ -57,9 +61,11 @@ public class UnitController {
             @RequestParam(defaultValue = "10") int pageSize,
             @RequestParam(required = false) String keyword,
             @RequestParam(required = false) Long subsystemId,
-            @RequestParam(required = false) String type) {
+            @RequestParam(required = false) String type,
+            @RequestParam(required = false) String module,
+            @RequestParam(required = false) String tag) {
         return ApiResponse.ok(unitAppService.page(
-            new PageQuery(pageNo, pageSize, keyword, subsystemId, type)));
+            new PageQuery(pageNo, pageSize, keyword, subsystemId, type, module, tag)));
     }
 
     @DataScope
@@ -83,7 +89,9 @@ public class UnitController {
             request.modulePath(),
             request.deployType(),
             request.imageType(),
-            request.imageName())));
+            request.imageName(),
+            request.module(),
+            request.tag())));
     }
 
     @RequirePerm(Permissions.SETTING_MANAGE)
@@ -103,7 +111,9 @@ public class UnitController {
             request.modulePath(),
             request.deployType(),
             request.imageType(),
-            request.imageName()));
+            request.imageName(),
+            request.module(),
+            request.tag()));
         return ApiResponse.ok(null);
     }
 
@@ -123,6 +133,18 @@ public class UnitController {
     @GetMapping("/{id}/coding-tasks")
     public ApiResponse<List<UnitAppService.CodingTaskView>> listCodingTasks(@PathVariable long id) {
         return ApiResponse.ok(unitAppService.listCodingTasks(id));
+    }
+
+    /**
+     * Candidate CODING jobs for one binding kind, read from the system's CODING project. The
+     * form uses this instead of asking the user to type a task id.
+     */
+    @DataScope
+    @GetMapping("/{id}/coding-jobs")
+    public ApiResponse<List<CodingJobQueryService.CodingJobView>> listCodingJobs(
+            @PathVariable long id,
+            @RequestParam String taskKind) {
+        return ApiResponse.ok(codingJobQueryService.list(id, taskKind));
     }
 
     @DataScope

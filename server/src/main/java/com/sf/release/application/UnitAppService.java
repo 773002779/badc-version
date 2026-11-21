@@ -70,6 +70,8 @@ public class UnitAppService {
     private static final int DEPLOY_TYPE_MAX_LENGTH = 32;
     private static final int IMAGE_TYPE_MAX_LENGTH = 32;
     private static final int IMAGE_NAME_MAX_LENGTH = 255;
+    private static final int MODULE_LABEL_MAX_LENGTH = 64;
+    private static final int TAG_MAX_LENGTH = 64;
     private static final int TASK_ID_MAX_LENGTH = 64;
     private static final int ENV_TAG_MAX_LENGTH = 64;
     private static final int DE_NAME_MAX_LENGTH = 128;
@@ -108,12 +110,12 @@ public class UnitAppService {
             throw new BizException(BizError.PARAM_INVALID, "创建参数不能为空");
         }
         if (cmd.subsystemId() == null) {
-            throw new BizException(BizError.PARAM_INVALID, "所属子系统不能为空",
+            throw new BizException(BizError.PARAM_INVALID, "所属系统不能为空",
                 Map.of("subsystemId", "不能为空"));
         }
         SubsystemPO subsystem = subsystemMapper.selectById(cmd.subsystemId());
         if (subsystem == null) {
-            throw new BizException(BizError.PARAM_INVALID, "所属子系统不存在",
+            throw new BizException(BizError.PARAM_INVALID, "所属系统不存在",
                 Map.of("subsystemId", cmd.subsystemId()));
         }
         String name = requireName(cmd.name());
@@ -135,11 +137,14 @@ public class UnitAppService {
             cmd.imageType(), IMAGE_TYPE_MAX_LENGTH, "imageType", "镜像类型");
         String imageName = optionalMaxLength(
             cmd.imageName(), IMAGE_NAME_MAX_LENGTH, "imageName", "镜像名称");
+        String module = optionalMaxLength(
+            cmd.module(), MODULE_LABEL_MAX_LENGTH, "module", "模块");
+        String tag = optionalMaxLength(cmd.tag(), TAG_MAX_LENGTH, "tag", "标签");
 
         Instant now = Instant.now();
         DeployUnit unit = new DeployUnit(null, cmd.subsystemId(), name, type, du, ownerId,
             frameworkTemplate, branchMode, UnitStatus.ACTIVE, description, modulePath,
-            deployType, imageType, imageName, now, now);
+            deployType, imageType, imageName, module, tag, now, now);
         DeployUnitPO po = DeployUnitPO.of(unit);
         try {
             unitMapper.insert(po);
@@ -181,6 +186,9 @@ public class UnitAppService {
             cmd.imageType(), IMAGE_TYPE_MAX_LENGTH, "imageType", "镜像类型");
         String imageName = optionalMaxLength(
             cmd.imageName(), IMAGE_NAME_MAX_LENGTH, "imageName", "镜像名称");
+        String module = optionalMaxLength(
+            cmd.module(), MODULE_LABEL_MAX_LENGTH, "module", "模块");
+        String tag = optionalMaxLength(cmd.tag(), TAG_MAX_LENGTH, "tag", "标签");
 
         int rows;
         try {
@@ -198,6 +206,8 @@ public class UnitAppService {
                 .set(DeployUnitPO::getDeployType, deployType)
                 .set(DeployUnitPO::getImageType, imageType)
                 .set(DeployUnitPO::getImageName, imageName)
+                .set(DeployUnitPO::getModule, module)
+                .set(DeployUnitPO::getTag, tag)
                 .set(DeployUnitPO::getUpdatedAt, Instant.now()));
         } catch (DuplicateKeyException ex) {
             throw duplicateName(name);
@@ -218,6 +228,9 @@ public class UnitAppService {
     public PageResult<UnitView> page(PageQuery query) {
         requirePageQuery(query, MAX_PAGE_SIZE);
         String keyword = trimToNull(query.keyword());
+        // module/tag are exact-match label filters, unlike the keyword which matches the name.
+        String module = trimToNull(query.module());
+        String tag = trimToNull(query.tag());
         UnitType type = query.type() == null || query.type().isBlank()
             ? null
             : parseEnum(UnitType.class, query.type(), null, "type", "类型");
@@ -231,6 +244,8 @@ public class UnitAppService {
             .in(!user.allUnits(), DeployUnitPO::getId, user.scopeUnitIds())
             .eq(query.subsystemId() != null, DeployUnitPO::getSubsystemId, query.subsystemId())
             .eq(type != null, DeployUnitPO::getType, type == null ? null : type.name())
+            .eq(module != null, DeployUnitPO::getModule, module)
+            .eq(tag != null, DeployUnitPO::getTag, tag)
             .like(keyword != null, DeployUnitPO::getName, keyword)
             .orderByAsc(DeployUnitPO::getName)
             .orderByAsc(DeployUnitPO::getId);
@@ -563,7 +578,8 @@ public class UnitAppService {
             unit.id(), unit.subsystemId(), unit.name(), unit.type().name(), unit.du(),
             unit.ownerId(), unit.frameworkTemplate(), unit.branchMode().name(),
             unit.status().name(), unit.description(), unit.modulePath(), unit.deployType(),
-            unit.imageType(), unit.imageName(), unit.createdAt(), unit.updatedAt());
+            unit.imageType(), unit.imageName(), unit.module(), unit.tag(),
+            unit.createdAt(), unit.updatedAt());
     }
 
     private static EnvDeView toView(EnvDe de) {
@@ -586,10 +602,13 @@ public class UnitAppService {
         String modulePath,
         String deployType,
         String imageType,
-        String imageName) {
+        String imageName,
+        String module,
+        String tag) {
 
         public CreateCmd(Long subsystemId, String name, String ownerId) {
-            this(subsystemId, name, null, null, ownerId, null, null, null, null, null, null, null);
+            this(subsystemId, name, null, null, ownerId, null, null, null, null, null, null,
+                null, null, null);
         }
     }
 
@@ -606,10 +625,13 @@ public class UnitAppService {
         String modulePath,
         String deployType,
         String imageType,
-        String imageName) {
+        String imageName,
+        String module,
+        String tag) {
 
         public UpdateCmd(String name, String ownerId) {
-            this(name, null, null, ownerId, null, null, null, null, null, null, null, null);
+            this(name, null, null, ownerId, null, null, null, null, null, null, null, null,
+                null, null);
         }
     }
 
@@ -639,15 +661,24 @@ public class UnitAppService {
         }
     }
 
-    /** Unit page request: keyword filters the name, optional subsystem/type filters. */
-    public record PageQuery(int pageNo, int pageSize, String keyword, Long subsystemId, String type) {
+    /**
+     * Unit page request. {@code keyword} matches the name partially; {@code subsystemId},
+     * {@code type}, {@code module} and {@code tag} are exact filters (the last two are
+     * display labels, see {@link DeployUnit}).
+     */
+    public record PageQuery(int pageNo, int pageSize, String keyword, Long subsystemId,
+                            String type, String module, String tag) {
+
+        public PageQuery(int pageNo, int pageSize, String keyword, Long subsystemId, String type) {
+            this(pageNo, pageSize, keyword, subsystemId, type, null, null);
+        }
 
         public PageQuery(int pageNo, int pageSize) {
-            this(pageNo, pageSize, null, null, null);
+            this(pageNo, pageSize, null, null, null, null, null);
         }
 
         public PageQuery(int pageNo, int pageSize, String keyword) {
-            this(pageNo, pageSize, keyword, null, null);
+            this(pageNo, pageSize, keyword, null, null, null, null);
         }
     }
 
@@ -675,6 +706,8 @@ public class UnitAppService {
         String deployType,
         String imageType,
         String imageName,
+        String module,
+        String tag,
         Instant createdAt,
         Instant updatedAt) {
     }

@@ -9,6 +9,7 @@ import com.sf.release.domain.engine.BuildCmd;
 import com.sf.release.domain.engine.CicdEngine;
 import com.sf.release.domain.engine.DeployCmd;
 import com.sf.release.domain.engine.EngineException;
+import com.sf.release.domain.engine.EngineJob;
 import com.sf.release.domain.engine.EngineResult;
 import com.sf.release.domain.engine.EngineStatus;
 import com.sf.release.domain.engine.JobKind;
@@ -17,7 +18,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -54,6 +57,7 @@ public class CodingEngine implements CicdEngine {
     static final String ACTION_BUILD_START = "build.start";
     static final String ACTION_DEPLOY_START = "deploy.start";
     static final String ACTION_CANCEL = "cancel";
+    static final String ACTION_JOB_LIST = "job.list";
 
     private static final Logger log = LoggerFactory.getLogger(CodingEngine.class);
     private static final String REDACTED = "***";
@@ -210,6 +214,59 @@ public class CodingEngine implements CicdEngine {
         execute(ACTION_CANCEL, Map.of("externalId", requireExternalId(externalId)));
     }
 
+    /**
+     * Lists a project's build or deploy jobs. The response array and the per-element id/name
+     * expressions come from {@code job.list} in {@code coding-endpoints.yml}.
+     *
+     * <p>An element without an id is skipped (an id is what a binding can store); a response
+     * that carries no array at all fails the call, because "no array" means the configured
+     * expression is wrong, not that the project is empty.
+     */
+    @Override
+    public List<EngineJob> listJobs(String project, JobKind kind) {
+        if (project == null || project.isBlank()) {
+            throw EngineException.unavailable("CODING 项目不能为空，无法查询任务列表");
+        }
+        if (kind == null) {
+            throw EngineException.unavailable("任务类型（JobKind）不能为空，无法查询任务列表");
+        }
+        CodingProperties.Endpoint endpoint = endpoint(ACTION_JOB_LIST);
+        String listExpression = endpoint.getResponseList();
+        if (listExpression == null || listExpression.isBlank()) {
+            throw EngineException.unavailable(
+                "端点 action=" + ACTION_JOB_LIST + " 缺少 responseList 配置");
+        }
+        if (endpoint.getItemId() == null || endpoint.getItemId().isBlank()) {
+            throw EngineException.unavailable(
+                "端点 action=" + ACTION_JOB_LIST + " 缺少 itemId 配置");
+        }
+
+        Map<String, String> vars = new LinkedHashMap<>();
+        put(vars, "project", project.trim());
+        put(vars, "jobType", kind.name());
+        EngineHttpClient.HttpResult result = execute(ACTION_JOB_LIST, vars);
+        JsonNode root = parse(result, ACTION_JOB_LIST);
+        JsonNode list = node(root, listExpression, ACTION_JOB_LIST);
+        if (list == null || !list.isArray()) {
+            throw EngineException.unavailable(
+                "任务列表响应不是数组（action=" + ACTION_JOB_LIST + "，expression="
+                    + listExpression + "）");
+        }
+        List<EngineJob> jobs = new ArrayList<>();
+        for (JsonNode item : list) {
+            String taskId = text(item, endpoint.getItemId(), ACTION_JOB_LIST);
+            if (taskId == null) {
+                continue;
+            }
+            jobs.add(new EngineJob(taskId,
+                text(item, endpoint.getItemName(), ACTION_JOB_LIST),
+                text(item, endpoint.getItemType(), ACTION_JOB_LIST)));
+        }
+        log.info("coding job list queried: project={}, kind={}, count={}",
+            project, kind, jobs.size());
+        return List.copyOf(jobs);
+    }
+
     // ------------------------------------------------------------------ request plumbing
 
     private EngineHttpClient.HttpResult execute(String action, Map<String, String> vars) {
@@ -306,20 +363,27 @@ public class CodingEngine implements CicdEngine {
      * Missing nodes and non-value nodes yield {@code null}.
      */
     private static String text(JsonNode root, String expression, String action) {
-        if (expression == null || expression.isBlank()) {
-            return null;
-        }
-        JsonNode node;
-        try {
-            node = JsonPathLite.read(root, expression.trim());
-        } catch (IllegalArgumentException ex) {
-            throw invalidExpression(action, "响应", expression, ex);
-        }
+        JsonNode node = node(root, expression, action);
         if (node == null || node.isMissingNode() || node.isNull() || !node.isValueNode()) {
             return null;
         }
         String value = node.asText();
         return value == null || value.isBlank() ? null : value.trim();
+    }
+
+    /**
+     * Resolves an expression to a node (object, array or value); a missing node yields
+     * {@code null}. Used by the array-shaped {@code job.list} response.
+     */
+    private static JsonNode node(JsonNode root, String expression, String action) {
+        if (expression == null || expression.isBlank()) {
+            return null;
+        }
+        try {
+            return JsonPathLite.read(root, expression.trim());
+        } catch (IllegalArgumentException ex) {
+            throw invalidExpression(action, "响应", expression, ex);
+        }
     }
 
     /**
@@ -335,6 +399,10 @@ public class CodingEngine implements CicdEngine {
             validateExpression(action, "responseUrl", endpoint.getResponseUrl());
             validateExpression(action, "responseCommit", endpoint.getResponseCommit());
             validateExpression(action, "responseValue", endpoint.getResponseValue());
+            validateExpression(action, "responseList", endpoint.getResponseList());
+            validateExpression(action, "itemId", endpoint.getItemId());
+            validateExpression(action, "itemName", endpoint.getItemName());
+            validateExpression(action, "itemType", endpoint.getItemType());
         });
     }
 
