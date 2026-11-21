@@ -41,6 +41,7 @@ public interface ReleaseQueryMapper {
                pi.pipeline_no         AS pipelineNo,
                pi.trigger_type        AS triggerType,
                pi.status              AS status,
+               pi.status_reason       AS statusReason,
                pi.image_digest        AS imageDigest,
                pi.commit_sha          AS commitSha,
                pi.start_at            AS startAt,

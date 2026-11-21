@@ -119,7 +119,12 @@ export interface ReleaseDetail {
   publishNo: string
   pipelineNo: string
   status: string
+  /** Why the instance is PAUSED / FAILED (the operator-facing explanation). */
+  statusReason?: string | null
+  /** The check dimension; `null` only for an order without an execution. */
   gateStatus?: string | null
+  /** The test dimension (V19 split the two orthogonal gates). */
+  testStatus?: string | null
   triggerType: string
   rerunFromNode?: string | null
   fullRerun?: boolean | null
@@ -127,6 +132,7 @@ export interface ReleaseDetail {
   imageDigest?: string | null
   order?: { oaTicketNo?: string | null; plannedReleaseTime?: string | null } | null
   nodes: ReleaseNode[]
+  itemId?: number | null
 }
 
 export interface ReleaseRecord {
@@ -150,4 +156,97 @@ export interface CodingJobView {
   taskId: string
   name?: string | null
   type?: string | null
+}
+
+// ------------------------------------------------------------------- gate (P2)
+
+export type GateConclusion = 'RUNNING' | 'PASS' | 'WAIVED' | 'BLOCK' | 'INVALID'
+
+export interface GateCheck {
+  kind: string
+  label: string
+  stage: 'IMAGE' | 'ENV'
+  status: string
+  statusLabel: string
+  severity: string
+  severityLabel: string
+  issues: number
+  scannedObject?: string | null
+  summary?: string | null
+  reportUrl?: string | null
+  startedAt?: string | null
+  finishedAt?: string | null
+  deadlineAt?: string | null
+  passed: boolean
+  blocking: boolean
+  waiverHint?: string | null
+}
+
+export interface GateCheckGroup {
+  stage: 'IMAGE' | 'ENV'
+  stageLabel: string
+  passed: number
+  total: number
+  checks: GateCheck[]
+}
+
+export interface GateWaiver {
+  id: number
+  status: string
+  statusLabel: string
+  reason?: string | null
+  impact?: string | null
+  requestedBy: string
+  requestedAt?: string | null
+  approvedBy?: string | null
+  approvedAt?: string | null
+  decideReason?: string | null
+  expireAt?: string | null
+  active: boolean
+}
+
+export interface GateAdmission {
+  eligible: boolean
+  missing: string[]
+  checkConclusion: GateConclusion
+  checkSummary: string
+  test: string
+}
+
+/** The verification panel of one 变更项 (the two orthogonal gates and their evidence). */
+export interface ItemGate {
+  itemId: number
+  crid: string
+  itemStatus: string
+  gateStatus: string
+  conclusion: GateConclusion
+  conclusionLabel: string
+  maxSeverity: string
+  maxSeverityLabel: string
+  passed: number
+  total: number
+  blocking: number
+  waivable: boolean
+  summary: string
+  reasons: string[]
+  testStatus: string
+  test: string
+  testPassBy?: string | null
+  testPassAt?: string | null
+  testFailReason?: string | null
+  groups: GateCheckGroup[]
+  waiver?: GateWaiver | null
+  admission: GateAdmission
+  instanceId: number
+  imageDigest?: string | null
+  commitSha?: string | null
+}
+
+/** The caller's identity and effective permissions (`GET /api/v1/me`). */
+export interface MeView {
+  userId: string
+  roles: string[]
+  perms: string[]
+  allUnits: boolean
+  unitIds: number[]
 }

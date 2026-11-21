@@ -30,6 +30,7 @@ public class ReleaseHeadRow {
     private String pipelineNo;
     private String triggerType;
     private String status;
+    private String statusReason;
     private String gateStatus;
     private String testStatus;
     private String imageDigest;
@@ -131,6 +132,14 @@ public class ReleaseHeadRow {
 
     public void setTestStatus(String testStatus) {
         this.testStatus = testStatus;
+    }
+
+    public String getStatusReason() {
+        return statusReason;
+    }
+
+    public void setStatusReason(String statusReason) {
+        this.statusReason = statusReason;
     }
 
     public String getCommitSha() {

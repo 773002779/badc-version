@@ -3,7 +3,9 @@ import type {
   BindingView,
   CodingJobView,
   EnvDeView,
+  ItemGate,
   ItemView,
+  MeView,
   PageResult,
   ReleaseDetail,
   ReleaseRecord,
@@ -144,3 +146,53 @@ export const getRelease = (publishNo: string) => api<ReleaseDetail>(`/api/v1/rel
 
 export const getReleaseRecords = (publishNo: string) =>
   api<ReleaseRecord[]>(`/api/v1/releases/${publishNo}/records`)
+
+/** Resumes a paused execution; the backend rejects it when the gate is not satisfied. */
+export const resumeRelease = (publishNo: string) =>
+  api<{ publishNo: string; pipelineNo: string; status: string; resumeNode: string }>(
+    `/api/v1/releases/${publishNo}/resume`,
+    { method: 'POST' }
+  )
+
+// ------------------------------------------------------------------- gate (P2)
+export const getMe = () => api<MeView>('/api/v1/me')
+
+/** The verification panel: both gates, every check, the waiver and the admission. */
+export const getItemGate = (itemId: number) => api<ItemGate>(`/api/v1/items/${itemId}/gate`)
+
+export const passItemTest = (itemId: number) =>
+  api<ItemGate>(`/api/v1/items/${itemId}/gate/test-pass`, { method: 'POST' })
+
+export const failItemTest = (itemId: number, reason: string) =>
+  api<ItemGate>(`/api/v1/items/${itemId}/gate/test-fail`, {
+    method: 'POST',
+    body: JSON.stringify({ reason })
+  })
+
+export const revokeItemTest = (itemId: number, reason: string) =>
+  api<ItemGate>(`/api/v1/items/${itemId}/gate/test-revoke`, {
+    method: 'POST',
+    body: JSON.stringify({ reason })
+  })
+
+export const refreshGateCheck = (itemId: number, kind: string, instanceId = 0) =>
+  api<ItemGate>(`/api/v1/items/${itemId}/gate/checks/${kind}/refresh${qs({ instanceId })}`, {
+    method: 'POST'
+  })
+
+export const requestWaiver = (
+  itemId: number,
+  body: { reason: string; impact?: string; expireAt: string }
+) => api<ItemGate>(`/api/v1/items/${itemId}/gate/waiver`, { method: 'POST', body: JSON.stringify(body) })
+
+export const approveWaiver = (itemId: number, waiverId: number, note?: string) =>
+  api<ItemGate>(`/api/v1/items/${itemId}/gate/waiver/${waiverId}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({ note })
+  })
+
+export const rejectWaiver = (itemId: number, waiverId: number, note: string) =>
+  api<ItemGate>(`/api/v1/items/${itemId}/gate/waiver/${waiverId}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ note })
+  })

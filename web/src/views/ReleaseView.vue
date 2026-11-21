@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { getRelease, getReleaseRecords } from '../api'
+import { ElMessage } from 'element-plus'
+import { getRelease, getReleaseRecords, resumeRelease } from '../api'
 import type { ReleaseDetail, ReleaseRecord } from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
@@ -10,6 +11,7 @@ import EmptyState from '../components/EmptyState.vue'
 import StatusDot from '../components/StatusDot.vue'
 import StepBar from '../components/StepBar.vue'
 import KeyValue from '../components/KeyValue.vue'
+import VerifyPanel from '../components/VerifyPanel.vue'
 import { formatDateTime, formatDuration, shortSha, statusLabel } from '../utils/format'
 
 const route = useRoute()
@@ -27,6 +29,8 @@ const busy = computed(() => {
   return s === 'RUNNING' || s === 'PENDING'
 })
 
+const gateStatusHint = computed(() => detail.value?.statusReason ?? '（未记录原因）')
+
 async function load(silent = false) {
   if (!silent) loading.value = true
   error.value = null
@@ -38,6 +42,16 @@ async function load(silent = false) {
     error.value = e instanceof ApiError ? e.message : '加载失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function doResume() {
+  try {
+    const result = await resumeRelease(publishNo)
+    ElMessage.success(`已恢复，从 ${statusLabel(result.resumeNode)} 继续`)
+    await load(true)
+  } catch (e) {
+    ElMessage.warning(e instanceof ApiError ? e.message : '恢复失败')
   }
 }
 
@@ -58,6 +72,9 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
 <template>
   <div>
     <PageHeader :title="`发布内容 ${publishNo}`" :description="detail ? `流水单 ${detail.pipelineNo}` : ''">
+      <el-button v-if="detail?.status === 'PAUSED'" :title="`当前挂起原因：${gateStatusHint}`" @click="doResume">
+        恢复执行
+      </el-button>
       <el-button :loading="loading" @click="load()">刷新</el-button>
     </PageHeader>
 
@@ -78,8 +95,15 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
                 <span class="small">{{ statusLabel(detail.triggerType) }}</span>
               </div>
               <div class="summary-item">
-                <span class="weak small">门禁</span>
-                <span class="small weak">{{ detail.gateStatus ?? '—（P2 交付）' }}</span>
+                <span class="weak small">门禁（检查）</span>
+                <StatusDot
+                  :status="detail.gateStatus === 'CHECK_FAIL' || detail.gateStatus === 'CHECK_INVALID' ? 'FAILED' : detail.gateStatus === 'CHECK_RUNNING' || !detail.gateStatus ? 'PENDING' : 'SUCCESS'"
+                  :pulse="detail.gateStatus === 'CHECK_RUNNING'"
+                />
+              </div>
+              <div class="summary-item">
+                <span class="weak small">门禁（测试）</span>
+                <span class="small">{{ statusLabel(detail.testStatus ?? 'TEST_PENDING') }}</span>
               </div>
               <div class="summary-item">
                 <span class="weak small">镜像摘要</span>
@@ -108,7 +132,10 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
               </span>
             </div>
 
-            <div v-if="node.status !== 'PENDING' && node.tasks.length" class="task-list">
+            <div v-if="node.nodeType === 'VERIFY' && detail.itemId" class="verify-slot">
+              <VerifyPanel :item-id="detail.itemId" :running="busy" @changed="load(true)" />
+            </div>
+            <div v-else-if="node.status !== 'PENDING' && node.tasks.length" class="task-list">
               <div v-for="(t, i) in node.tasks" :key="`${t.taskType}-${t.batchNo}-${t.targetId}-${i}`" class="task-row">
                 <StatusDot :status="t.status" domain="task" :dot-only="false" />
                 <span class="task-name mono">{{ t.taskType }}</span>
@@ -130,7 +157,7 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
               <span class="weak small">{{ node.tasks.length }} 项任务</span>
               <span class="weak small">等待执行</span>
             </div>
-            <EmptyState v-else title="该节点没有任务" hint="空节点的实例不会自动完成。" />
+            <EmptyState v-else-if="node.nodeType !== 'VERIFY'" title="该节点没有任务" hint="空节点的实例不会自动完成。" />
           </section>
         </div>
         <div v-else-if="!loading" class="panel panel-pad">
@@ -175,7 +202,9 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
       </div>
       <p class="weak small" style="margin: 12px 0 0">
         没有配置 CODING 连接时，构建会以 <code class="mono">ENGINE_UNAVAILABLE</code> 失败，这是预期结果。
-        接入真实 CODING 后，流水线会继续构建与测试部署，并停在一期的 <code class="mono">VERIFY / PAUSED</code> 边界。
+        接入真实 CODING 后，流水线会继续构建与测试部署，进入「验证确认」：七项检查回传、测试人员判定，
+        两道门禁同时满足才允许提交生产；生产部署由 P3 交付，所以当前会停在
+        <code class="mono">PROD_DEPLOY / PAUSED</code>。
       </p>
     </div>
   </div>

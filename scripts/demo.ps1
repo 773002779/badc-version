@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
     跑一遍一期完整链路：子系统 → 部署单元 → CODING 任务绑定 → 环境 DE → 任务 → 变更项 → 发布 → 查询。
@@ -6,7 +6,7 @@
 .DESCRIPTION
     用本地账号 dev（start.ps1 已播种）通过 HTTP 调接口，逐步打印返回。
     没有配置 CODING 连接时，发布会停在构建阶段并显示 ENGINE_UNAVAILABLE —— 这是一期的预期结果，
-    用来证明链路、状态机、锁和查询都通了；接上真实 CODING 后同一条链路会走到 PAUSED（VERIFY 门禁边界，P2）。
+    用来证明链路、状态机、锁和查询都通了；接上真实 CODING 后同一条链路会走完验证确认，并停在生产部署前（PAUSED，P3）。
 
 .PARAMETER BaseUrl
     服务地址，默认 http://127.0.0.1:8080。
@@ -132,7 +132,7 @@ Start-Sleep -Seconds 2
 Say "== 8. 查询发布内容 ==" 'Cyan'
 $detail = Invoke-Api GET "/api/v1/releases/$($publish.publishNo)"
 Say "  状态     : $($detail.status)"
-Say "  门禁     : $($detail.gateStatus)   （P2 才填充）"
+Say "  门禁     : $($detail.gateStatus) / 测试 $($detail.testStatus)"
 Say "  触发方式 : $($detail.triggerType)"
 Say "  镜像摘要 : $($detail.imageDigest)"
 foreach ($node in $detail.nodes) {
@@ -147,9 +147,9 @@ if ($detail.status -eq 'FAILED' -and -not $detail.imageDigest) {
     Say '结果说明：构建阶段的引擎调用失败（没有配置 CODING 连接），实例按设计置 FAILED。' 'Yellow'
     Say '          链路本身是通的：任务→变更项→发布单→4 节点→查询 都成功了。' 'Yellow'
     Say '          接上真实 CODING（coding_conn + 端点模板）后，同一条链路会继续构建、部署测试环境，' 'Yellow'
-    Say '          并停在 VERIFY 的 PAUSED 边界（门禁在 P2 交付）。' 'Yellow'
+    Say '          进入验证确认跑七项检查，并在生产部署前停住（P3）。' 'Yellow'
 } elseif ($detail.status -eq 'PAUSED') {
-    Say '结果说明：构建与测试部署已完成，流水线按一期边界停在 VERIFY（PAUSED），门禁在 P2 交付。' 'Yellow'
+    Say '结果说明：构建、测试部署与门禁都已完成，流水线停在 PROD_DEPLOY 之前（PAUSED，生产部署为 P3）。' 'Yellow'
 } else {
     Say "结果说明：实例状态 $($detail.status)。" 'Yellow'
 }
