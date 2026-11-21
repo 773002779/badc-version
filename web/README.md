@@ -5,6 +5,15 @@ Vue 3 + TypeScript + Vite + Element Plus，明暗双主题，直连本地后端�
 ## 运行
 
 ```powershell
+# 一条命令起前后端（首次会装依赖，后端从零构建时约 1 分钟）
+powershell -ExecutionPolicy Bypass -File ..\scripts\dev.ps1
+
+# 加 -Rebuild 强制重新打包后端，-Open 直接打开浏览器
+```
+
+也可以分开起：
+
+```powershell
 # 1. 后端（另开一个终端）
 powershell -ExecutionPolicy Bypass -File ..\scripts\start.ps1
 
