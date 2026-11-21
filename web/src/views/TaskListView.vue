@@ -141,9 +141,9 @@ async function submitCreate() {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="阻塞" width="90">
+        <el-table-column label="阻塞" width="110">
           <template #default="{ row }">
-            <span class="small" :class="{ 'text-warn': row.hasBlocking }">{{ row.hasBlocking ? '有' : '—' }}</span>
+            <span class="small" :class="{ 'text-warn': row.hasBlocking }">{{ row.hasBlocking ? '有阻塞' : '—' }}</span>
           </template>
         </el-table-column>
         <el-table-column label="创建时间" width="160">
