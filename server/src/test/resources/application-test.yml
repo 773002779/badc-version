@@ -1,0 +1,28 @@
+spring:
+  datasource:
+    url: "jdbc:mysql://127.0.0.1:3306/release_pipeline_test?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true"
+    username: root
+    password: root
+  flyway:
+    clean-disabled: false
+
+# Deterministic test-only credential key. In production the cipher reads the real
+# CODING_CRED_KEY environment variable; the value is published in the test resources on
+# purpose (Base64 of the 32 ASCII bytes 0123456789abcdef0123456789abcdef) and is not a
+# secret. An OS environment variable takes precedence over this property.
+CODING_CRED_KEY: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
+# MockWebServer and local integration tests speak plain HTTP; this test-only switch keeps
+# the production HTTPS requirement intact everywhere else.
+release:
+  engine:
+    allow-insecure-http: true
+  webhook:
+    # Published on purpose: the webhook test signs its own bodies with this value.
+    secret: "test-webhook-secret-not-a-real-one"
+  reconcile:
+    # The suite shares one MySQL schema; tests invoke ReconcileJob.run() explicitly instead
+    # of racing a 30s background thread.
+    enabled: false
+  redis:
+    enabled: false

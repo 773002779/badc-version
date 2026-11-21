@@ -1,0 +1,144 @@
+package com.sf.release.web.dto;
+
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
+
+import java.util.List;
+
+/**
+ * Request bodies of {@code /units}. Responses reuse the application view records so the
+ * web layer never depends on domain entities.
+ */
+public final class UnitDtos {
+
+    private UnitDtos() {
+    }
+
+    /** Create form: subsystem, name and owner are required, the rest is optional detail. */
+    public record CreateUnitRequest(
+        @NotNull(message = "所属子系统不能为空")
+        Long subsystemId,
+
+        @NotBlank(message = "名称不能为空")
+        @Size(max = 128, message = "名称长度不能超过 128")
+        String name,
+
+        @Size(max = 16, message = "类型长度不能超过 16")
+        String type,
+
+        @Size(max = 128, message = "DU 长度不能超过 128")
+        String du,
+
+        @NotBlank(message = "负责人不能为空")
+        @Size(max = 32, message = "负责人长度不能超过 32")
+        String ownerId,
+
+        @Size(max = 64, message = "框架模板长度不能超过 64")
+        String frameworkTemplate,
+
+        @Size(max = 16, message = "分支模式长度不能超过 16")
+        String branchMode,
+
+        @Size(max = 512, message = "描述长度不能超过 512")
+        String description,
+
+        @Size(max = 255, message = "模块路径长度不能超过 255")
+        String modulePath,
+
+        @Size(max = 32, message = "部署类型长度不能超过 32")
+        String deployType,
+
+        @Size(max = 32, message = "镜像类型长度不能超过 32")
+        String imageType,
+
+        @Size(max = 255, message = "镜像名称长度不能超过 255")
+        String imageName) {
+    }
+
+    /** Edit form: the same detail fields plus the lifecycle status. */
+    public record UpdateUnitRequest(
+        @NotBlank(message = "名称不能为空")
+        @Size(max = 128, message = "名称长度不能超过 128")
+        String name,
+
+        @Size(max = 16, message = "类型长度不能超过 16")
+        String type,
+
+        @Size(max = 128, message = "DU 长度不能超过 128")
+        String du,
+
+        @NotBlank(message = "负责人不能为空")
+        @Size(max = 32, message = "负责人长度不能超过 32")
+        String ownerId,
+
+        @Size(max = 64, message = "框架模板长度不能超过 64")
+        String frameworkTemplate,
+
+        @Size(max = 16, message = "分支模式长度不能超过 16")
+        String branchMode,
+
+        @Size(max = 16, message = "状态长度不能超过 16")
+        String status,
+
+        @Size(max = 512, message = "描述长度不能超过 512")
+        String description,
+
+        @Size(max = 255, message = "模块路径长度不能超过 255")
+        String modulePath,
+
+        @Size(max = 32, message = "部署类型长度不能超过 32")
+        String deployType,
+
+        @Size(max = 32, message = "镜像类型长度不能超过 32")
+        String imageType,
+
+        @Size(max = 255, message = "镜像名称长度不能超过 255")
+        String imageName) {
+    }
+
+    /** One CODING task reference. */
+    public record BindingRequest(
+        @NotBlank(message = "任务类型不能为空")
+        @Size(max = 16, message = "任务类型长度不能超过 16")
+        String taskKind,
+
+        @NotBlank(message = "CODING 任务 ID 不能为空")
+        @Size(max = 64, message = "CODING 任务 ID 长度不能超过 64")
+        String taskId,
+
+        String paramsJson) {
+    }
+
+    /** Bind/rebind request: accumulates over the unit's existing task kinds. */
+    public record BindCodingTasksRequest(
+        @NotNull(message = "绑定列表不能为空")
+        @Valid
+        List<BindingRequest> bindings) {
+    }
+
+    /** DE create form; a missing batch number means {@code 0}. */
+    public record AddEnvDeRequest(
+        @NotBlank(message = "环境类型不能为空")
+        @Size(max = 16, message = "环境类型长度不能超过 16")
+        String envKind,
+
+        @Size(max = 64, message = "环境标签长度不能超过 64")
+        String envTag,
+
+        @NotBlank(message = "DE 名称不能为空")
+        @Size(max = 128, message = "DE 名称长度不能超过 128")
+        String deName,
+
+        @Size(max = 128, message = "资源名长度不能超过 128")
+        String resourceName,
+
+        @Size(max = 128, message = "CODING 部署目标长度不能超过 128")
+        String codingDeployTarget,
+
+        @Min(value = 0, message = "部署批次号不能为负数")
+        Integer deployBatchNo) {
+    }
+}

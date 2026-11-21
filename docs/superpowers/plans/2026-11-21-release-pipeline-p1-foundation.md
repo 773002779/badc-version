@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Java 17；Spring Boot 3.2.x；MyBatis-Plus 3.5.x；Flyway 10.x；Redis 7；MySQL 8.0。
+- Java 17；Spring Boot 3.2.x；MyBatis-Plus 3.5.x；Flyway（**版本随 Spring Boot 3.2 BOM，不强制 10.x**）；Redis 7；MySQL 8.0。
 - **执行环境（已实测）**：JDK 21（编译参数 `--release 17`）、Maven 3.6.1、**本地 MySQL 8.0.16（127.0.0.1:3306，root/root）**、**无 Docker**、**无本地 Redis**、无 pnpm。
   因此：测试直接打本地 MySQL 的独立 schema `release_pipeline_test`，**禁止引入 Testcontainers / H2**；锁抽象为 `DistributedLock` 接口，测试注入内存实现，Redis 实现由 `release.redis.enabled=true` 条件装配（默认 false，避免启动失败）。
 - **测试隔离**：每个测试自造数据（不依赖表内既有行、不与其它用例共享固定主键）；验证并发的用例必须真实提交事务，不得用 `@Transactional` 回滚；test profile 启动时执行 `Flyway.clean()` 再 `migrate()`，保证 schema 确定性。
@@ -81,9 +81,9 @@ enum ItemStatus { PENDING, BUILDING, TESTING, GATE_PENDING, SUBMITTED,
                   PENDING_APPROVAL, READY, PROD_DEPLOYING, DONE,
                   GATE_FAILED, FAILED, REJECTED, CLOSED, TERMINATED, ROLLED_BACK }
 enum ItemEvent  { PUBLISH, BUILD_OK, BUILD_FAIL, TEST_DEPLOY_OK, TEST_DEPLOY_FAIL,
-                  GATE_DECIDE, SUBMIT, APPROVE_ALL, REJECT, EXECUTE,
+                  GATE_PASS, GATE_FAIL, SUBMIT, APPROVE_ALL, REJECT, EXECUTE,
                   PROD_OK, PROD_FAIL, FREEZE_HIT, CHECK_INVALID, TEST_REVOKE,
-                  RERUN, CLOSE, EXIT, ROLLBACK }
+                  RERUN, RERUN_FULL, CLOSE, EXIT, ROLLBACK }
 enum GateStatus { TEST_PENDING, TEST_PASS, TEST_FAIL, TEST_REVOKED,
                   CHECK_RUNNING, CHECK_PASS, CHECK_WAIVED, CHECK_FAIL, CHECK_INVALID }
 
