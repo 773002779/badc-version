@@ -357,6 +357,25 @@ public class UnitAppService {
         return po.getId();
     }
 
+    /** Read model of a unit's CODING task bindings, sorted by task kind. */
+    public record CodingTaskView(String taskKind, String taskId, String paramsJson, boolean enabled) {
+    }
+
+    /**
+     * Lists the unit's CODING task bindings so the settings UI can show the current mapping
+     * instead of blindly overwriting it. Read-only, but scoped like every other unit read.
+     */
+    public List<CodingTaskView> listCodingTasks(long unitId) {
+        loadScoped(unitId);
+        return bindingMapper.selectList(Wrappers.<CodingTaskBindingPO>lambdaQuery()
+                .eq(CodingTaskBindingPO::getUnitId, unitId)
+                .orderByAsc(CodingTaskBindingPO::getTaskKind))
+            .stream()
+            .map(b -> new CodingTaskView(b.getTaskKind(), b.getTaskId(), b.getParamsJson(),
+                Boolean.TRUE.equals(b.getEnabled())))
+            .toList();
+    }
+
     /** DEs of a unit, ordered by {@code deploy_batch_no} (the C14 serial order). */
     public List<EnvDeView> listEnvDe(long unitId) {
         loadScoped(unitId);

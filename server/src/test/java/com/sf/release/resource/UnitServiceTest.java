@@ -170,6 +170,23 @@ class UnitServiceTest {
     }
 
     @Test
+    void list_coding_tasks_returns_the_current_mapping_sorted_by_kind() {
+        long id = unitService.create(cmd("quota-api"));
+        unitService.bindCodingTasks(id, List.of(
+            build("P-BUILD"), testDeploy("P-TEST"), prodDeploy("P-PROD")));
+
+        var bindings = unitService.listCodingTasks(id);
+
+        assertThat(bindings).extracting(UnitAppService.CodingTaskView::taskKind)
+            .containsExactly("BUILD", "PROD_DEPLOY", "TEST_DEPLOY");
+        assertThat(bindings)
+            .allSatisfy(b -> {
+                assertThat(b.taskId()).startsWith("P-");
+                assertThat(b.enabled()).isTrue();
+            });
+    }
+
+    @Test
     void daily_deploy_is_optional_and_defaults_to_test_deploy() {
         long id = unitService.create(cmd("quota-api"));
         unitService.bindCodingTasks(id, List.of(

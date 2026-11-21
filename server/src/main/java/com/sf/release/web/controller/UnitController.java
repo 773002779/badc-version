@@ -120,6 +120,12 @@ public class UnitController {
     }
 
     @DataScope
+    @GetMapping("/{id}/coding-tasks")
+    public ApiResponse<List<UnitAppService.CodingTaskView>> listCodingTasks(@PathVariable long id) {
+        return ApiResponse.ok(unitAppService.listCodingTasks(id));
+    }
+
+    @DataScope
     @GetMapping("/{id}/env-des")
     public ApiResponse<List<EnvDeView>> listEnvDe(@PathVariable long id) {
         return ApiResponse.ok(unitAppService.listEnvDe(id));

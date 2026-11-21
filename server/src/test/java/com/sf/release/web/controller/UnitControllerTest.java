@@ -15,6 +15,7 @@ import org.springframework.test.web.servlet.MvcResult;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -120,6 +121,39 @@ class UnitControllerTest {
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data[0].envKind").value("PROD"))
             .andExpect(jsonPath("$.data[0].deployBatchNo").value(5));
+    }
+
+    @Test
+    void coding_task_bindings_round_trip_and_stay_scoped() throws Exception {
+        long id = createUnit(ADMIN, "quota-api", subsystemId);
+
+        mvc.perform(put("/units/{id}/coding-tasks", id)
+                .header(USER_HEADER, ADMIN)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"bindings\":["
+                    + "{\"taskKind\":\"BUILD\",\"taskId\":\"P-BUILD\","
+                    + "\"paramsJson\":\"{\\\"branch\\\":\\\"release/202611\\\"}\"},"
+                    + "{\"taskKind\":\"TEST_DEPLOY\",\"taskId\":\"P-TEST\"}]}"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0));
+
+        // The settings page reads the mapping back instead of blindly overwriting it.
+        // params_json is a MySQL JSON column, so the document text comes back normalized.
+        mvc.perform(get("/units/{id}/coding-tasks", id).header(USER_HEADER, ADMIN))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.length()").value(2))
+            .andExpect(jsonPath("$.data[0].taskKind").value("BUILD"))
+            .andExpect(jsonPath("$.data[0].taskId").value("P-BUILD"))
+            .andExpect(jsonPath("$.data[0].enabled").value(true))
+            .andExpect(jsonPath("$.data[0].paramsJson").value("{\"branch\": \"release/202611\"}"))
+            .andExpect(jsonPath("$.data[1].taskKind").value("TEST_DEPLOY"))
+            .andExpect(jsonPath("$.data[1].paramsJson").doesNotExist());
+
+        // Read-only still means fail-closed: an unscoped caller cannot see the ids.
+        mvc.perform(get("/units/{id}/coding-tasks", id).header(USER_HEADER, DEV))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(40009));
     }
 
     private long createUnit(String userId, String name, long subsystemId) throws Exception {
