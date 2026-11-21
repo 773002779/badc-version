@@ -12,8 +12,13 @@ import com.sf.release.domain.engine.EngineException;
 import com.sf.release.domain.engine.EngineJob;
 import com.sf.release.domain.engine.EngineResult;
 import com.sf.release.domain.engine.EngineStatus;
+import com.sf.release.domain.engine.GateCheckCmd;
+import com.sf.release.domain.engine.GateCheckOutcome;
+import com.sf.release.domain.engine.GateCheckReport;
 import com.sf.release.domain.engine.JobKind;
 import com.sf.release.domain.engine.TriggerResult;
+import com.sf.release.domain.gate.Severity;
+import com.sf.release.domain.pipeline.CheckType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,6 +63,9 @@ public class CodingEngine implements CicdEngine {
     static final String ACTION_DEPLOY_START = "deploy.start";
     static final String ACTION_CANCEL = "cancel";
     static final String ACTION_JOB_LIST = "job.list";
+    static final String ACTION_CHECK_START = "check.start";
+    static final String ACTION_CHECK_ENV_START = "check.env.start";
+    static final String ACTION_CHECK_QUERY = "check.query";
 
     private static final Logger log = LoggerFactory.getLogger(CodingEngine.class);
     private static final String REDACTED = "***";
@@ -69,6 +77,7 @@ public class CodingEngine implements CicdEngine {
     private final EngineProperties engineProperties;
     private final Supplier<Connection> connectionSupplier;
     private final CodingStatusMapper statusMapper;
+    private final CodingSeverityMapper severityMapper;
 
     public CodingEngine(CodingProperties properties,
                         EndpointTemplateResolver resolver,
@@ -102,6 +111,7 @@ public class CodingEngine implements CicdEngine {
         this.engineProperties = engineProperties;
         this.connectionSupplier = connectionSupplier;
         this.statusMapper = new CodingStatusMapper(properties);
+        this.severityMapper = new CodingSeverityMapper(properties);
     }
 
     @Override
@@ -267,6 +277,108 @@ public class CodingEngine implements CicdEngine {
         return List.copyOf(jobs);
     }
 
+    /**
+     * Starts one gate check ({@code check.start} for an image-level check,
+     * {@code check.env.start} for an environment-level one) and returns its engine id.
+     *
+     * <p>Two endpoints on purpose: an image-level check scans a commit/image and an
+     * environment-level check scans a deployed DE, and a placeholder without a value is an error
+     * in the resolver — one shared body could not render both without inventing the missing
+     * coordinate.
+     */
+    @Override
+    public TriggerResult startCheck(GateCheckCmd cmd) {
+        if (cmd == null) {
+            throw EngineException.unavailable("检查参数不能为空");
+        }
+        String action = cmd.checkType().stage() == CheckType.CheckStage.ENV
+            ? ACTION_CHECK_ENV_START : ACTION_CHECK_START;
+        CodingProperties.Endpoint endpoint = endpoint(action);
+        Map<String, String> vars = new LinkedHashMap<>();
+        put(vars, "unitId", String.valueOf(cmd.unitId()));
+        put(vars, "taskId", cmd.taskId());
+        put(vars, "checkType", cmd.checkType().name());
+        put(vars, "commitSha", cmd.commitSha());
+        put(vars, "imageDigest", cmd.imageDigest());
+        put(vars, "deName", cmd.deName());
+        put(vars, "pipelineNo", cmd.pipelineNo());
+        put(vars, "attempt", String.valueOf(cmd.attempt()));
+
+        EngineHttpClient.HttpResult result = execute(action, vars);
+        JsonNode root = parse(result, action);
+        String externalId = text(root, endpoint.getResponseId(), action);
+        if (externalId == null) {
+            throw EngineException.unavailable(
+                "触发检查的响应缺少 externalId（action=" + action
+                    + "，请检查 responseId 配置）");
+        }
+        String externalUrl = text(root, endpoint.getResponseUrl(), action);
+        log.info("coding check triggered: externalId={}, check={}, pipelineNo={}",
+            externalId, cmd.checkType(), cmd.pipelineNo());
+        return new TriggerResult(externalId, externalUrl);
+    }
+
+    /**
+     * Polls one gate check ({@code check.query}).
+     *
+     * <p>The status word goes through the same {@code coding.statusMapping} as build/deploy jobs;
+     * a word that maps to {@code UNKNOWN} — or a response without a status or a severity — is
+     * reported as {@link GateCheckOutcome#UNKNOWN}, which the platform treats as "not finished"
+     * and retries. It is never guessed into a pass.
+     */
+    @Override
+    public GateCheckReport queryCheck(String externalId, CheckType checkType) {
+        CodingProperties.Endpoint endpoint = endpoint(ACTION_CHECK_QUERY);
+        String statusExpression = endpoint.getResponseStatus();
+        if (statusExpression == null || statusExpression.isBlank()) {
+            throw EngineException.unavailable(
+                "端点 action=" + ACTION_CHECK_QUERY + " 缺少 responseStatus 配置");
+        }
+        EngineHttpClient.HttpResult result =
+            execute(ACTION_CHECK_QUERY, Map.of("externalId", requireExternalId(externalId)));
+        JsonNode root = parse(result, ACTION_CHECK_QUERY);
+        String word = text(root, statusExpression, ACTION_CHECK_QUERY);
+        if (word == null) {
+            return GateCheckReport.unknown(
+                "引擎响应缺少状态字段（action=" + ACTION_CHECK_QUERY + "，expression="
+                    + statusExpression + "）");
+        }
+        EngineStatus status = statusMapper.map(word, ACTION_CHECK_QUERY);
+        GateCheckOutcome outcome = switch (status) {
+            case QUEUED, RUNNING -> GateCheckOutcome.RUNNING;
+            case SUCCESS -> GateCheckOutcome.SUCCESS;
+            case FAILED, CANCELED -> GateCheckOutcome.FAILED;
+            case UNKNOWN -> GateCheckOutcome.UNKNOWN;
+        };
+        Severity severity = severityMapper.map(
+            text(root, endpoint.getResponseSeverity(), ACTION_CHECK_QUERY), ACTION_CHECK_QUERY);
+        int issues = issuesOf(text(root, endpoint.getResponseIssues(), ACTION_CHECK_QUERY));
+        String summary = text(root, endpoint.getResponseSummary(), ACTION_CHECK_QUERY);
+        String reportUrl = text(root, endpoint.getResponseReportUrl(), ACTION_CHECK_QUERY);
+        if (outcome == GateCheckOutcome.SUCCESS && severity == null) {
+            // A finished check without a level cannot be judged: report it as unknown rather than
+            // as a clean pass, so an incomplete mapping never admits a release.
+            return new GateCheckReport(GateCheckOutcome.UNKNOWN, null, issues,
+                summary == null ? "检查通过但未报告缺陷等级（severityMapping 需补齐）" : summary,
+                reportUrl);
+        }
+        log.info("coding check queried: externalId={}, check={}, outcome={}, severity={}",
+            externalId, checkType, outcome, severity);
+        return new GateCheckReport(outcome, severity, issues, summary, reportUrl);
+    }
+
+    /** Parses the issue count of a check; a non-numeric value counts as "unknown" (0). */
+    private static int issuesOf(String raw) {
+        if (raw == null) {
+            return 0;
+        }
+        try {
+            return Math.max(0, Integer.parseInt(raw.trim()));
+        } catch (NumberFormatException ex) {
+            return 0;
+        }
+    }
+
     // ------------------------------------------------------------------ request plumbing
 
     private EngineHttpClient.HttpResult execute(String action, Map<String, String> vars) {
@@ -403,6 +515,10 @@ public class CodingEngine implements CicdEngine {
             validateExpression(action, "itemId", endpoint.getItemId());
             validateExpression(action, "itemName", endpoint.getItemName());
             validateExpression(action, "itemType", endpoint.getItemType());
+            validateExpression(action, "responseSeverity", endpoint.getResponseSeverity());
+            validateExpression(action, "responseIssues", endpoint.getResponseIssues());
+            validateExpression(action, "responseSummary", endpoint.getResponseSummary());
+            validateExpression(action, "responseReportUrl", endpoint.getResponseReportUrl());
         });
     }
 

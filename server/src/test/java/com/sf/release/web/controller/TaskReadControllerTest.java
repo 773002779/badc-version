@@ -106,17 +106,17 @@ class TaskReadControllerTest {
 
         // alpha: 1 DONE of 4, so rate 0.25; PENDING/BUILDING block, CLOSED does not.
         givenItem(taskAlpha, unitOne, "CR-ALPHA-1", "UNIT", "v1", "release/alpha",
-            "2026-11-20", "DONE", "TEST_PASS", "2026-11-20 10:00:00", "2026-11-20 12:00:00");
+            "2026-11-20", "DONE", "CHECK_PASS", "2026-11-20 10:00:00", "2026-11-20 12:00:00");
         givenItem(taskAlpha, unitTwo, "CR-ALPHA-2", "UNIT", "v2", "release/alpha2",
-            "2026-11-21", "PENDING", "TEST_PENDING", "2026-11-21 10:00:00", "2026-11-21 10:00:00");
+            "2026-11-21", "PENDING", "CHECK_RUNNING", "2026-11-21 10:00:00", "2026-11-21 10:00:00");
         givenItem(taskAlpha, unitOne, "CR-ALPHA-3", "LIB", "v3", "release/alpha3",
-            "2026-11-22", "CLOSED", "TEST_PENDING", "2026-11-22 10:00:00", "2026-11-22 10:00:00");
+            "2026-11-22", "CLOSED", "CHECK_RUNNING", "2026-11-22 10:00:00", "2026-11-22 10:00:00");
         givenItem(taskAlpha, unitThree, "CR-ALPHA-4", "UNIT", "v4", "release/alpha4",
             "2026-11-23", "BUILDING", "CHECK_RUNNING", "2026-11-23 10:00:00",
             "2026-11-23 11:00:00");
         // gamma: one DONE item, i.e. rate 1.0 and no blocking item.
         givenItem(taskGamma, unitThree, "CR-GAMMA-1", "UNIT", "v9", "release/gamma",
-            "2026-12-02", "DONE", "TEST_PASS", "2026-11-24 10:00:00", "2026-11-24 10:00:00");
+            "2026-12-02", "DONE", "CHECK_PASS", "2026-11-24 10:00:00", "2026-11-24 10:00:00");
         // beta has no item: progress is zero and not blocking.
     }
 
@@ -317,7 +317,7 @@ class TaskReadControllerTest {
             .andExpect(jsonPath("$.data[3].crid").value("CR-ALPHA-1"))
             .andExpect(jsonPath("$.data[3].unitName").value("unit-one"))
             .andExpect(jsonPath("$.data[3].status").value("DONE"))
-            .andExpect(jsonPath("$.data[3].gateStatus").value("TEST_PASS"));
+            .andExpect(jsonPath("$.data[3].gateStatus").value("CHECK_PASS"));
     }
 
     @Test

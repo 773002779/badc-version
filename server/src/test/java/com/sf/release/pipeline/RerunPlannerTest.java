@@ -199,7 +199,7 @@ class RerunPlannerTest {
         Instant now = Instant.ofEpochSecond(1_700_000_000L);
         return new ReleaseItem(100L, 10L, "CRID-T15", UnitType.UNIT, UNIT_ID, "P-BUILD-T15",
             BRANCH, modulePath, "重新发布判定", LocalDate.of(2026, 11, 25), ItemStatus.FAILED,
-            GateStatus.TEST_PENDING, baseCommit, null, null, 0, now, now);
+            GateStatus.CHECK_RUNNING, baseCommit, null, null, 0, now, now);
     }
 
     private static PipelineInstance nodes(NodeStatus... statuses) {

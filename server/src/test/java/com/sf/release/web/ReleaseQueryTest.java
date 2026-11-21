@@ -159,15 +159,17 @@ class ReleaseQueryTest {
     }
 
     @Test
-    void gate_fields_are_present_and_null_until_the_gate_task_lands() throws Exception {
+    void the_two_gate_dimensions_are_exposed_so_the_page_can_render_them() throws Exception {
         givenPublishedInstance();
 
         MvcResult result = mvc.perform(get(PATH, PUBLISH_NO).header(USER_HEADER, DEV))
             .andExpect(status().isOk())
-            .andExpect(jsonPath("$.data.gateStatus").doesNotExist())
+            .andExpect(jsonPath("$.data.itemId").exists())
+            .andExpect(jsonPath("$.data.gateStatus").value("CHECK_RUNNING"))
+            .andExpect(jsonPath("$.data.testStatus").value("TEST_PENDING"))
             .andReturn();
-        // "present and null" rather than "absent": P2 fills the same field name.
-        assertThat(result.getResponse().getContentAsString()).contains("\"gateStatus\":null");
+        // The names stay stable: the check dimension is gateStatus, the test dimension testStatus.
+        assertThat(result.getResponse().getContentAsString()).contains("\"gateStatus\"");
     }
 
     @Test

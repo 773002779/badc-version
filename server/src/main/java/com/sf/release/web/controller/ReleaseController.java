@@ -1,13 +1,18 @@
 package com.sf.release.web.controller;
 
 import com.sf.release.application.ReleaseQueryService;
+import com.sf.release.application.ReleaseResumeService;
+import com.sf.release.application.ReleaseResumeService.ResumeResult;
 import com.sf.release.common.ApiResponse;
 import com.sf.release.common.security.DataScope;
+import com.sf.release.common.security.Permissions;
+import com.sf.release.common.security.RequirePerm;
 import com.sf.release.web.dto.ReleaseDtos;
 import com.sf.release.web.dto.ReleaseDtos.ReleaseDetail;
 import com.sf.release.web.dto.ReleaseDtos.ReleaseRecordView;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -38,9 +43,12 @@ import java.util.List;
 public class ReleaseController {
 
     private final ReleaseQueryService releaseQueryService;
+    private final ReleaseResumeService releaseResumeService;
 
-    public ReleaseController(ReleaseQueryService releaseQueryService) {
+    public ReleaseController(ReleaseQueryService releaseQueryService,
+                             ReleaseResumeService releaseResumeService) {
         this.releaseQueryService = releaseQueryService;
+        this.releaseResumeService = releaseResumeService;
     }
 
     @DataScope
@@ -53,5 +61,15 @@ public class ReleaseController {
     @GetMapping("/{publishNo}/records")
     public ApiResponse<List<ReleaseRecordView>> records(@PathVariable String publishNo) {
         return ApiResponse.ok(ReleaseDtos.recordsOf(releaseQueryService.records(publishNo)));
+    }
+
+    /**
+     * Resumes a paused execution (P2). Requires {@code control:submit-prod}: resuming continues a
+     * release, which is a release decision, not a read.
+     */
+    @RequirePerm(Permissions.CONTROL_SUBMIT_PROD)
+    @PostMapping("/{publishNo}/resume")
+    public ApiResponse<ResumeResult> resume(@PathVariable String publishNo) {
+        return ApiResponse.ok(releaseResumeService.resume(publishNo));
     }
 }

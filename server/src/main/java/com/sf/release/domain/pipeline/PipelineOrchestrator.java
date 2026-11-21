@@ -262,7 +262,15 @@ public final class PipelineOrchestrator {
             failNode(instance, current, context, failedTask, now);
             return AdvanceOutcome.terminal(instanceId, context);
         }
-        if (!allTasksSucceeded(current.tasks())) {
+        // A handler may declare the node finally failed without a task failure (a blocked gate, a
+        // revoked test pass). This runs before the completion fold so a final failure always wins.
+        String handlerFailure = handlerFailureReason(instance, current);
+        if (handlerFailure != null) {
+            failNode(instance, current, context, handlerFailure, now);
+            return AdvanceOutcome.terminal(instanceId, context);
+        }
+        boolean satisfied = allTasksSucceeded(current.tasks());
+        if (!satisfied && !handlerSaysComplete(instance, current)) {
             return AdvanceOutcome.idle(instanceId, context);
         }
         // Decide the next step *before* writing the completion. A missing handler is not an
@@ -270,7 +278,10 @@ public final class PipelineOrchestrator {
         // completion and its event, and reconcile would replay the same failure forever.
         PipelineNode next = nextNode(instance, current);
         boolean nextHasHandler = next != null && handlerRegistry.handler(next.nodeType()) != null;
-        if (!repository.finishNodeIfComplete(current.id(), now)) {
+        boolean nodeFinished = satisfied
+            ? repository.finishNodeIfComplete(current.id(), now)
+            : repository.finishNodeSatisfiedByHandler(current.id(), now);
+        if (!nodeFinished) {
             // The SQL guard found a non-success latest attempt or another advance already
             // completed the node.
             log.debug("pipeline {} node {} completion guard rejected the transition", instanceId,
@@ -361,6 +372,43 @@ public final class PipelineOrchestrator {
     }
 
     /**
+     * The node handler's verdict that the node cannot continue, or {@code null}. The hook runs
+     * inside the advance transaction: its exception must not roll the advance back (that would
+     * replay the same bug every 30s), so it is logged and treated as "no verdict".
+     */
+    private String handlerFailureReason(PipelineInstance instance, PipelineNode node) {
+        NodeHandler handler = handlerRegistry.handler(node.nodeType());
+        if (handler == null) {
+            return null;
+        }
+        try {
+            return handler.failureReason(instance, node);
+        } catch (RuntimeException ex) {
+            log.error("node handler failure hook threw: instanceId={}, node={}", instance.id(),
+                node.nodeType(), ex);
+            return null;
+        }
+    }
+
+    /**
+     * The node handler's verdict that the node is complete although its counted tasks do not say
+     * so (a check-only {@code VERIFY} node whose gate passed).
+     */
+    private boolean handlerSaysComplete(PipelineInstance instance, PipelineNode node) {
+        NodeHandler handler = handlerRegistry.handler(node.nodeType());
+        if (handler == null) {
+            return false;
+        }
+        try {
+            return handler.mayComplete(instance, node);
+        } catch (RuntimeException ex) {
+            log.error("node handler completion hook threw: instanceId={}, node={}",
+                instance.id(), node.nodeType(), ex);
+            return false;
+        }
+    }
+
+    /**
      * Stops an instance because a task failed or timed out: the node and instance become
      * {@code FAILED}, the still-{@code PENDING} tasks of the node are {@code SKIPPED}, earlier
      * {@code SUCCESS} rows are untouched and the next node is never started.
@@ -368,17 +416,22 @@ public final class PipelineOrchestrator {
     private void failNode(PipelineInstance instance, PipelineNode node,
                           PipelineRepository.InstanceContext context, NodeTask failedTask,
                           Instant now) {
+        failNode(instance, node, context, failureReason(failedTask), now);
+    }
+
+    /** Same failure path with a reason a node handler produced (no failing task row involved). */
+    private void failNode(PipelineInstance instance, PipelineNode node,
+                          PipelineRepository.InstanceContext context, String reason, Instant now) {
         if (!repository.finishNode(node.id(), NodeStatus.FAILED, now)) {
             log.debug("pipeline {} node {} was already finished", instance.id(), node.nodeType());
             return;
         }
         repository.skipPendingTasks(instance.id(), node.nodeType(), now);
-        String reason = failureReason(failedTask);
-        log.warn("pipeline node failed: instanceId={}, node={}, taskId={}, reason={}",
-            instance.id(), node.nodeType(), failedTask.id(), reason);
+        log.warn("pipeline node failed: instanceId={}, node={}, reason={}",
+            instance.id(), node.nodeType(), reason);
         eventBus.publish(new NodeCompletedEvent(instance.id(), context.orderId(),
             node.nodeType(), NodeStatus.FAILED, reason, now));
-        if (repository.finishInstance(instance.id(), InstanceStatus.FAILED, now)) {
+        if (repository.failInstance(instance.id(), reason, now)) {
             eventBus.publish(new InstanceFinishedEvent(instance.id(), context.orderId(),
                 InstanceStatus.FAILED, reason, now));
         }
@@ -403,7 +456,7 @@ public final class PipelineOrchestrator {
         String reason = "部署单元锁丢失（unitId=" + context.unitId() + ", instanceId="
             + instance.id() + "），流水线停止推进";
         log.error("pipeline advance aborted: instanceId={}, {}", instance.id(), reason);
-        if (repository.finishInstance(instance.id(), InstanceStatus.FAILED, now)) {
+        if (repository.failInstance(instance.id(), reason, now)) {
             eventBus.publish(new InstanceFinishedEvent(instance.id(), context.orderId(),
                 InstanceStatus.FAILED, reason, now));
         }
@@ -500,7 +553,7 @@ public final class PipelineOrchestrator {
                     eventBus.publish(new NodeCompletedEvent(instance.id(), orderId,
                         nodeType, NodeStatus.FAILED, reason, now));
                 }
-                if (repository.finishInstance(instance.id(), InstanceStatus.FAILED, now)) {
+                if (repository.failInstance(instance.id(), reason, now)) {
                     eventBus.publish(new InstanceFinishedEvent(instance.id(), orderId,
                         InstanceStatus.FAILED, reason, now));
                 }

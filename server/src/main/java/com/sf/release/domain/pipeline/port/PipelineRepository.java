@@ -72,6 +72,17 @@ public interface PipelineRepository {
      */
     boolean finishNodeIfComplete(long nodeId, Instant now);
 
+    /**
+     * Completes a node whose completion its {@code NodeHandler} decided (the {@code VERIFY} node:
+     * the gate decides, the {@code CHECK} task rows are only evidence). Unlike
+     * {@link #finishNodeIfComplete(long, Instant)} this does not require a counted non-{@code CHECK}
+     * task, because such a node has none by construction; the guard still refuses to complete while
+     * any latest counted attempt is not {@code SUCCESS}/{@code SKIPPED}.
+     *
+     * @return {@code true} when this call completed the node
+     */
+    boolean finishNodeSatisfiedByHandler(long nodeId, Instant now);
+
     /** {@code RUNNING → status} for the node, used for the failure transition. */
     boolean finishNode(long nodeId, NodeStatus status, Instant now);
 
@@ -80,6 +91,19 @@ public interface PipelineRepository {
 
     /** {@code PENDING/RUNNING → status} for the instance, setting {@code end_at}. */
     boolean finishInstance(long instanceId, InstanceStatus status, Instant now);
+
+    /**
+     * {@code PENDING/RUNNING → FAILED} with the operator-facing reason stored in
+     * {@code status_reason}.
+     *
+     * <p>Requirements §4.9/FR-G-05: a stopped pipeline must be explainable from its row, not from a
+     * log line. A failure without a reason ("节点失败") leaves the operator guessing whether to rerun,
+     * fix the gate or escalate, so the same column that explains a {@code PAUSED} instance also
+     * explains a failed one.
+     *
+     * @return {@code true} when this call marked the instance failed
+     */
+    boolean failInstance(long instanceId, String reason, Instant now);
 
     /**
      * Stops a running instance because it would have to enter {@code blockedNode} without a
@@ -91,6 +115,17 @@ public interface PipelineRepository {
      * @return {@code true} when this call paused the instance
      */
     boolean pauseInstance(long instanceId, NodeType blockedNode, String reason, Instant now);
+
+    /**
+     * {@code PAUSED → RUNNING}: resumes an instance an operator explicitly released (a gate that
+     * blocked the next node has been satisfied again, or the paused node now has a handler). The
+     * compare-and-set only matches a {@code PAUSED} row, so a resume raced against another one is a
+     * no-op; {@code status_reason} and {@code end_at} are cleared because the instance is live
+     * again.
+     *
+     * @return {@code true} when this call resumed the instance
+     */
+    boolean resumeInstance(long instanceId, Instant now);
 
     /**
      * The build coordinates of an instance: the deployment unit, the CODING plan (the unit's

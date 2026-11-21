@@ -29,6 +29,9 @@ release:
     # The suite shares one MySQL schema; tests invoke ReconcileJob.run() explicitly instead
     # of racing a 30s background thread.
     enabled: false
+  gate:
+    # Same reason: the gate polling / waiver expiry jobs are invoked explicitly by tests.
+    reconcile-enabled: false
   redis:
     enabled: false
   pipeline:

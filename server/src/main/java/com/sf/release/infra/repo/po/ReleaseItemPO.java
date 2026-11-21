@@ -37,6 +37,21 @@ public class ReleaseItemPO {
     private String baseCommit;
     private String lastTestPassBy;
     private Instant lastTestPassAt;
+
+    /**
+     * The orthogonal <em>test</em> dimension (V19). It is persisted next to the aggregate but not
+     * part of the {@link ReleaseItem} record: the gate use cases own its lifecycle (a pass, a
+     * rejection, a revoke), the state machine never derives a transition from it.
+     */
+    private String testStatus;
+
+    /**
+     * Why the tester rejected the item (V17). Like {@link #testStatus} it is an audit column whose
+     * lifecycle is owned by the gate use cases (set by a fail or a revoke, cleared by a pass), not by
+     * the state machine.
+     */
+    private String testFailReason;
+
     private Integer rowVersion;
     private Instant createdAt;
     private Instant updatedAt;
@@ -78,7 +93,7 @@ public class ReleaseItemPO {
             planReleaseDate,
             status == null || status.isBlank() ? ItemStatus.PENDING : ItemStatus.valueOf(status),
             gateStatus == null || gateStatus.isBlank()
-                ? GateStatus.TEST_PENDING : GateStatus.valueOf(gateStatus),
+                ? GateStatus.CHECK_RUNNING : GateStatus.valueOf(gateStatus),
             baseCommit,
             lastTestPassBy,
             lastTestPassAt,
@@ -205,6 +220,22 @@ public class ReleaseItemPO {
 
     public void setLastTestPassAt(Instant lastTestPassAt) {
         this.lastTestPassAt = lastTestPassAt;
+    }
+
+    public String getTestFailReason() {
+        return testFailReason;
+    }
+
+    public void setTestFailReason(String testFailReason) {
+        this.testFailReason = testFailReason;
+    }
+
+    public String getTestStatus() {
+        return testStatus;
+    }
+
+    public void setTestStatus(String testStatus) {
+        this.testStatus = testStatus;
     }
 
     public Integer getRowVersion() {

@@ -23,10 +23,15 @@ public class ReleaseHeadRow {
     /** Owning deployment unit of the item; the data-scope guard reads it. */
     private Long unitId;
 
+    /** The 变更项 id, so the page can open its verification panel without another lookup. */
+    private Long itemId;
+
     private Long instanceId;
     private String pipelineNo;
     private String triggerType;
     private String status;
+    private String gateStatus;
+    private String testStatus;
     private String imageDigest;
     private String commitSha;
     private Instant startAt;
@@ -72,6 +77,14 @@ public class ReleaseHeadRow {
         this.instanceId = instanceId;
     }
 
+    public Long getItemId() {
+        return itemId;
+    }
+
+    public void setItemId(Long itemId) {
+        this.itemId = itemId;
+    }
+
     public String getPipelineNo() {
         return pipelineNo;
     }
@@ -102,6 +115,22 @@ public class ReleaseHeadRow {
 
     public void setImageDigest(String imageDigest) {
         this.imageDigest = imageDigest;
+    }
+
+    public String getGateStatus() {
+        return gateStatus;
+    }
+
+    public void setGateStatus(String gateStatus) {
+        this.gateStatus = gateStatus;
+    }
+
+    public String getTestStatus() {
+        return testStatus;
+    }
+
+    public void setTestStatus(String testStatus) {
+        this.testStatus = testStatus;
     }
 
     public String getCommitSha() {

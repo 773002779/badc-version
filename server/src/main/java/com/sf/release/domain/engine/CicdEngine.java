@@ -1,5 +1,7 @@
 package com.sf.release.domain.engine;
 
+import com.sf.release.domain.pipeline.CheckType;
+
 import java.util.List;
 
 /**
@@ -53,5 +55,27 @@ public interface CicdEngine {
      */
     default List<EngineJob> listJobs(String project, JobKind kind) {
         throw EngineException.unavailable("当前引擎不支持任务列表：" + name());
+    }
+
+    /**
+     * Starts one gate check (Sonar, component vulnerability, …) and returns the engine-side id
+     * used to poll it. Like {@link #listJobs}, this is an <em>optional</em> capability: an adapter
+     * that cannot run checks reports {@code ENGINE_UNAVAILABLE}, and the platform records the
+     * check as "not finished" instead of "passed".
+     *
+     * <p>The seventh {@code CheckType} values are the catalogue; the engine is never asked which
+     * checks exist. The trigger carries the object to scan (commit/image for an image-level check,
+     * a deployed DE for an environment-level one).
+     */
+    default TriggerResult startCheck(GateCheckCmd cmd) {
+        throw EngineException.unavailable("当前引擎不支持质量检查：" + name());
+    }
+
+    /**
+     * Polls one gate check started by {@link #startCheck}. A response that cannot be judged is
+     * reported as {@link GateCheckOutcome#UNKNOWN}; it must never be silently read as success.
+     */
+    default GateCheckReport queryCheck(String externalId, CheckType checkType) {
+        throw EngineException.unavailable("当前引擎不支持质量检查：" + name());
     }
 }

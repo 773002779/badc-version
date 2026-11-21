@@ -43,4 +43,30 @@ public interface NodeHandler {
      */
     default void onTaskCompleted(PipelineInstance instance, NodeTask completed) {
     }
+
+    /**
+     * Whether this node is complete even though its counted tasks do not say so — the hook the
+     * {@code VERIFY} node needs, because its completion is decided by the gate rather than by the
+     * {@code CHECK} task rows (which never gate a node, see the orchestrator's completion fold).
+     *
+     * <p>The orchestrator asks this only for a node whose counted tasks are not all successful; a
+     * node with no counted task at all (a check-only {@code VERIFY}) otherwise never completes. The
+     * hook must be <strong>cheap and read-only</strong>: it runs inside the advance transaction,
+     * while the instance lock is held. A {@code false} answer leaves the behaviour of P1 untouched
+     * (the node keeps running).
+     */
+    default boolean mayComplete(PipelineInstance instance, PipelineNode node) {
+        return false;
+    }
+
+    /**
+     * The reason this node must fail now, or {@code null} when it may keep running. This is how a
+     * handler reports a <em>final</em> failure that is not a task failure: a blocked gate, a
+     * revoked test pass. The orchestrator fails the node and the instance with that reason, keeping
+     * every already-successful task and skipping the pending siblings, so the unit lock is released
+     * and the item can be rerun — instead of leaving a node {@code RUNNING} forever.
+     */
+    default String failureReason(PipelineInstance instance, PipelineNode node) {
+        return null;
+    }
 }

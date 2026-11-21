@@ -35,10 +35,10 @@ import java.util.Set;
  * header join, one node read, one task read — and the tasks are grouped by node in memory; there
  * is no per-node query. The history costs one ownership lookup plus one instance list.
  *
- * <p><strong>Gate fields.</strong> {@code gateStatus} is returned as {@code null} on purpose: the
- * gate task has not landed in this phase, and the field name is already part of the view so the
- * gate task fills it without a breaking change. The item's own {@code gate_status} column is not
- * exposed here because it is only the initial {@code TEST_PENDING} marker.
+ * <p><strong>Gate fields.</strong> {@code gateStatus} is the item's <em>check</em> dimension and
+ * {@code testStatus} its <em>test</em> dimension (V19 split them: one column could not hold both
+ * without one erasing the other). Both are returned raw; the page renders them in two columns and
+ * the detailed reasoning lives in {@code GET /api/v1/items/{itemId}/gate}.
  *
  * <p><strong>Rerun hand-off (Task 15).</strong> {@code triggerType} tells why the execution
  * exists. For a rerun it is accompanied by {@code fullRerun} and {@code rerunFromNode}, so the
@@ -89,14 +89,16 @@ public class ReleaseQueryService {
             head.getPublishNo(),
             head.getPipelineNo(),
             head.getStatus(),
-            null,
+            head.getGateStatus(),
+            head.getTestStatus(),
             triggerType == null ? null : triggerType.name(),
             rerun ? firstExecutedNode(nodes) : null,
             rerun ? triggerType == TriggerType.RERUN_FULL : null,
             head.getCommitSha(),
             head.getImageDigest(),
             new OrderView(head.getOaTicketNo(), head.getPlannedReleaseTime()),
-            nodes);
+            nodes,
+            head.getItemId());
     }
 
     /**
@@ -210,13 +212,15 @@ public class ReleaseQueryService {
         String pipelineNo,
         String status,
         String gateStatus,
+        String testStatus,
         String triggerType,
         String rerunFromNode,
         Boolean fullRerun,
         String commitSha,
         String imageDigest,
         OrderView order,
-        List<NodeView> nodes) {
+        List<NodeView> nodes,
+        Long itemId) {
 
         public ReleaseDetail {
             nodes = nodes == null ? List.of() : List.copyOf(nodes);

@@ -66,6 +66,33 @@ public interface PipelineNodeMapper extends BaseMapper<PipelineNodePO> {
                                     @Param("now") Instant now);
 
     /**
+     * Completes a node whose completion is decided by its {@code NodeHandler} rather than by
+     * counted task rows ({@code VERIFY}: the gate decides, the check rows are its evidence).
+     *
+     * <p>The guard is the same fold as {@link #completeIfAllTasksSucceeded} minus the "at least one
+     * counted task" requirement: no counted latest attempt may be non-successful. That keeps a node
+     * from being completed while, say, a deploy task of the same node is still running — the
+     * handler's word alone is not enough.
+     *
+     * @return 1 when the node transitioned to {@code SUCCESS}, 0 otherwise
+     */
+    @Update("UPDATE pipeline_node SET status = 'SUCCESS', finished_at = #{now}"
+        + " WHERE id = #{nodeId} AND status = 'RUNNING'"
+        + " AND NOT EXISTS (SELECT 1 FROM node_task t"
+        + "   WHERE t.instance_id = pipeline_node.instance_id"
+        + "   AND t.node_type = pipeline_node.node_type"
+        + "   AND t.task_type <> 'CHECK'"
+        + "   AND t.status NOT IN ('SUCCESS', 'SKIPPED')"
+        + "   AND NOT EXISTS (SELECT 1 FROM node_task t2"
+        + "     WHERE t2.instance_id = t.instance_id"
+        + "     AND t2.node_type = t.node_type"
+        + "     AND t2.task_type = t.task_type"
+        + "     AND t2.batch_no = t.batch_no"
+        + "     AND t2.target_id = t.target_id"
+        + "     AND t2.attempt > t.attempt))")
+    int completeSatisfiedByHandler(@Param("nodeId") long nodeId, @Param("now") Instant now);
+
+    /**
      * RUNNING nodes that look stuck (I4): the node was entered before {@code startedBefore} and
      * every counted (non-{@code CHECK}) latest attempt of the node is still {@code PENDING}.
      *

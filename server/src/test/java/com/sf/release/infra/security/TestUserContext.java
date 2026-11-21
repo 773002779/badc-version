@@ -29,6 +29,11 @@ public final class TestUserContext {
         UserContext.set(new CurrentUser(userId, Set.of(), Set.of(), Set.of(), false));
     }
 
+    /** A caller with explicit roles/permissions, unrestricted on units (for service-level tests). */
+    public static void as(String userId, Set<String> roles, Set<String> perms) {
+        UserContext.set(new CurrentUser(userId, roles, perms, Set.of(), true));
+    }
+
     public static void clear() {
         UserContext.clear();
     }

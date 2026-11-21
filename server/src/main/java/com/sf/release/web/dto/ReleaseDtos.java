@@ -43,13 +43,15 @@ public final class ReleaseDtos {
             view.pipelineNo(),
             view.status(),
             view.gateStatus(),
+            view.testStatus(),
             view.triggerType(),
             view.rerunFromNode(),
             view.fullRerun(),
             view.commitSha(),
             view.imageDigest(),
             orderOf(view.order()),
-            view.nodes().stream().map(ReleaseDtos::nodeOf).toList());
+            view.nodes().stream().map(ReleaseDtos::nodeOf).toList(),
+            view.itemId());
     }
 
     /** Maps the instance history of one 发布单, preserving the newest-first order. */
@@ -85,13 +87,15 @@ public final class ReleaseDtos {
         String pipelineNo,
         String status,
         String gateStatus,
+        String testStatus,
         String triggerType,
         String rerunFromNode,
         Boolean fullRerun,
         String commitSha,
         String imageDigest,
         ReleaseOrderView order,
-        List<ReleaseNodeView> nodes) {
+        List<ReleaseNodeView> nodes,
+        Long itemId) {
     }
 
     /** Admission fields of the 发布单. */

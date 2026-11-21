@@ -35,6 +35,15 @@ public class PipelineInstancePO {
     private String commitSha;
     private Instant startAt;
     private Instant endAt;
+
+    /**
+     * When the first TEST deployment completed (V9). It is the durable exactly-once claim of the
+     * test-environment-ready event, and the verification panel reads it as "the test may be
+     * decided now". It is not part of the {@link com.sf.release.domain.pipeline.PipelineInstance}
+     * aggregate (that record stays about state, not about one event's bookkeeping).
+     */
+    private Instant testReadyAt;
+
     private Instant createdAt;
 
     public static PipelineInstancePO of(PipelineInstance instance) {
@@ -176,6 +185,14 @@ public class PipelineInstancePO {
 
     public void setEndAt(Instant endAt) {
         this.endAt = endAt;
+    }
+
+    public Instant getTestReadyAt() {
+        return testReadyAt;
+    }
+
+    public void setTestReadyAt(Instant testReadyAt) {
+        this.testReadyAt = testReadyAt;
     }
 
     public Instant getCreatedAt() {

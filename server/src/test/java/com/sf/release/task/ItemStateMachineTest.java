@@ -271,6 +271,6 @@ class ItemStateMachineTest {
     private static ReleaseItem item(ItemStatus status) {
         return new ReleaseItem(1L, 2L, "CR-20261121-000001", UnitType.UNIT, 3L, "P-BUILD-1",
             "release/202611", null, "v1", LocalDate.of(2026, 11, 25), status,
-            GateStatus.TEST_PENDING, null, null, null, 0, NOW, NOW);
+            GateStatus.CHECK_RUNNING, null, null, null, 0, NOW, NOW);
     }
 }

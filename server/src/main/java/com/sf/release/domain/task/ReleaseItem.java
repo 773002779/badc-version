@@ -17,10 +17,12 @@ import java.time.LocalDate;
  *
  * <p>Pure domain value: text fields are trimmed on construction and blank values become
  * {@code null}. Defaults mirror the DDL: {@code type = UNIT}, {@code status = PENDING},
- * {@code gateStatus = TEST_PENDING}, {@code rowVersion = 0}.
+ * {@code gateStatus = CHECK_RUNNING} (the check dimension, no result yet), {@code rowVersion = 0}.
+ * The orthogonal <em>test</em> dimension is {@link TestStatus}; it is persisted next to this
+ * aggregate ({@code release_item.test_status}) and owned by the gate use cases.
  *
  * <p>{@code baseCommit} and {@code lastTestPassBy/At} are the fields the rerun planner and
- * the gate evaluator will read in later tasks; Task 8 only persists them.
+ * the gate evaluator read; Task 8 only persisted them.
  */
 public record ReleaseItem(
     Long id,
@@ -52,7 +54,7 @@ public record ReleaseItem(
         lastTestPassBy = trimToNull(lastTestPassBy);
         type = type == null ? UnitType.UNIT : type;
         status = status == null ? ItemStatus.PENDING : status;
-        gateStatus = gateStatus == null ? GateStatus.TEST_PENDING : gateStatus;
+        gateStatus = gateStatus == null ? GateStatus.CHECK_RUNNING : gateStatus;
         rowVersion = Math.max(rowVersion, 0);
     }
 

@@ -9,8 +9,13 @@ import com.sf.release.domain.engine.EngineException;
 import com.sf.release.domain.engine.EngineJob;
 import com.sf.release.domain.engine.EngineResult;
 import com.sf.release.domain.engine.EngineStatus;
+import com.sf.release.domain.engine.GateCheckCmd;
+import com.sf.release.domain.engine.GateCheckOutcome;
+import com.sf.release.domain.engine.GateCheckReport;
 import com.sf.release.domain.engine.JobKind;
 import com.sf.release.domain.engine.TriggerResult;
+import com.sf.release.domain.gate.Severity;
+import com.sf.release.domain.pipeline.CheckType;
 import com.sf.release.infra.engine.CodingEngine;
 import com.sf.release.infra.engine.CodingProperties;
 import com.sf.release.infra.engine.EngineHttpClient;
@@ -452,8 +457,9 @@ class CodingEngineTest {
         assertThat(properties.getEndpoints())
             .containsKeys("build.start", "build.query", "build.logs",
                 "deploy.start", "deploy.query", "deploy.logs", "cancel",
-                "git.head", "git.changes", "job.list")
-            .hasSize(10);
+                "git.head", "git.changes", "job.list",
+                "check.start", "check.env.start", "check.query")
+            .hasSize(13);
         assertThat(properties.getEndpoints().get("build.start").getMethod()).isEqualTo("POST");
         assertThat(properties.getEndpoints().get("build.start").getUrl())
             .isEqualTo("/open-api/build/start");
@@ -480,6 +486,17 @@ class CodingEngineTest {
         assertThat(properties.getStatusMapping())
             .containsEntry("QUEUED", List.of("QUEUEING", "PENDING"))
             .containsEntry("SUCCESS", List.of("SUCCESS", "FINISHED"));
+        assertThat(properties.getSeverityMapping())
+            .as("a vendor defect level maps to the platform severity; an unmapped word yields"
+                + " 'no level' instead of NONE")
+            .containsEntry("S1", List.of("CRITICAL", "HIGH", "BLOCKER"))
+            .containsEntry("S2", List.of("MEDIUM", "MAJOR"))
+            .containsEntry("S3", List.of("LOW", "MINOR", "INFO", "SUGGESTION"));
+        assertThat(properties.getEndpoints().get("check.query").getResponseSeverity())
+            .isEqualTo("$.Response.Data.MaxSeverity");
+        assertThat(properties.getEndpoints().get("check.env.start").getUrl())
+            .as("an environment-level check scans a DE, so it has its own start endpoint")
+            .isEqualTo("/open-api/check/env/start");
     }
 
     @Test
@@ -574,6 +591,117 @@ class CodingEngineTest {
 
     private static DeployCmd deployCmd() {
         return new DeployCmd(88L, "P-DEPLOY", "TEST", "quota-sit", "sha256:ab", "PL-1", 2);
+    }
+
+    // ------------------------------------------------------------------ gate checks (P2)
+
+    @Test
+    void start_check_uses_the_image_endpoint_for_an_image_level_check() throws Exception {
+        server.enqueue(new MockResponse().setBody(
+            "{\"Response\":{\"Data\":{\"CheckId\":\"c-1\","
+                + "\"WebUrl\":\"https://coding.example/check/1\"}}}"));
+
+        TriggerResult result = engine().startCheck(new GateCheckCmd(88L, "P-BUILD",
+            CheckType.SONAR, "sha1", "sha256:ab", null, "PL-1", 1));
+
+        assertThat(result.externalId()).isEqualTo("c-1");
+        assertThat(result.externalUrl()).isEqualTo("https://coding.example/check/1");
+        RecordedRequest request = server.takeRequest();
+        assertThat(request.getMethod()).isEqualTo("POST");
+        assertThat(request.getPath()).isEqualTo("/open-api/check/start");
+        String body = request.getBody().readUtf8();
+        assertThat(body).contains("\"CheckType\":\"SONAR\"")
+            .contains("\"TaskId\":\"P-BUILD\"")
+            .contains("\"CommitSha\":\"sha1\"")
+            .contains("\"ImageDigest\":\"sha256:ab\"")
+            .as("an image-level check has no DE to scan")
+            .doesNotContain("DeName");
+    }
+
+    @Test
+    void start_check_uses_the_env_endpoint_for_an_environment_level_check() throws Exception {
+        server.enqueue(new MockResponse()
+            .setBody("{\"Response\":{\"Data\":{\"CheckId\":\"c-2\"}}}"));
+
+        TriggerResult result = engine().startCheck(new GateCheckCmd(88L, "P-TEST",
+            CheckType.AUTO_TEST, null, "sha256:ab", "quota-sit", "PL-1", 3));
+
+        assertThat(result.externalId()).isEqualTo("c-2");
+        RecordedRequest request = server.takeRequest();
+        assertThat(request.getPath())
+            .as("an environment-level check scans a deployed DE, so it posts to its own endpoint")
+            .isEqualTo("/open-api/check/env/start");
+        String body = request.getBody().readUtf8();
+        assertThat(body).contains("\"CheckType\":\"AUTO_TEST\"")
+            .contains("\"DeName\":\"quota-sit\"")
+            .contains("\"Attempt\":3")
+            .doesNotContain("CommitSha");
+    }
+
+    @Test
+    void query_check_maps_the_status_word_and_the_defect_level() {
+        server.enqueue(new MockResponse().setBody("{\"Response\":{\"Data\":{"
+            + "\"Status\":\"FINISHED\",\"MaxSeverity\":\"CRITICAL\",\"IssueCount\":\"2\","
+            + "\"Summary\":\"1 blocker\",\"ReportUrl\":\"https://coding.example/r/1\"}}}"));
+
+        GateCheckReport report = engine().queryCheck("c-1", CheckType.SONAR);
+
+        assertThat(report.outcome()).isEqualTo(GateCheckOutcome.SUCCESS);
+        assertThat(report.severity()).isEqualTo(Severity.S1);
+        assertThat(report.issues()).isEqualTo(2);
+        assertThat(report.summary()).isEqualTo("1 blocker");
+        assertThat(report.reportUrl()).isEqualTo("https://coding.example/r/1");
+    }
+
+    @Test
+    void query_check_reports_running_while_the_engine_is_still_working() {
+        server.enqueue(new MockResponse()
+            .setBody("{\"Response\":{\"Data\":{\"Status\":\"RUNNING\"}}}"));
+
+        GateCheckReport report = engine().queryCheck("c-1", CheckType.SONAR);
+
+        assertThat(report.outcome()).isEqualTo(GateCheckOutcome.RUNNING);
+        assertThat(report.severity()).isNull();
+    }
+
+    @Test
+    void query_check_without_a_reported_level_is_unknown_not_a_pass() {
+        server.enqueue(new MockResponse()
+            .setBody("{\"Response\":{\"Data\":{\"Status\":\"FINISHED\"}}}"));
+
+        GateCheckReport report = engine().queryCheck("c-1", CheckType.SONAR);
+
+        assertThat(report.outcome())
+            .as("a finished check with no level cannot be judged; it must not read as a pass")
+            .isEqualTo(GateCheckOutcome.UNKNOWN);
+        assertThat(report.severity()).isNull();
+        assertThat(report.summary()).contains("severityMapping");
+    }
+
+    @Test
+    void query_check_with_an_unmapped_level_word_is_unknown_not_none() {
+        server.enqueue(new MockResponse().setBody(
+            "{\"Response\":{\"Data\":{\"Status\":\"FINISHED\",\"MaxSeverity\":\"WEIRD\"}}}"));
+
+        GateCheckReport report = engine().queryCheck("c-1", CheckType.SONAR);
+
+        assertThat(report.outcome()).isEqualTo(GateCheckOutcome.UNKNOWN);
+        assertThat(report.severity())
+            .as("an unmapped vocabulary must not collapse into 'no findings'")
+            .isNull();
+    }
+
+    @Test
+    void query_check_maps_a_failed_result_with_its_level() {
+        server.enqueue(new MockResponse().setBody(
+            "{\"Response\":{\"Data\":{\"Status\":\"FAILED\",\"MaxSeverity\":\"MEDIUM\","
+                + "\"IssueCount\":4}}}"));
+
+        GateCheckReport report = engine().queryCheck("c-1", CheckType.AUTO_TEST);
+
+        assertThat(report.outcome()).isEqualTo(GateCheckOutcome.FAILED);
+        assertThat(report.severity()).isEqualTo(Severity.S2);
+        assertThat(report.issues()).isEqualTo(4);
     }
 
     /** Loads the real {@code src/main/resources/coding-endpoints.yml} via Spring's binder. */

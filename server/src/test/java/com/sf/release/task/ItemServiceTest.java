@@ -99,7 +99,7 @@ class ItemServiceTest {
         assertThat(row.get("version")).isEqualTo("配额优化");
         assertThat(String.valueOf(row.get("plan_release_date"))).isEqualTo("2026-11-25");
         assertThat(row.get("status")).isEqualTo("PENDING");
-        assertThat(row.get("gate_status")).isEqualTo("TEST_PENDING");
+        assertThat(row.get("gate_status")).isEqualTo("CHECK_RUNNING");
         assertThat(row.get("base_commit")).isNull();
         assertThat(((Number) row.get("row_version")).intValue()).isZero();
         assertThat(row.get("created_at")).isNotNull();

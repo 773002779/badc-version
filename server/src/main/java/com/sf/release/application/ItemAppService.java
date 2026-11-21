@@ -190,7 +190,7 @@ public class ItemAppService {
         Instant now = Instant.now();
         ReleaseItem item = new ReleaseItem(null, taskId, newCrid(), unit.type(), unit.id(),
             buildPlanId, sourceBranch, unit.modulePath(), version, cmd.planReleaseDate(),
-            ItemStatus.PENDING, GateStatus.TEST_PENDING, null, null, null, 0, now, now);
+            ItemStatus.PENDING, GateStatus.CHECK_RUNNING, null, null, null, 0, now, now);
         ReleaseItemPO po = ReleaseItemPO.of(item);
         try {
             itemMapper.insert(po);

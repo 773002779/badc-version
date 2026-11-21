@@ -1,5 +1,6 @@
 package com.sf.release;
 
+import com.sf.release.application.VerifyNodeHandler;
 import com.sf.release.application.event.PipelineEventListener;
 import com.sf.release.domain.engine.CicdEngine;
 import com.sf.release.domain.engine.EngineException;
@@ -64,6 +65,10 @@ class WiringTest {
 
         assertThat(handlers.handler(NodeType.BUILD)).isInstanceOf(BuildNodeHandler.class);
         assertThat(handlers.handler(NodeType.TEST_DEPLOY)).isInstanceOf(TestDeployNodeHandler.class);
+        assertThat(handlers.handler(NodeType.VERIFY))
+            .as("P2 adds the verify handler; production stays P3")
+            .isInstanceOf(VerifyNodeHandler.class);
+        assertThat(handlers.handler(NodeType.PROD_DEPLOY)).isNull();
     }
 
     @Test

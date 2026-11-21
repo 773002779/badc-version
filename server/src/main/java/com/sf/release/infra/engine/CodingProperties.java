@@ -23,6 +23,7 @@ public class CodingProperties {
 
     private Map<String, Endpoint> endpoints = new LinkedHashMap<>();
     private Map<String, List<String>> statusMapping = new LinkedHashMap<>();
+    private Map<String, List<String>> severityMapping = new LinkedHashMap<>();
     private Webhook webhook = new Webhook();
 
     public Map<String, Endpoint> getEndpoints() {
@@ -39,6 +40,20 @@ public class CodingProperties {
 
     public void setStatusMapping(Map<String, List<String>> statusMapping) {
         this.statusMapping = statusMapping == null ? new LinkedHashMap<>() : new LinkedHashMap<>(statusMapping);
+    }
+
+    /**
+     * Engine severity word → platform {@code Severity} ({@code NONE/S3/S2/S1/S0}). A word absent
+     * from this map is reported with no level instead of a guessed one, so an unmapped
+     * vocabulary shows up as a WARN rather than a silently passing check.
+     */
+    public Map<String, List<String>> getSeverityMapping() {
+        return severityMapping;
+    }
+
+    public void setSeverityMapping(Map<String, List<String>> severityMapping) {
+        this.severityMapping = severityMapping == null
+            ? new LinkedHashMap<>() : new LinkedHashMap<>(severityMapping);
     }
 
     public Webhook getWebhook() {
@@ -135,6 +150,10 @@ public class CodingProperties {
         private String itemId;
         private String itemName;
         private String itemType;
+        private String responseSeverity;
+        private String responseIssues;
+        private String responseSummary;
+        private String responseReportUrl;
 
         public String getMethod() {
             return method;
@@ -280,6 +299,45 @@ public class CodingProperties {
 
         public void setItemType(String itemType) {
             this.itemType = itemType;
+        }
+
+        /**
+         * Optional JSONPath of a check's highest defect level word. It is mapped through
+         * {@code coding.severityMapping}; a missing value keeps the previously observed level.
+         */
+        public String getResponseSeverity() {
+            return responseSeverity;
+        }
+
+        public void setResponseSeverity(String responseSeverity) {
+            this.responseSeverity = responseSeverity;
+        }
+
+        /** Optional JSONPath of the number of findings a check reported. */
+        public String getResponseIssues() {
+            return responseIssues;
+        }
+
+        public void setResponseIssues(String responseIssues) {
+            this.responseIssues = responseIssues;
+        }
+
+        /** Optional JSONPath of the one-line human summary of a check result. */
+        public String getResponseSummary() {
+            return responseSummary;
+        }
+
+        public void setResponseSummary(String responseSummary) {
+            this.responseSummary = responseSummary;
+        }
+
+        /** Optional JSONPath of the report URL a user can open to read the findings. */
+        public String getResponseReportUrl() {
+            return responseReportUrl;
+        }
+
+        public void setResponseReportUrl(String responseReportUrl) {
+            this.responseReportUrl = responseReportUrl;
         }
     }
 }

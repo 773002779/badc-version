@@ -14,10 +14,12 @@ import com.sf.release.domain.pipeline.TriggerType;
 import com.sf.release.domain.pipeline.port.GitCommitProbe;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.resource.UnitType;
+import com.sf.release.domain.task.GateStatus;
 import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.ItemStateMachine;
 import com.sf.release.domain.task.ItemStatus;
 import com.sf.release.domain.task.ReleaseItem;
+import com.sf.release.domain.task.TestStatus;
 import com.sf.release.infra.lock.UnitLockService;
 import com.sf.release.infra.repo.ReleaseItemMapper;
 import com.sf.release.infra.repo.ReleaseOrderMapper;
@@ -93,6 +95,7 @@ public class RerunAppService {
     private final PublishAppService publishAppService;
     private final UnitLockService unitLockService;
     private final PipelineOrchestrator orchestrator;
+    private final GateCheckService gateCheckService;
     /** Mirrors publish: tests turn the immediate start off and drive the nodes themselves. */
     private final boolean autoStart;
     private final TransactionTemplate transactionTemplate;
@@ -105,6 +108,7 @@ public class RerunAppService {
                            PublishAppService publishAppService,
                            UnitLockService unitLockService,
                            PipelineOrchestrator orchestrator,
+                           GateCheckService gateCheckService,
                            @Value("${release.pipeline.auto-start:true}") boolean autoStart,
                            PlatformTransactionManager transactionManager) {
         this.itemMapper = itemMapper;
@@ -115,6 +119,7 @@ public class RerunAppService {
         this.publishAppService = publishAppService;
         this.unitLockService = unitLockService;
         this.orchestrator = orchestrator;
+        this.gateCheckService = gateCheckService;
         this.autoStart = autoStart;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -220,6 +225,16 @@ public class RerunAppService {
             update.set(ReleaseItemPO::getLastTestPassBy, null)
                 .set(ReleaseItemPO::getLastTestPassAt, null);
         }
+        if (full) {
+            // A full rebuild invalidates BOTH gates for the previous image: the test pass is gone
+            // (C19: revoked with the user recorded) and the recorded check results no longer apply
+            // to the new image (requirements §4.5, C16). gate_status is the check dimension (V19)
+            // and starts as CHECK_INVALID until the checks run again; the test dimension restarts
+            // at TEST_PENDING.
+            update.set(ReleaseItemPO::getGateStatus, GateStatus.CHECK_INVALID.name())
+                .set(ReleaseItemPO::getTestStatus, TestStatus.TEST_PENDING.name())
+                .set(ReleaseItemPO::getTestFailReason, null);
+        }
         if (full && observedHead != null) {
             // A full rebuild starts from the observed head; without this the old baseline would
             // keep every later rerun full forever.
@@ -229,6 +244,13 @@ public class RerunAppService {
         if (rows != 1) {
             throw new BizException(BizError.STATE_NOT_ALLOWED, "变更项已被并发重新发布",
                 Map.of("itemId", itemId, "currentStatus", current.status().name()));
+        }
+        if (full) {
+            // The previous image's check results cannot travel to the rebuilt image: mark them
+            // invalid so the gate shows "结果失效，需要重新检查" instead of an old pass, and the
+            // VERIFY node re-runs them. This never touches a production batch: a full rerun starts
+            // at BUILD (C16).
+            gateCheckService.invalidateAll(itemId, "代码有更新，全量重来：检查结果失效");
         }
 
         String imageDigest = full || previous == null ? null : previous.imageDigest();

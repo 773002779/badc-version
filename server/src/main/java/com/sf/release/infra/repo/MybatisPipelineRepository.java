@@ -211,6 +211,11 @@ public class MybatisPipelineRepository implements PipelineRepository {
     }
 
     @Override
+    public boolean finishNodeSatisfiedByHandler(long nodeId, Instant now) {
+        return nodeMapper.completeSatisfiedByHandler(nodeId, now) == 1;
+    }
+
+    @Override
     public boolean finishNode(long nodeId, NodeStatus status, Instant now) {
         return nodeMapper.update(null, Wrappers.<PipelineNodePO>lambdaUpdate()
             .eq(PipelineNodePO::getId, nodeId)
@@ -235,6 +240,23 @@ public class MybatisPipelineRepository implements PipelineRepository {
     }
 
     /**
+     * {@code PENDING/RUNNING → FAILED} while recording why. Same status CAS as
+     * {@link #finishInstance(long, InstanceStatus, Instant)}; the reason is what makes a failed
+     * pipeline diagnosable from the row.
+     */
+    @Override
+    public boolean failInstance(long instanceId, String reason, Instant now) {
+        return instanceMapper.update(null, Wrappers.<PipelineInstancePO>lambdaUpdate()
+            .eq(PipelineInstancePO::getId, instanceId)
+            .in(PipelineInstancePO::getStatus, InstanceStatus.PENDING.name(),
+                InstanceStatus.RUNNING.name())
+            .set(PipelineInstancePO::getStatus, InstanceStatus.FAILED.name())
+            .set(PipelineInstancePO::getStatusReason,
+                truncate(reason, MAX_STATUS_REASON_LENGTH))
+            .set(PipelineInstancePO::getEndAt, now)) == 1;
+    }
+
+    /**
      * {@code PENDING/RUNNING → PAUSED}: the node the pipeline cannot enter becomes the current
      * node and the reason is stored for operators. The status CAS is what makes a second
      * caller (another thread, a replayed reconcile advance) a no-op instead of a duplicate
@@ -250,6 +272,16 @@ public class MybatisPipelineRepository implements PipelineRepository {
             .set(PipelineInstancePO::getCurrentNode, blockedNode.name())
             .set(PipelineInstancePO::getStatusReason, truncate(reason, MAX_STATUS_REASON_LENGTH))
             .set(PipelineInstancePO::getEndAt, now)) == 1;
+    }
+
+    @Override
+    public boolean resumeInstance(long instanceId, Instant now) {
+        return instanceMapper.update(null, Wrappers.<PipelineInstancePO>lambdaUpdate()
+            .eq(PipelineInstancePO::getId, instanceId)
+            .eq(PipelineInstancePO::getStatus, InstanceStatus.PAUSED.name())
+            .set(PipelineInstancePO::getStatus, InstanceStatus.RUNNING.name())
+            .set(PipelineInstancePO::getStatusReason, null)
+            .set(PipelineInstancePO::getEndAt, null)) == 1;
     }
 
     @Override

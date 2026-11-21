@@ -13,6 +13,9 @@
 #   deploy.logs  : externalId, offset, limit
 #   cancel       : externalId
 #   job.list     : project, jobType
+#   check.start      : unitId, taskId, checkType, commitSha, imageDigest, pipelineNo, attempt
+#   check.env.start  : unitId, taskId, checkType, deName, imageDigest, pipelineNo, attempt
+#   check.query      : externalId
 #   git.head     : unitId, branch
 #   git.changes  : unitId, branch, modulePath, baseSha
 # A missing/blank variable is an error that names the placeholder; it never renders "".
@@ -92,6 +95,35 @@ coding:
       itemName: "$.Name"
       itemType: "$.Type"
 
+    # Gate checks (requirements §7.1 / tech design §7.1). Two start endpoints on purpose: an
+    # image-level check scans a commit/image, an environment-level check scans a deployed DE, and
+    # a {placeholder} without a value is an error — one shared body could not render both.
+    # check.query maps the engine status word through statusMapping and the defect level through
+    # severityMapping; a result without a level is reported as UNKNOWN ("not finished"), never as
+    # a clean pass.
+    "[check.start]":
+      method: POST
+      url: "/open-api/check/start"
+      body: '{"TaskId":"{taskId}","UnitId":{unitId},"CheckType":"{checkType}","CommitSha":"{commitSha}","ImageDigest":"{imageDigest}","PipelineNo":"{pipelineNo}","Attempt":{attempt}}'
+      responseId: "$.Response.Data.CheckId"
+      responseUrl: "$.Response.Data.WebUrl"
+
+    "[check.env.start]":
+      method: POST
+      url: "/open-api/check/env/start"
+      body: '{"TaskId":"{taskId}","UnitId":{unitId},"CheckType":"{checkType}","DeName":"{deName}","ImageDigest":"{imageDigest}","PipelineNo":"{pipelineNo}","Attempt":{attempt}}'
+      responseId: "$.Response.Data.CheckId"
+      responseUrl: "$.Response.Data.WebUrl"
+
+    "[check.query]":
+      method: GET
+      url: "/open-api/check/{externalId}"
+      responseStatus: "$.Response.Data.Status"
+      responseSeverity: "$.Response.Data.MaxSeverity"
+      responseIssues: "$.Response.Data.IssueCount"
+      responseSummary: "$.Response.Data.Summary"
+      responseReportUrl: "$.Response.Data.ReportUrl"
+
     # Git commit probe of the rerun planner (Task 15, requirements 4.5 C15). These endpoints
     # are configuration like every other action: the real repository API paths and field names
     # are replaced here once the CODING tenant documentation is available. git.head returns the
@@ -116,6 +148,17 @@ coding:
     SUCCESS: [SUCCESS, FINISHED]
     FAILED: [FAILED, ERROR]
     CANCELED: [CANCELED, CANCELLED]
+
+  # Vendor defect level -> platform Severity (requirements FR-Q-02): S0 严重 and S1 高危 block and
+  # cannot be waived, S2 中危 blocks but can be waived, S3 低危 only warns, NONE is clean. A word
+  # absent from this map yields "no level" plus a WARN, never NONE: "not understood" must not read
+  # as "no findings".
+  severityMapping:
+    NONE: [NONE, OK, CLEAN]
+    S3: [LOW, MINOR, INFO, SUGGESTION]
+    S2: [MEDIUM, MAJOR]
+    S1: [CRITICAL, HIGH, BLOCKER]
+    S0: [SEVERE, FATAL]
 
   # CODING webhook payload mapping (tech design §6.3). The field names below are the
   # documented default contract; rename one here when the tenant wraps its callback
