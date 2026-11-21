@@ -1,6 +1,9 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.domain.resource.DeployUnit;
@@ -17,6 +20,7 @@ import com.sf.release.infra.repo.ReleaseTaskMapper;
 import com.sf.release.infra.repo.po.CodingTaskBindingPO;
 import com.sf.release.infra.repo.po.DeployUnitPO;
 import com.sf.release.infra.repo.po.ReleaseItemPO;
+import com.sf.release.infra.security.ScopeGuard;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
@@ -29,6 +33,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -43,6 +48,12 @@ import java.util.UUID;
  * binding, so an item can never point at an unconfigured build). The requested branch is
  * trimmed and combined with {@code (taskId, unitId)} in the unique key; a duplicate is
  * reported as 40010. Unknown task/unit and missing fields are 40000.
+ *
+ * <p><strong>The branch is read-only (C21).</strong> {@link #createFromBinding} does not take a
+ * branch: it reads the unit's enabled {@code BUILD} binding ({@code params_json.branch}) and
+ * fails with 40011 when the binding configures none. The internal {@link #create(long,
+ * CreateItemCmd)} keeps the explicit-branch form for callers that already resolved it (the
+ * pipeline test fixtures); the HTTP create endpoint only uses the binding form.
  *
  * <p><strong>Transitions.</strong> {@link #transit(long, String)} is the only writer of
  * {@code release_item.status}. Each attempt loads the row, asks
@@ -65,21 +76,31 @@ public class ItemAppService {
     private static final DateTimeFormatter CRID_DATE =
         DateTimeFormatter.ofPattern("yyyyMMdd", Locale.ROOT);
 
+    /** Payload marker: the unit's BUILD binding has no read-only branch configured. */
+    static final String MISSING_BUILD_BRANCH = "BUILD_BRANCH";
+
+    /** Field names that may carry the read-only branch inside {@code params_json}. */
+    private static final List<String> BRANCH_FIELDS =
+        List.of("branch", "sourceBranch", "source_branch");
+
     private final ReleaseItemMapper itemMapper;
     private final ReleaseTaskMapper taskMapper;
     private final DeployUnitMapper unitMapper;
     private final CodingTaskBindingMapper bindingMapper;
+    private final ObjectMapper objectMapper;
     private final TransactionTemplate transactionTemplate;
 
     public ItemAppService(ReleaseItemMapper itemMapper,
                           ReleaseTaskMapper taskMapper,
                           DeployUnitMapper unitMapper,
                           CodingTaskBindingMapper bindingMapper,
+                          ObjectMapper objectMapper,
                           PlatformTransactionManager transactionManager) {
         this.itemMapper = itemMapper;
         this.taskMapper = taskMapper;
         this.unitMapper = unitMapper;
         this.bindingMapper = bindingMapper;
+        this.objectMapper = objectMapper;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -89,6 +110,38 @@ public class ItemAppService {
      */
     @Transactional
     public long create(long taskId, CreateItemCmd cmd) {
+        return insert(taskId, cmd).getId();
+    }
+
+    /**
+     * Creates an item whose {@code source_branch} is read from the unit's CODING build binding
+     * (C21: the branch is read-only for the platform; it is never a client input). The branch is
+     * the {@code branch} field of the binding's {@code params_json} template (the documented
+     * {@code sourceBranch}/{@code source_branch} spellings are accepted as aliases); a binding
+     * without one fails with 40011 naming {@code BUILD_BRANCH}, because the platform must not
+     * invent a branch.
+     *
+     * <p>The caller's unit scope is enforced here: the HTTP create endpoint is the only way in,
+     * so it must not be possible to register a change item for somebody else's unit.
+     *
+     * @throws BizException 40000 unknown task/unit or bad input; 40009 out of scope;
+     *                      40010 the item already exists; 40011 no build task / no branch
+     */
+    @Transactional
+    public ItemCreated createFromBinding(long taskId, Long unitId, String version,
+                                         LocalDate planReleaseDate) {
+        if (unitId == null) {
+            throw new BizException(BizError.PARAM_INVALID, "部署单元不能为空",
+                Map.of("unitId", "不能为空"));
+        }
+        ScopeGuard.assertUnitInScope(unitId);
+        String branch = requireBindingBranch(unitId);
+        ReleaseItemPO po = insert(taskId,
+            new CreateItemCmd(unitId, branch, version, planReleaseDate));
+        return new ItemCreated(po.getId(), po.getCrid());
+    }
+
+    private ReleaseItemPO insert(long taskId, CreateItemCmd cmd) {
         if (cmd == null) {
             throw new BizException(BizError.PARAM_INVALID, "创建参数不能为空");
         }
@@ -129,7 +182,60 @@ public class ItemAppService {
         }
         log.info("release item created: id={}, taskId={}, unitId={}, branch={}",
             po.getId(), taskId, unit.id(), sourceBranch);
-        return po.getId();
+        return po;
+    }
+
+    /**
+     * The read-only branch of the unit's enabled BUILD binding, read from the binding's
+     * {@code params_json} template. {@code null} when the binding or the field is missing, so the
+     * caller can fail with a configuration error naming the missing piece.
+     */
+    private String requireBindingBranch(long unitId) {
+        CodingTaskBindingPO binding = bindingMapper.selectOne(
+            Wrappers.<CodingTaskBindingPO>lambdaQuery()
+                .eq(CodingTaskBindingPO::getUnitId, unitId)
+                .eq(CodingTaskBindingPO::getTaskKind, TaskKind.BUILD.name())
+                .eq(CodingTaskBindingPO::getEnabled, true));
+        String branch = branchOf(binding == null ? null : binding.getParamsJson());
+        if (branch == null) {
+            throw new BizException(BizError.UNIT_NOT_CONFIGURED,
+                "部署单元的构建任务未配置只读分支，无法创建变更项",
+                Map.of("unitId", unitId, "missing", List.of(MISSING_BUILD_BRANCH)));
+        }
+        return branch;
+    }
+
+    /**
+     * Field names, in order, that may carry the branch inside the binding's {@code params_json}
+     * template. {@code branch} is the documented default; the aliases keep an existing
+     * configuration working when it used a different spelling.
+     */
+    private String branchOf(String paramsJson) {
+        String json = trimToNull(paramsJson);
+        if (json == null) {
+            return null;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(json);
+            if (root == null) {
+                return null;
+            }
+            for (String field : BRANCH_FIELDS) {
+                JsonNode node = root.get(field);
+                if (node != null && node.isValueNode()) {
+                    String branch = trimToNull(node.asText());
+                    if (branch != null) {
+                        return branch;
+                    }
+                }
+            }
+            return null;
+        } catch (JsonProcessingException ex) {
+            // bindCodingTasks validates the JSON on write; a row that no longer parses is a
+            // configuration problem, reported as "no readable branch" rather than a crash.
+            log.warn("coding binding params_json is not valid JSON: unitId={}", json);
+            return null;
+        }
     }
 
     /** Reads one item; the web layer sees primitives and enum names only. */
@@ -303,6 +409,10 @@ public class ItemAppService {
         String sourceBranch,
         String version,
         LocalDate planReleaseDate) {
+    }
+
+    /** What the create endpoint returns: the item's database id and its display CRID. */
+    public record ItemCreated(long itemId, String crid) {
     }
 
     /** Read model: enum values are flattened to their names for the web layer. */
