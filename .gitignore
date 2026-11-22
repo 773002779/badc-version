@@ -17,3 +17,4 @@ web/dist/
 # local run artifacts
 .run/
 logs/
+*.png
