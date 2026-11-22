@@ -55,18 +55,37 @@ public record FreezeEvent(
         status = status == null ? FreezeStatus.ACTIVE : status;
     }
 
-    /** True while this freeze blocks production at {@code at} (status and half-open range). */
+    /**
+     * True while this freeze is <em>in force</em> at {@code at} (status and half-open range). This
+     * is the display question "is production frozen right now"; the admission/review question is
+     * {@link #governsAt(Instant, Instant)}.
+     */
     public boolean inForceAt(Instant at) {
         return status == FreezeStatus.ACTIVE && at != null
             && !at.isBefore(startAt) && at.isBefore(endAt);
     }
 
-    /** True when a caller of {@code subsystemId} is affected by this freeze. */
-    public boolean appliesTo(long subsystemId) {
-        if (scope == FreezeScope.GLOBAL) {
-            return true;
+    /**
+     * True when this freeze <strong>governs</strong> a release: it is still {@code ACTIVE} and has
+     * not ended, and it starts no later than the later of {@code now} and the release's planned
+     * time.
+     *
+     * <p>That is the single predicate of the admission step, the in-flight handling and the
+     * pre-execution review (design 4.2/4.5): a freeze declared for next week already governs a
+     * release planned for next week, even though it is not in force yet — the decision to hand the
+     * release over is taken now, so the requirement is raised now (fail-closed). A freeze that
+     * starts after the release is planned does not govern it: that release will be gone before the
+     * freeze begins.
+     *
+     * <p>{@code plannedAt == null} means "no plan known" and degenerates to
+     * {@link #inForceAt(Instant)} at {@code now}, which is what the banner (no planned time) needs.
+     */
+    public boolean governsAt(Instant now, Instant plannedAt) {
+        if (status != FreezeStatus.ACTIVE || now == null || !endAt.isAfter(now)) {
+            return false;
         }
-        return subsystemId > 0 && Objects.equals(this.subsystemId, subsystemId);
+        Instant threshold = plannedAt == null || plannedAt.isBefore(now) ? now : plannedAt;
+        return !startAt.isAfter(threshold);
     }
 
     /**

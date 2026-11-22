@@ -1,17 +1,29 @@
 package com.sf.release.application;
 
+import com.sf.release.domain.admission.AdmissionDecision;
+import com.sf.release.domain.admission.AdmissionStep;
 import com.sf.release.infra.repo.po.AdmissionSnapshotPO;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The read model of one 发布单's production admission (tech design 4.8, {@code GET
- * /api/v1/releases/{publishNo}/admission}, and the answer every submit/resubmit returns).
+ * /api/v1/releases/{publishNo}/admission}, and the answer every submit/resubmit/admission-check
+ * returns).
  *
  * <p>{@code snapshot} is the <em>latest</em> admission snapshot and {@code chain} the approval steps
  * of that snapshot — not of the order. After a rejection and a resubmission the old snapshot and its
  * steps stay in the database as history, and this view shows the current generation only.
+ *
+ * <p>{@code admitted} and {@code steps} are the evidence of a <em>fresh</em> judgement (submit,
+ * resubmit, admission-check). A read of the stored admission answers them with {@code null} /
+ * {@code empty}: the snapshot records the outcome (conclusion, window, freeze, chain), not the six
+ * step sentences, and re-evaluating it would recompute a window that design 4.6 says must not be
+ * recomputed.
  *
  * <p>{@code review} is deliberately {@code null}: the pre-execution review (design 4.6: freeze,
  * waiver expiry, image digest) belongs to the execution task of the round. The field is present so
@@ -27,10 +39,13 @@ public record AdmissionView(
     SnapshotView snapshot,
     List<ApprovalStepView> chain,
     String nextAction,
+    Boolean admitted,
+    List<AdmissionStepView> steps,
     Object review) {
 
     public AdmissionView {
         chain = chain == null ? List.of() : List.copyOf(chain);
+        steps = steps == null ? List.of() : List.copyOf(steps);
     }
 
     /**
@@ -87,5 +102,28 @@ public record AdmissionView(
             po.getImageDigest(),
             SnapshotJson.stringsOf(po.getChainJson()),
             po.getCreatedAt());
+    }
+
+    /** The six judged steps of a fresh decision, flattened for the wire. */
+    public static List<AdmissionStepView> stepsOf(AdmissionDecision decision) {
+        return decision.steps().stream()
+            .map(step -> new AdmissionStepView(step.key().name(), step.key().label(),
+                step.passed(), step.reason(), step.nextAction()))
+            .toList();
+    }
+
+    /** The six judged steps of a fresh decision as a payload list (the refusal body). */
+    public static List<Map<String, Object>> stepPayloads(AdmissionDecision decision) {
+        List<Map<String, Object>> payloads = new ArrayList<>(decision.steps().size());
+        for (AdmissionStep step : decision.steps()) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("key", step.key().name());
+            payload.put("label", step.key().label());
+            payload.put("passed", step.passed());
+            payload.put("reason", step.reason());
+            payload.put("nextAction", step.nextAction());
+            payloads.add(payload);
+        }
+        return List.copyOf(payloads);
     }
 }

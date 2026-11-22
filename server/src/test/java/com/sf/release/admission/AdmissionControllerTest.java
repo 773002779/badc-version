@@ -130,7 +130,45 @@ class AdmissionControllerTest {
             .andExpect(jsonPath("$.data.snapshot.oaTicketNo").value(OA))
             .andExpect(jsonPath("$.data.snapshot.chain").isEmpty())
             .andExpect(jsonPath("$.data.nextAction").value(containsString("无需审批")))
+            .andExpect(jsonPath("$.data.admitted").value(true))
+            .andExpect(jsonPath("$.data.steps.length()").value(6))
+            .andExpect(jsonPath("$.data.steps[0].key").value("GATE"))
+            .andExpect(jsonPath("$.data.steps[0].label").value("检查门禁"))
+            .andExpect(jsonPath("$.data.steps[0].passed").value(true))
             .andExpect(jsonPath("$.data.review").doesNotExist());
+    }
+
+    @Test
+    void the_draft_check_answers_the_steps_and_writes_nothing() throws Exception {
+        mvc.perform(post("/api/v1/releases/{publishNo}/admission-check", PUBLISH_NO)
+                .header(USER_HEADER, DEV)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(submitBody("bad")))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.admitted").value(false))
+            .andExpect(jsonPath("$.data.steps.length()").value(6))
+            .andExpect(jsonPath("$.data.steps[2].key").value("OA_TICKET"))
+            .andExpect(jsonPath("$.data.steps[2].passed").value(false))
+            .andExpect(jsonPath("$.data.steps[2].reason").value(containsString("OA 工单号")))
+            .andExpect(jsonPath("$.data.nextAction").isNotEmpty())
+            .andExpect(jsonPath("$.data.snapshot").doesNotExist())
+            .andExpect(jsonPath("$.data.chain").isEmpty())
+            .andExpect(jsonPath("$.data.itemStatus").value("GATE_PENDING"));
+
+        mvc.perform(get("/api/v1/releases/{publishNo}/admission", PUBLISH_NO)
+                .header(USER_HEADER, ADMIN))
+            .andExpect(jsonPath("$.data.snapshot").doesNotExist());
+    }
+
+    @Test
+    void the_draft_check_is_scope_guarded() throws Exception {
+        mvc.perform(post("/api/v1/releases/{publishNo}/admission-check", PUBLISH_NO)
+                .header(USER_HEADER, OUTSIDER)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(submitBody(OA)))
+            .andExpect(jsonPath("$.code").value(40009))
+            .andExpect(jsonPath("$.data.unitId").value(unitId));
     }
 
     @Test
@@ -145,6 +183,9 @@ class AdmissionControllerTest {
             .andExpect(jsonPath("$.data.reasons.length()").value(1))
             .andExpect(jsonPath("$.data.reasons[0]").value(containsString("检查门禁未通过")))
             .andExpect(jsonPath("$.data.failedSteps[0]").value("GATE"))
+            .andExpect(jsonPath("$.data.steps[0].key").value("GATE"))
+            .andExpect(jsonPath("$.data.steps[0].passed").value(false))
+            .andExpect(jsonPath("$.data.steps.length()").value(6))
             .andExpect(jsonPath("$.data.nextAction").isNotEmpty());
     }
 

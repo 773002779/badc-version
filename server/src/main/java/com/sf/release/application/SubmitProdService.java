@@ -117,8 +117,7 @@ public class SubmitProdService {
                 + " by={}", no, order.getId(), item.getId(), snapshotId, plan.windowResult(),
             plan.frozen(), plan.decision().requiredRoles(), finalStatus, plan.oaTicketNo(),
             plan.plannedAt(), user.userId());
-        return admissionView(order, item, finalStatus, finalStatus, snapshotId,
-            plan.decision().nextAction());
+        return admissionView(order, item, finalStatus, finalStatus, snapshotId, plan.decision());
     }
 
     /**
@@ -160,13 +159,16 @@ public class SubmitProdService {
                 + " by={}", no, order.getId(), item.getId(), snapshotId, plan.windowResult(),
             plan.frozen(), plan.decision().requiredRoles(), finalStatus, plan.oaTicketNo(),
             plan.plannedAt(), user.userId());
-        return admissionView(order, item, finalStatus, finalStatus, snapshotId,
-            plan.decision().nextAction());
+        return admissionView(order, item, finalStatus, finalStatus, snapshotId, plan.decision());
     }
 
     /**
      * The admission view of one 发布单: the latest snapshot, the chain of that snapshot, and the
      * current item/order status.
+     *
+     * <p>{@code admitted}/{@code steps} are {@code null}/empty here: the snapshot stores the outcome,
+     * not the six step sentences, and re-evaluating it would recompute the window the design says
+     * must not be recomputed (4.6). Use {@link #check} for a fresh judgement.
      *
      * @throws BizException 40000 unknown publish number; 40009 no data scope on the owning unit
      */
@@ -178,12 +180,37 @@ public class SubmitProdService {
         AdmissionSnapshotPO snapshot = snapshotMapper.selectLatestByOrder(order.getId());
         if (snapshot == null) {
             return new AdmissionView(order.getPublishNo(), order.getId(), item.getId(),
-                item.getStatus(), order.getStatus(), null, List.of(), "尚未提交生产", null);
+                item.getStatus(), order.getStatus(), null, List.of(), "尚未提交生产", null,
+                List.of(), null);
         }
         List<ApprovalStepView> chain = approvalService.stepViews(snapshot.getId());
         return new AdmissionView(order.getPublishNo(), order.getId(), item.getId(),
             item.getStatus(), order.getStatus(), AdmissionView.snapshotOf(snapshot), chain,
-            nextActionOf(chain, item.getStatus()), null);
+            nextActionOf(chain, item.getStatus()), null, List.of(), null);
+    }
+
+    /**
+     * The draft admission judgement of one 发布单 — the submit dialog's "may this go to production,
+     * and what is still missing" — <strong>without writing anything</strong>.
+     *
+     * <p>Open to any logged-in caller inside the deployment unit's scope (no
+     * {@code control:submit-prod}): asking the question is not a release decision, and the developer
+     * who fills the dialog needs the answers before the button exists.
+     *
+     * @param plannedReleaseTime the proposed production time; {@code null} answers "请填写"
+     * @param oaTicketNo         the OA ticket the operator typed
+     * @throws BizException 40000 unknown publish number; 40009 no data scope on the owning unit
+     */
+    public AdmissionView check(String publishNo, Instant plannedReleaseTime, String oaTicketNo) {
+        String no = requirePublishNo(publishNo);
+        ReleaseOrderPO order = requireOrder(no);
+        ReleaseItemPO item = requireItem(order);
+        ScopeGuard.assertUnitInScope(unitIdOf(item));
+        AdmissionDecision decision = admissionService.evaluate(order.getId(), plannedReleaseTime,
+            oaTicketNo);
+        return new AdmissionView(order.getPublishNo(), order.getId(), item.getId(), item.getStatus(),
+            order.getStatus(), null, List.of(), decision.nextAction(), decision.admitted(),
+            AdmissionView.stepsOf(decision), null);
     }
 
     // ------------------------------------------------------------------ writes
@@ -211,11 +238,20 @@ public class SubmitProdService {
     }
 
     private void syncOrderStatus(long orderId, int currentVersion, String status) {
-        orderMapper.update(null, Wrappers.<ReleaseOrderPO>lambdaUpdate()
+        int rows = orderMapper.update(null, Wrappers.<ReleaseOrderPO>lambdaUpdate()
             .eq(ReleaseOrderPO::getId, orderId)
             .eq(ReleaseOrderPO::getRowVersion, currentVersion)
             .set(ReleaseOrderPO::getStatus, status)
             .set(ReleaseOrderPO::getRowVersion, currentVersion + 1));
+        if (rows != 1) {
+            // The write above took the row lock in this very transaction, so 0 rows means the
+            // assumption is broken: fail the submission instead of leaving the order saying
+            // SUBMITTED while the item is already READY/PENDING_APPROVAL.
+            log.warn("order status {} not applied to order {}: row_version {} no longer matches",
+                status, orderId, currentVersion);
+            throw new BizException(BizError.STATE_NOT_ALLOWED,
+                "发布单状态已变化，提交未生效，请刷新后重试", Map.of("orderId", orderId));
+        }
     }
 
     /**
@@ -273,11 +309,12 @@ public class SubmitProdService {
     // ------------------------------------------------------------------ views and errors
 
     private AdmissionView admissionView(ReleaseOrderPO order, ReleaseItemPO item, String itemStatus,
-                                        String orderStatus, long snapshotId, String nextAction) {
+                                        String orderStatus, long snapshotId,
+                                        AdmissionDecision decision) {
         AdmissionSnapshotPO snapshot = snapshotMapper.selectById(snapshotId);
         return new AdmissionView(order.getPublishNo(), order.getId(), item.getId(), itemStatus,
             orderStatus, AdmissionView.snapshotOf(snapshot), approvalService.stepViews(snapshotId),
-            nextAction, null);
+            decision.nextAction(), decision.admitted(), AdmissionView.stepsOf(decision), null);
     }
 
     private static String finalStatusOf(AdmissionPlan plan) {
@@ -323,6 +360,7 @@ public class SubmitProdService {
         payload.put("reasons", decision.reasons());
         payload.put("failedSteps", decision.failedSteps().stream()
             .map(step -> step.key().name()).toList());
+        payload.put("steps", AdmissionView.stepPayloads(decision));
         payload.put("nextAction", decision.nextAction());
         throw new BizException(error, String.join("；", decision.reasons()), payload);
     }
@@ -335,6 +373,10 @@ public class SubmitProdService {
                 || status == ItemStatus.READY) {
             return new BizException(BizError.STATE_NOT_ALLOWED,
                 "变更项已提交生产（当前：" + status + "），请勿重复提交", payload);
+        }
+        if (status == ItemStatus.REJECTED) {
+            return new BizException(BizError.STATE_NOT_ALLOWED,
+                "变更项已被驳回（REJECTED），请使用「重新提交」而不是再次提交生产", payload);
         }
         return new BizException(BizError.STATE_NOT_ALLOWED,
             "只有门禁通过（GATE_PENDING）的变更项可以提交生产，当前是 " + status, payload);

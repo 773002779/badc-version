@@ -1,5 +1,6 @@
 package com.sf.release.web.dto;
 
+import com.sf.release.application.AdmissionStepView;
 import com.sf.release.application.AdmissionView;
 import com.sf.release.application.ApprovalStepView;
 
@@ -10,13 +11,20 @@ import java.util.List;
  * Request and response bodies of the 提交生产 / 准入 endpoints (tech design 4.8).
  *
  * <p>The web layer owns the wire shape; {@link AdmissionView} stays HTTP-agnostic. Names and Chinese
- * labels are both sent (roles, step statuses), so the page renders the chain without keeping its own
- * copy of the vocabulary.
+ * labels are both sent (roles, step statuses, admission step keys), so the page renders the evidence
+ * without keeping its own copy of the vocabulary.
  *
- * <p>{@code snapshot} is {@code null} when the 发布单 was never submitted — the page shows "尚未
- * 提交生产" and does not have to treat an absent snapshot as an error. {@code review} is
- * deliberately {@code null} until the execution task adds the pre-execution review (design 4.6);
- * the field exists now so the response shape will not change later.
+ * <p><strong>The six admission steps travel with every fresh judgement.</strong> {@code steps} is
+ * present (and {@code admitted} is non-null) on submit, resubmit and {@code admission-check} — that
+ * is what lets the dialog say "检查未完成，等它跑完" instead of greying the button. The stored
+ * admission read answers {@code admitted = null, steps = []}: the snapshot keeps the outcome, not the
+ * step sentences (re-evaluating it would recompute the window, which design 4.6 forbids).
+ *
+ * <p>{@code snapshot} is {@code null} when the 发布单 was never submitted (the page shows "尚未提交
+ * 生产") and on {@code admission-check} (nothing is written). A refusal keeps
+ * {@code reasons}/{@code failedSteps}/{@code nextAction} for compatibility and adds the same steps
+ * as {@code data.steps}. {@code review} is deliberately {@code null} until the execution task adds
+ * the pre-execution review (design 4.6).
  */
 public final class AdmissionDtos {
 
@@ -24,9 +32,11 @@ public final class AdmissionDtos {
     }
 
     /**
-     * {@code POST /api/v1/releases/{publishNo}/submit-prod} and
-     * {@code POST /api/v1/releases/{publishNo}/resubmit}. On resubmit both fields are optional: an
-     * omitted value reuses what the previous submission recorded (design 4.3: 重跑复用，不重填).
+     * {@code POST /api/v1/releases/{publishNo}/submit-prod},
+     * {@code POST /api/v1/releases/{publishNo}/resubmit} and
+     * {@code POST /api/v1/releases/{publishNo}/admission-check}. On resubmit both fields are
+     * optional: an omitted value reuses what the previous submission recorded (design 4.3: 重跑复用，
+     * 不重填). On the draft check they are simply the values currently in the dialog.
      */
     public record SubmitProdRequest(Instant plannedReleaseTime, String oaTicketNo) {
     }
@@ -41,6 +51,15 @@ public final class AdmissionDtos {
         String decidedBy,
         Instant decidedAt,
         String comment) {
+    }
+
+    /** One of the six admission steps of a fresh judgement. */
+    public record AdmissionStepResponse(
+        String key,
+        String label,
+        boolean passed,
+        String reason,
+        String nextAction) {
     }
 
     /** The admission snapshot (design 4.5) as the page reads it. */
@@ -74,6 +93,8 @@ public final class AdmissionDtos {
         SnapshotResponse snapshot,
         List<ApprovalStepResponse> chain,
         String nextAction,
+        Boolean admitted,
+        List<AdmissionStepResponse> steps,
         Object review) {
     }
 
@@ -87,6 +108,8 @@ public final class AdmissionDtos {
             snapshotOf(view.snapshot()),
             view.chain().stream().map(AdmissionDtos::stepOf).toList(),
             view.nextAction(),
+            view.admitted(),
+            view.steps().stream().map(AdmissionDtos::admissionStepOf).toList(),
             view.review());
     }
 
@@ -124,5 +147,14 @@ public final class AdmissionDtos {
             step.decidedBy(),
             step.decidedAt(),
             step.comment());
+    }
+
+    private static AdmissionStepResponse admissionStepOf(AdmissionStepView step) {
+        return new AdmissionStepResponse(
+            step.key(),
+            step.label(),
+            step.passed(),
+            step.reason(),
+            step.nextAction());
     }
 }

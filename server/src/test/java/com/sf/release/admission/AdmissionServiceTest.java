@@ -86,7 +86,8 @@ class AdmissionServiceTest {
         jdbc.update("DELETE FROM user_role");
         jdbc.update("DELETE FROM app_user");
 
-        TestUserContext.as(USER, Set.of("DEV"), Set.of(Permissions.CONTROL_SUBMIT_PROD));
+        TestUserContext.as(USER, Set.of("DEV"), Set.of(Permissions.CONTROL_SUBMIT_PROD,
+            Permissions.CONTROL_FREEZE, Permissions.CONTROL_UNFREEZE));
 
         subsystemId = givenSubsystem("AD-SYS");
         unitId = givenUnit(subsystemId, "ad-unit");
@@ -160,6 +161,43 @@ class AdmissionServiceTest {
             .containsExactly("OPS_LEAD", "DEPT_MANAGER");
         assertThat(view.chain()).extracting(ApprovalStepView::status)
             .containsExactly("PENDING", "PENDING");
+        assertThat(view.admitted()).isTrue();
+        assertThat(view.steps()).hasSize(6);
+    }
+
+    @Test
+    void a_freeze_declared_for_later_still_governs_a_release_planned_inside_it() {
+        Instant planned = Instant.now().plusSeconds(7200);
+        freezes.create("GLOBAL", null, "下周大促", null, Instant.now().plusSeconds(3600),
+            Instant.now().plusSeconds(3 * 3600), "ad-manager");
+
+        AdmissionView view = submitProdService.submit(PUBLISH_NO, planned, OA);
+
+        assertThat(view.admitted()).isTrue();
+        assertThat(view.itemStatus()).isEqualTo("PENDING_APPROVAL");
+        assertThat(view.snapshot().frozen())
+            .as("a declared freeze governs a release planned inside it (fail-closed)")
+            .isTrue();
+        assertThat(view.chain()).extracting(ApprovalStepView::role)
+            .containsExactly("OPS_LEAD", "DEPT_MANAGER");
+    }
+
+    @Test
+    void an_approved_waiver_lifts_the_check_gate_and_the_snapshot_records_it() {
+        givenWindowConstraintOff();
+        givenCheck("SONAR", "IMAGE", "FAIL", "S2", 2);
+        long waiverId = givenApprovedWaiver();
+
+        AdmissionView view = submitProdService.submit(PUBLISH_NO, planned(), OA);
+
+        assertThat(view.itemStatus()).isEqualTo("READY");
+        assertThat(view.snapshot().checkConclusion()).isEqualTo("WAIVED");
+        assertThat(view.snapshot().waiverIds()).containsExactly(waiverId);
+        assertThat(jdbc.queryForObject(
+            "SELECT waiver_ids FROM admission_snapshot WHERE id = ?", String.class,
+            view.snapshot().id())).isEqualTo("[" + waiverId + "]");
+        assertThat(view.snapshot().checkConclusion()).isEqualTo("WAIVED");
+        assertThat(view.chain()).isEmpty();
     }
 
     @Test
@@ -185,6 +223,14 @@ class AdmissionServiceTest {
                 assertThat(reasons(ex)).isNotEmpty();
                 assertThat(failedSteps(ex)).contains("GATE");
                 assertThat(payload(ex).get("nextAction")).isNotNull();
+                List<?> steps = (List<?>) payload(ex).get("steps");
+                assertThat(steps).as("the six-step evidence travels in the refusal payload")
+                    .hasSize(6);
+                Map<?, ?> gate = (Map<?, ?>) steps.get(0);
+                assertThat(gate.get("key")).isEqualTo("GATE");
+                assertThat(gate.get("label")).isEqualTo("检查门禁");
+                assertThat(gate.get("passed")).isEqualTo(false);
+                assertThat((String) gate.get("reason")).isNotEmpty();
             });
         assertThat(itemStatus()).as("a refused submission writes nothing").isEqualTo("GATE_PENDING");
         assertThat(snapshotCount()).isZero();
@@ -310,6 +356,36 @@ class AdmissionServiceTest {
     }
 
     @Test
+    void the_draft_check_answers_the_six_steps_without_writing_anything() {
+        AdmissionView clean = submitProdService.check(PUBLISH_NO, planned(), OA);
+
+        assertThat(clean.admitted()).isTrue();
+        assertThat(clean.steps()).extracting(step -> step.key())
+            .containsExactly("GATE", "TEST", "OA_TICKET", "WINDOW", "FREEZE", "PLANNED_TIME");
+        assertThat(clean.snapshot()).as("a draft check writes no snapshot").isNull();
+        assertThat(clean.chain()).isEmpty();
+        assertThat(snapshotCount()).isZero();
+
+        AdmissionView bad = submitProdService.check(PUBLISH_NO, planned(), "bad");
+
+        assertThat(bad.admitted()).isFalse();
+        assertThat(bad.steps()).filteredOn(step -> !step.passed())
+            .extracting(step -> step.key()).containsExactly("OA_TICKET");
+        assertThat(bad.steps().get(2).reason()).contains("OA 工单号格式不合法");
+        assertThat(bad.steps().get(2).nextAction()).isNotNull();
+        assertThat(bad.steps().get(2).label()).isEqualTo("OA 工单号");
+        assertThat(itemStatus()).isEqualTo("GATE_PENDING");
+    }
+
+    @Test
+    void the_draft_check_is_scope_guarded() {
+        TestUserContext.scoped(USER);
+
+        assertBizError(() -> submitProdService.check(PUBLISH_NO, planned(), OA),
+            BizError.FORBIDDEN, "unitId");
+    }
+
+    @Test
     void the_draft_evaluation_answers_the_submit_dialog_without_writing_anything() {
         com.sf.release.domain.admission.AdmissionDecision plain =
             admissionService.evaluate(orderId, planned(), OA);
@@ -342,6 +418,10 @@ class AdmissionServiceTest {
         assertThat(view.orderStatus()).isEqualTo("READY");
         assertThat(view.chain()).isEmpty();
         assertThat(view.review()).as("the pre-execution review belongs to the execution task").isNull();
+        assertThat(view.admitted())
+            .as("the stored snapshot holds the outcome, not the six step sentences")
+            .isNull();
+        assertThat(view.steps()).isEmpty();
         assertThat(view.nextAction()).isNotBlank();
     }
 
@@ -397,6 +477,17 @@ class AdmissionServiceTest {
         assertThat(second.snapshot().oaTicketNo()).isEqualTo(oaBefore);
         assertThat(orderOa()).isEqualTo(oaBefore);
         assertThat(orderPlanned()).isEqualTo(plannedBefore);
+    }
+
+    @Test
+    void submitting_a_rejected_item_points_at_the_resubmit_action() {
+        AdmissionView first = submitProdService.submit(PUBLISH_NO, planned(), OA);
+        rejectSubmittedRelease(first.snapshot().id());
+
+        assertBizError(() -> submitProdService.submit(PUBLISH_NO, planned(), OA),
+            BizError.STATE_NOT_ALLOWED, ex ->
+                assertThat(ex.getMessage()).contains("重新提交"));
+        assertThat(snapshotCount()).isEqualTo(1);
     }
 
     @Test
@@ -488,6 +579,23 @@ class AdmissionServiceTest {
                 + " issues, attempt, created_at, updated_at)"
                 + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, NOW(3), NOW(3))",
             itemId, orderId, kind, stage, status, severity, issues);
+    }
+
+    /**
+     * An approved, unexpired waiver for the current commit and image: the 中危 finding is lifted, the
+     * gate concludes {@code WAIVED} and the admission must record that waiver in the snapshot.
+     */
+    private long givenApprovedWaiver() {
+        jdbc.update("INSERT INTO gate_waiver (item_id, order_id, status, reason, requested_by,"
+                + " requested_at, approved_by, approved_at, expire_at, commit_sha, image_digest,"
+                + " created_at, updated_at)"
+                + " VALUES (?, ?, 'APPROVED', '5 个失败都是已知用例', 'ad-dev', NOW(3), 'ad-reviewer',"
+                + " NOW(3), DATE_ADD(NOW(3), INTERVAL 3 DAY),"
+                + " '0123456789abcdef0123456789abcdef01234567', ?, NOW(3), NOW(3))",
+            itemId, orderId, IMAGE);
+        Long id = jdbc.queryForObject("SELECT MAX(id) FROM gate_waiver", Long.class);
+        assertThat(id).isNotNull();
+        return id;
     }
 
     /** Rejects the submitted release the way the approval endpoints will (Task 3). */

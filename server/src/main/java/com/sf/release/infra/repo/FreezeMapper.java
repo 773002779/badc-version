@@ -10,9 +10,19 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * MyBatis-Plus mapper for {@code freeze_event} (V21). "In force" is
- * {@code status = ACTIVE AND start_at <= at < end_at} — a half-open range, so a freeze that ends
- * exactly at {@code at} no longer blocks and a later freeze starting at {@code at} does.
+ * MyBatis-Plus mapper for {@code freeze_event} (V21).
+ *
+ * <p>Two predicates, deliberately kept apart:
+ *
+ * <ul>
+ *   <li><strong>in force</strong> ({@code selectActive*}): {@code status = ACTIVE AND start_at <= at
+ *       AND end_at > at} — the display question "is production frozen right now";</li>
+ *   <li><strong>governing</strong> ({@code selectGoverning*}): {@code status = ACTIVE AND end_at >
+ *       now AND start_at <= threshold} with {@code threshold = max(now, plannedAt)} — the decision
+ *       question of admission, in-flight handling and the pre-execution review. A freeze declared
+ *       for next week governs a release planned for next week today (fail-closed). With no planned
+ *       time the threshold is {@code now}, which is exactly the in-force range.</li>
+ * </ul>
  */
 @Mapper
 public interface FreezeMapper extends BaseMapper<FreezeEventPO> {
@@ -32,6 +42,24 @@ public interface FreezeMapper extends BaseMapper<FreezeEventPO> {
         + " ORDER BY id")
     List<FreezeEventPO> selectActiveForSubsystem(@Param("subsystemId") long subsystemId,
                                                  @Param("at") Instant at);
+
+    /** Every freeze that governs a release at {@code now} planned for {@code threshold}. */
+    @Select("SELECT * FROM freeze_event WHERE status = 'ACTIVE'"
+        + " AND end_at > #{now} AND start_at <= #{threshold} ORDER BY id")
+    List<FreezeEventPO> selectGoverning(@Param("now") Instant now,
+                                        @Param("threshold") Instant threshold);
+
+    /**
+     * The freezes that govern a release of one system at {@code now} planned for
+     * {@code threshold}: a GLOBAL freeze always applies, a SUBSYSTEM freeze only to its own.
+     */
+    @Select("SELECT * FROM freeze_event WHERE status = 'ACTIVE'"
+        + " AND end_at > #{now} AND start_at <= #{threshold}"
+        + " AND (scope = 'GLOBAL' OR (scope = 'SUBSYSTEM' AND subsystem_id = #{subsystemId}))"
+        + " ORDER BY id")
+    List<FreezeEventPO> selectGoverningForSubsystem(@Param("subsystemId") long subsystemId,
+                                                    @Param("now") Instant now,
+                                                    @Param("threshold") Instant threshold);
 
     /**
      * The freezes the daily scan must close: still {@code ACTIVE} although their {@code end_at}

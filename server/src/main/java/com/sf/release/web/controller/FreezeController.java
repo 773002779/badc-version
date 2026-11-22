@@ -18,14 +18,17 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.Instant;
 import java.util.List;
 
 /**
  * 封板 endpoints (tech design 4.8).
  *
  * <ul>
- *   <li>{@code GET  /api/v1/freezes?active=&subsystemId=} — the 封板 banner and the history; any
- *       logged-in user, because everybody needs to know that production is frozen;</li>
+ *   <li>{@code GET  /api/v1/freezes?active=&subsystemId=&plannedAt=} — the 封板 banner and the
+ *       history; any logged-in user, because everybody needs to know that production is frozen. With
+ *       {@code plannedAt} the list answers "which freezes govern a release planned for that time"
+ *       (a freeze declared for later included); without it, "which are in force now";</li>
  *   <li>{@code POST /api/v1/freezes} — declare a freeze ({@code control:freeze}, 部门经理);</li>
  *   <li>{@code POST /api/v1/freezes/{id}/release} — lift one ({@code control:unfreeze},
  *       运维组长), body {@code {reason}}.</li>
@@ -52,8 +55,9 @@ public class FreezeController {
     @GetMapping
     public ApiResponse<List<FreezeResponse>> list(
             @RequestParam(name = "active", required = false) Boolean active,
-            @RequestParam(name = "subsystemId", required = false) Long subsystemId) {
-        return ApiResponse.ok(FreezeDtos.of(freezeService.list(active, subsystemId)));
+            @RequestParam(name = "subsystemId", required = false) Long subsystemId,
+            @RequestParam(name = "plannedAt", required = false) Instant plannedAt) {
+        return ApiResponse.ok(FreezeDtos.of(freezeService.list(active, subsystemId, plannedAt)));
     }
 
     @RequirePerm(Permissions.CONTROL_FREEZE)

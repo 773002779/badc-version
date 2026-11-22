@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.common.security.Permissions;
 import com.sf.release.domain.approval.ApprovalChain;
 import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.freeze.FreezeEvent;
@@ -19,44 +20,66 @@ import com.sf.release.infra.repo.po.AdmissionSnapshotPO;
 import com.sf.release.infra.repo.po.FreezeEventPO;
 import com.sf.release.infra.repo.po.InFlightOrderRow;
 import com.sf.release.infra.repo.po.ReleaseOrderPO;
+import com.sf.release.infra.security.CurrentUser;
+import com.sf.release.infra.security.UserContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * The 生产封板 use cases (tech design 4.2): declare a freeze and handle the releases already in
- * flight, lift one, list the frozen windows, and close the expired ones.
+ * flight, lift one, close the expired ones, and answer the two different questions the platform
+ * asks about freezes.
  *
- * <p><strong>Declaring is the governance act.</strong> {@link #create} writes the event with status
- * {@code ACTIVE} immediately (so a scheduled freeze is already recorded and visible) and, in the
- * same transaction, raises the requirement of every release already in the production flow: the
- * chain of its latest admission snapshot gets a {@code DEPT_MANAGER} step, and a {@code READY} or
- * {@code SUBMITTED} 变更项 is pulled back into {@code PENDING_APPROVAL}. Adding the signature as
- * soon as the freeze is declared is fail-closed — it can only add an approval, never remove one —
- * and it is what makes the banner and the chain agree from the first second.
+ * <p><strong>Two predicates, one rule each.</strong>
+ * <ul>
+ *   <li>{@link #active(long, Instant)} — <em>in force</em>: {@code ACTIVE AND start_at <= at AND
+ *       end_at > at}. This is the display question ("is production frozen right now"), used by the
+ *       banner.</li>
+ *   <li>{@link #governing(long, Instant, Instant)} — <em>governing</em>: {@code ACTIVE AND end_at >
+ *       now AND start_at <= max(now, plannedAt)}. This is the decision question used by the
+ *       admission step, the in-flight handling and (Task 4) the pre-execution review: a freeze
+ *       declared for next week already governs a release planned for next week <em>today</em>, so
+ *       the second signature is raised now instead of being discovered at execution time
+ *       (fail-closed). With no planned time the predicate degenerates to the in-force one; that is
+ *       what the banner passes. Both are documented on {@link FreezeEvent#governsAt(Instant,
+ *       Instant)}.</li>
+ * </ul>
  *
- * <p><strong>Lifting recomputes, it does not guess.</strong> The chain of each affected snapshot is
- * recomputed from what the snapshot recorded: inside the window the release needs no signature
- * ({@code OPS_LEAD} and {@code DEPT_MANAGER} pending steps are dropped), outside it needs
+ * <p><strong>Declaring.</strong> {@link #create} writes the event with status {@code ACTIVE}
+ * immediately (a scheduled freeze is recorded and visible at once) and, in the same transaction,
+ * raises the requirement of every release already in the production flow that the new freeze
+ * <em>governs</em>: the chain of its latest admission snapshot gets a {@code DEPT_MANAGER} step and
+ * a {@code READY} or {@code SUBMITTED} 变更项 is pulled back into {@code PENDING_APPROVAL}.
+ *
+ * <p><strong>Lifting and expiry recompute, they do not guess.</strong> The chain of each affected
+ * snapshot is recomputed from what the snapshot recorded: inside the window the release needs no
+ * signature ({@code OPS_LEAD} and {@code DEPT_MANAGER} pending steps are dropped), outside it needs
  * {@code OPS_LEAD} (only the pending {@code DEPT_MANAGER} is dropped). Decided steps are never
- * deleted — the approval already given stays as evidence. When a <em>different</em> freeze still
- * covers the same system, the {@code DEPT_MANAGER} step stays. If the chain then needs nothing
- * more, {@code APPROVE_ALL} moves the 变更项 to {@code READY}.
+ * deleted — the approval already given stays as evidence. While a <em>different</em> freeze still
+ * covers the same system the {@code DEPT_MANAGER} step stays. If the chain then needs nothing more,
+ * {@code APPROVE_ALL} moves the 变更项 to {@code READY}. {@link #expireDue(Instant)} applies exactly
+ * the same recompute after closing the overdue freezes, otherwise their pending second signature
+ * could never be dropped.
  *
  * <p><strong>The release reason has no column.</strong> {@code freeze_event} records
  * {@code released_by}/{@code released_at} only (design 4.2), so the mandatory release reason is
  * validated and written to the audit log; it is not stored. Adding a column would be a schema
  * change the design does not ask for.
  *
- * <p><strong>Expiry.</strong> {@link #expireDue(Instant)} closes the {@code ACTIVE} freezes whose
- * {@code end_at} passed. It deliberately does not recompute chains: a pending {@code
- * DEPT_MANAGER} step left over from an expired freeze is fail-closed (somebody can still sign it),
- * while dropping it automatically would silently weaken a requirement nobody reviewed.
+ * <p><strong>Bounded batches.</strong> Both in-flight passes read at most
+ * {@link #IN_FLIGHT_LIMIT} orders in one statement and load their latest snapshots in one more;
+ * the scan is logged when it hits the cap. A platform-wide freeze on a larger backlog therefore
+ * does not turn into an unbounded transaction, and the next declaration/unfreeze picks up the rest.
  */
 @Service
 public class FreezeService {
@@ -65,6 +88,9 @@ public class FreezeService {
 
     /** Upper bound of freezes the daily scan closes per round. */
     static final int EXPIRE_LIMIT = 200;
+
+    /** Upper bound of in-flight orders one freeze pass touches (one statement, one transaction). */
+    static final int IN_FLIGHT_LIMIT = 200;
 
     /** Upper bound of rows the history list returns; the page never shows more. */
     static final int HISTORY_LIMIT = 200;
@@ -94,16 +120,18 @@ public class FreezeService {
      * Declares a freeze and handles the releases already in flight.
      *
      * @param scope       {@code GLOBAL} or {@code SUBSYSTEM} (case-insensitive)
-     * @param subsystemId required for {@code SUBSYSTEM}, ignored for {@code GLOBAL}
+     * @param subsystemId required for {@code SUBSYSTEM}, must be absent for {@code GLOBAL}
      * @param startAt     when the freeze starts; {@code null} means now, a past instant is allowed
      *                    (a freeze declared after the fact still covers the releases in flight)
      * @param initiator   the user who declared it
-     * @throws BizException 40000 for a bad scope, a missing subsystem, a blank/oversized reason or
-     *                      an end time that is not after the start (and after now)
+     * @throws BizException 40000 for a bad scope, a missing subsystem, a subsystem on a GLOBAL
+     *                      freeze, a blank/oversized reason or an end time that is not after the
+     *                      start (and after now); 40009 the caller lacks {@code control:freeze}
      */
     @Transactional
     public FreezeView create(String scope, Long subsystemId, String reason, String impact,
                              Instant startAt, Instant endAt, String initiator) {
+        requirePerm(Permissions.CONTROL_FREEZE);
         FreezeScope parsedScope = parseScope(scope);
         Long target = requireSubsystem(parsedScope, subsystemId);
         String why = requireText(reason, "封板原因");
@@ -127,11 +155,11 @@ public class FreezeService {
             endAt, FreezeStatus.ACTIVE, null, null, now);
         FreezeEventPO po = FreezeEventPO.of(event);
         freezeMapper.insert(po);
-        FreezeView view = toView(po.toDomain(), now);
-        int pulled = applyInFlight(view.id(), parsedScope, target, now);
+        FreezeEvent stored = po.toDomain();
+        int pulled = applyInFlight(stored, now);
         log.info("freeze declared: id={}, scope={}, subsystemId={}, by={}, startAt={}, endAt={},"
-                + " pulledOrders={}", view.id(), parsedScope, target, who, start, endAt, pulled);
-        return view;
+            + " pulledOrders={}", stored.id(), parsedScope, target, who, start, endAt, pulled);
+        return toView(stored, now);
     }
 
     /**
@@ -141,10 +169,12 @@ public class FreezeService {
      * @param reason why it is lifted; required. {@code freeze_event} has no column for it, so it is
      *               validated and logged, not stored.
      * @throws BizException 40000 the freeze does not exist or the reason is missing; 40001 it is
-     *                      already {@code RELEASED}/{@code EXPIRED} (or a concurrent call won)
+     *                      already {@code RELEASED}/{@code EXPIRED} (or a concurrent call won);
+     *                      40009 the caller lacks {@code control:unfreeze}
      */
     @Transactional
     public FreezeView release(long id, String actor, String reason) {
+        requirePerm(Permissions.CONTROL_UNFREEZE);
         FreezeEventPO po = freezeMapper.selectById(id);
         if (po == null) {
             throw new BizException(BizError.PARAM_INVALID, "封板记录不存在", Map.of("id", id));
@@ -162,23 +192,23 @@ public class FreezeService {
         int rows = freezeMapper.update(null, Wrappers.<FreezeEventPO>lambdaUpdate()
             .eq(FreezeEventPO::getId, id)
             .eq(FreezeEventPO::getStatus, FreezeStatus.ACTIVE.name())
-            .set(FreezeEventPO::getStatus, FreezeStatus.RELEASED.name())
+            .set(FreezeEventPO::getStatus, released.status().name())
             .set(FreezeEventPO::getReleasedBy, who)
             .set(FreezeEventPO::getReleasedAt, now));
         if (rows != 1) {
             throw new BizException(BizError.STATE_NOT_ALLOWED, "封板状态已被并发修改，请刷新后重试",
                 Map.of("id", id));
         }
-        int recomputed = recomputeAffectedOrders(freeze, now);
-        log.info("freeze released: id={}, by={}, reason={}, recomputedOrders={}", id, who, why,
-            recomputed);
+        int ready = recomputeAffectedOrders(released, now);
+        log.info("freeze released: id={}, by={}, reason={}, recomputedToReady={}", id, who, why,
+            ready);
         return toView(released, now);
     }
 
     /**
-     * The freezes in force at {@code at} that affect one system: a GLOBAL freeze always applies, a
-     * SUBSYSTEM one only to its own. {@code subsystemId = 0} answers every freeze in force
-     * (regardless of scope), which is what the platform-wide banner shows.
+     * The freezes <em>in force</em> at {@code at} that affect one system: a GLOBAL freeze always
+     * applies, a SUBSYSTEM one only to its own. {@code subsystemId = 0} answers every freeze in
+     * force (regardless of scope), which is what the platform-wide banner shows.
      *
      * @throws BizException 40000 a negative subsystem id
      */
@@ -195,45 +225,81 @@ public class FreezeService {
     }
 
     /**
-     * The 封板 list of {@code GET /api/v1/freezes}.
+     * The freezes that <strong>govern</strong> a release of one system decided at {@code now} and
+     * planned for {@code plannedAt} (see the class javadoc; the predicate is
+     * {@link FreezeEvent#governsAt(Instant, Instant)}). {@code subsystemId = 0} answers every
+     * governing freeze regardless of scope.
      *
-     * @param active      {@code null}/true: only the freezes in force now; false: every recorded
-     *                    freeze, newest first (history)
-     * @param subsystemId 0/null: every scope; positive: GLOBAL plus that system
+     * <p>The admission step, the in-flight handling and the pre-execution review all use this one
+     * question, so a freeze declared for later cannot be missed by one of them and honoured by
+     * another.
+     *
+     * @param plannedAt the planned release time; {@code null} means "no plan known", which
+     *                  degenerates to "in force now"
      * @throws BizException 40000 a negative subsystem id
      */
-    public List<FreezeView> list(Boolean active, Long subsystemId) {
+    public List<FreezeView> governing(long subsystemId, Instant now, Instant plannedAt) {
+        if (subsystemId < 0) {
+            throw new BizException(BizError.PARAM_INVALID, "系统 ID 不能为负数",
+                Map.of("subsystemId", subsystemId));
+        }
+        Instant when = now == null ? Instant.now() : now;
+        Instant threshold = plannedAt == null || plannedAt.isBefore(when) ? when : plannedAt;
+        List<FreezeEventPO> rows = subsystemId == 0
+            ? freezeMapper.selectGoverning(when, threshold)
+            : freezeMapper.selectGoverningForSubsystem(subsystemId, when, threshold);
+        return rows.stream().map(po -> toView(po.toDomain(), when)).toList();
+    }
+
+    /**
+     * The 封板 list of {@code GET /api/v1/freezes}.
+     *
+     * @param active      {@code null}/true: only the freezes governing at {@code plannedAt} (or, with
+     *                    no planned time, the ones in force now); false: every recorded freeze,
+     *                    newest first (history)
+     * @param subsystemId 0/null: every scope; positive: GLOBAL plus that system
+     * @param plannedAt   optional: the release time the page is asking about, so a freeze declared
+     *                    for that time is listed as governing
+     * @throws BizException 40000 a negative subsystem id
+     */
+    public List<FreezeView> list(Boolean active, Long subsystemId, Instant plannedAt) {
         long target = subsystemId == null ? 0L : subsystemId;
         if (target < 0) {
             throw new BizException(BizError.PARAM_INVALID, "系统 ID 不能为负数",
                 Map.of("subsystemId", target));
         }
+        Instant now = Instant.now();
         if (active == null || active) {
-            return active(target, Instant.now());
+            return governing(target, now, plannedAt);
         }
         List<FreezeEventPO> rows = freezeMapper.selectList(historyQuery(target));
-        Instant now = Instant.now();
         return rows.stream().map(po -> toView(po.toDomain(), now)).toList();
     }
 
     /**
-     * Closes the {@code ACTIVE} freezes whose {@code end_at} passed. Called by the daily scan.
+     * Closes the {@code ACTIVE} freezes whose {@code end_at} passed and recomputes the chains they
+     * no longer require. Called by the daily scan.
      *
      * @return the number of freezes that became {@code EXPIRED}
      */
+    @Transactional
     public int expireDue(Instant now) {
         Instant when = now == null ? Instant.now() : now;
         List<FreezeEventPO> due = freezeMapper.selectDueForExpiry(when, EXPIRE_LIMIT);
         int expired = 0;
         for (FreezeEventPO po : due) {
+            // The aggregate owns the status rule: an ACTIVE freeze may expire, anything else throws.
+            FreezeEvent closed = po.toDomain().expired(when);
             int rows = freezeMapper.update(null, Wrappers.<FreezeEventPO>lambdaUpdate()
-                .eq(FreezeEventPO::getId, po.getId())
+                .eq(FreezeEventPO::getId, closed.id())
                 .eq(FreezeEventPO::getStatus, FreezeStatus.ACTIVE.name())
-                .set(FreezeEventPO::getStatus, FreezeStatus.EXPIRED.name()));
-            if (rows == 1) {
-                expired++;
-                log.info("freeze expired: id={}, endAt={}", po.getId(), po.getEndAt());
+                .set(FreezeEventPO::getStatus, closed.status().name()));
+            if (rows != 1) {
+                continue;
             }
+            expired++;
+            log.info("freeze expired: id={}, endAt={}", closed.id(), closed.endAt());
+            recomputeAffectedOrders(closed, when);
         }
         return expired;
     }
@@ -241,23 +307,32 @@ public class FreezeService {
     // ------------------------------------------------------------------ in-flight handling
 
     /**
-     * Raises the requirement of every release already in the production flow (design 4.2):
-     * "保证审批链里有一个 DEPT_MANAGER 步骤，并把 READY 拉回 PENDING_APPROVAL".
+     * Raises the requirement of every release already in the production flow that the new freeze
+     * <em>governs</em> (design 4.2): "保证审批链里有一个 DEPT_MANAGER 步骤，并把 READY 拉回
+     * PENDING_APPROVAL".
      *
      * @return the number of 变更项 pulled back into approval
      */
-    private int applyInFlight(long freezeId, FreezeScope scope, Long subsystemId, Instant now) {
-        long filter = scope == FreezeScope.GLOBAL ? 0L : subsystemId;
+    private int applyInFlight(FreezeEvent freeze, Instant now) {
+        long filter = freeze.scope() == FreezeScope.GLOBAL ? 0L : freeze.subsystemId();
+        List<InFlightOrderRow> rows = orderMapper.selectInFlight(filter, IN_FLIGHT_LIMIT);
+        warnWhenCapped(rows, "freeze", freeze.id());
+        Map<Long, AdmissionSnapshotPO> snapshots = latestSnapshots(rows);
         int pulled = 0;
-        for (InFlightOrderRow row : orderMapper.selectInFlight(filter)) {
-            AdmissionSnapshotPO snapshot = snapshotMapper.selectLatestByOrder(row.getOrderId());
+        for (InFlightOrderRow row : rows) {
+            if (!freeze.governsAt(now, row.getPlannedReleaseTime())) {
+                // The release is planned before the freeze starts and the freeze has not begun:
+                // it will be gone by then, so it is not pulled into a second signature.
+                continue;
+            }
+            AdmissionSnapshotPO snapshot = snapshots.get(row.getOrderId());
             if (snapshot == null) {
                 // Defensive: a SUBMITTED/PENDING_APPROVAL/READY item always has a snapshot (the
                 // submit use case writes one). Without it there is no chain to extend and no window
                 // fact to recompute later, so the release is left as it is rather than pulled into
                 // an approval it could never leave.
                 log.warn("freeze in-flight handling skipped: orderId={} itemId={} has no admission"
-                        + " snapshot (freezeId={})", row.getOrderId(), row.getItemId(), freezeId);
+                    + " snapshot (freezeId={})", row.getOrderId(), row.getItemId(), freeze.id());
                 continue;
             }
             approvalService.appendIfMissing(row.getOrderId(), snapshot.getId(),
@@ -290,36 +365,40 @@ public class FreezeService {
     }
 
     /**
-     * Recomputes the chain of every release affected by the lifted freeze (design 4.2, see the class
-     * javadoc). Only {@code PENDING_APPROVAL} items are recomputed: a {@code READY} one no longer
-     * needs a signature, and a {@code SUBMITTED} one has no snapshot yet.
+     * Recomputes the chain of every release affected by a freeze that no longer governs (lifted or
+     * expired): design 4.2, see the class javadoc. Only {@code PENDING_APPROVAL} items are
+     * recomputed: a {@code READY} one no longer needs a signature, and a {@code SUBMITTED} one has
+     * no snapshot yet.
      *
      * @return the number of 变更项 moved to {@code READY} by the recompute
      */
-    private int recomputeAffectedOrders(FreezeEvent lifted, Instant now) {
-        long filter = lifted.scope() == FreezeScope.GLOBAL ? 0L : lifted.subsystemId();
+    private int recomputeAffectedOrders(FreezeEvent closed, Instant now) {
+        long filter = closed.scope() == FreezeScope.GLOBAL ? 0L
+            : (closed.subsystemId() == null ? 0L : closed.subsystemId());
+        List<InFlightOrderRow> rows = orderMapper.selectInFlight(filter, IN_FLIGHT_LIMIT);
+        warnWhenCapped(rows, "unfreeze", closed.id());
+        Map<Long, AdmissionSnapshotPO> snapshots = latestSnapshots(rows);
+        FrozenSystems stillFrozen = frozenSystems(now);
         int ready = 0;
-        for (InFlightOrderRow row : orderMapper.selectInFlight(filter)) {
+        for (InFlightOrderRow row : rows) {
             if (!ItemStatus.PENDING_APPROVAL.name().equals(row.getItemStatus())) {
                 continue;
             }
-            AdmissionSnapshotPO snapshot = snapshotMapper.selectLatestByOrder(row.getOrderId());
+            AdmissionSnapshotPO snapshot = snapshots.get(row.getOrderId());
             if (snapshot == null) {
                 log.warn("unfreeze recompute skipped: orderId={} itemId={} has no admission snapshot",
                     row.getOrderId(), row.getItemId());
                 continue;
             }
             boolean inWindow = Boolean.TRUE.equals(snapshot.getInWindow());
-            // Another freeze of the same system may still be in force: then the second signature
-            // stays required and only the roles the snapshot no longer needs are dropped.
             long subsystemId = row.getSubsystemId() == null ? 0L : row.getSubsystemId();
-            boolean stillFrozen =
-                !freezeMapper.selectActiveForSubsystem(subsystemId, now).isEmpty();
             if (inWindow) {
                 approvalService.dropPending(row.getOrderId(), snapshot.getId(),
                     ApprovalRole.OPS_LEAD);
             }
-            if (!stillFrozen) {
+            // Another freeze of the same system may still be in force: then the second signature
+            // stays required and only the roles the snapshot no longer needs are dropped.
+            if (!stillFrozen.covers(subsystemId)) {
                 approvalService.dropPending(row.getOrderId(), snapshot.getId(),
                     ApprovalRole.DEPT_MANAGER);
             }
@@ -343,6 +422,56 @@ public class FreezeService {
     }
 
     /**
+     * Which systems are still frozen <em>now</em>, resolved with one query before the row loop (a
+     * per-row {@code selectActiveForSubsystem} would be an N+1 on a freeze over many releases).
+     */
+    private FrozenSystems frozenSystems(Instant now) {
+        boolean global = false;
+        Set<Long> subsystems = new HashSet<>();
+        for (FreezeEventPO po : freezeMapper.selectActive(now)) {
+            FreezeEvent event = po.toDomain();
+            if (event.scope() == FreezeScope.GLOBAL) {
+                global = true;
+            } else if (event.subsystemId() != null) {
+                subsystems.add(event.subsystemId());
+            }
+        }
+        return new FrozenSystems(global, subsystems);
+    }
+
+    private record FrozenSystems(boolean global, Set<Long> subsystems) {
+
+        boolean covers(long subsystemId) {
+            return global || subsystems.contains(subsystemId);
+        }
+    }
+
+    /** The newest snapshot of every order in {@code rows}, loaded with one statement. */
+    private Map<Long, AdmissionSnapshotPO> latestSnapshots(List<InFlightOrderRow> rows) {
+        List<Long> orderIds = rows.stream()
+            .map(InFlightOrderRow::getOrderId)
+            .filter(Objects::nonNull)
+            .distinct()
+            .toList();
+        if (orderIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, AdmissionSnapshotPO> byOrder = new HashMap<>();
+        for (AdmissionSnapshotPO po : snapshotMapper.selectLatestByOrderIds(orderIds)) {
+            byOrder.put(po.getOrderId(), po);
+        }
+        return byOrder;
+    }
+
+    private static void warnWhenCapped(List<InFlightOrderRow> rows, String phase, Long freezeId) {
+        if (rows.size() >= IN_FLIGHT_LIMIT) {
+            log.warn("{} in-flight pass reached the {} order cap (freezeId={}); the remaining"
+                + " releases are handled by the next declaration or unfreeze", phase,
+                IN_FLIGHT_LIMIT, freezeId);
+        }
+    }
+
+    /**
      * Mirrors the item's new main status on the order row with the {@code row_version} CAS the rest
      * of the flow uses. A concurrent change is logged instead of failing the freeze: the item state
      * is the authority and the order status is its projection.
@@ -362,6 +491,14 @@ public class FreezeService {
 
     // ------------------------------------------------------------------ validation and mapping
 
+    private static void requirePerm(String perm) {
+        CurrentUser user = UserContext.current();
+        if (!user.hasPerm(perm)) {
+            throw new BizException(BizError.FORBIDDEN, "无权执行该操作：" + perm,
+                Map.of("perm", perm));
+        }
+    }
+
     private static FreezeScope parseScope(String raw) {
         FreezeScope scope = FreezeScope.parse(raw);
         if (scope == null) {
@@ -373,6 +510,11 @@ public class FreezeService {
 
     private Long requireSubsystem(FreezeScope scope, Long subsystemId) {
         if (scope == FreezeScope.GLOBAL) {
+            if (subsystemId != null && subsystemId != 0) {
+                throw new BizException(BizError.PARAM_INVALID,
+                    "全局封板不能指定系统（scope=GLOBAL 会作用于所有系统）",
+                    Map.of("subsystemId", subsystemId));
+            }
             return null;
         }
         if (subsystemId == null || subsystemId <= 0) {

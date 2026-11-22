@@ -12,10 +12,14 @@ import java.util.List;
  * is what the submit use case must write: the order fields ({@code plannedAt}, {@code
  * oaTicketNo}, {@code inWindow} → {@code window_result}) and the snapshot columns ({@code
  * windowId}, {@code freezeIds}, {@code maxSeverity}, {@code checkConclusion}, {@code waiverIds},
- * {@code testConclusion}, {@code testPassBy}, {@code imageDigest}, {@code commitSha}).
+ * {@code testConclusion}, {@code testPassBy}, {@code imageDigest}).
  *
- * <p>{@code waiverExpireAt} is <em>not</em> stored: {@code admission_snapshot} has no column for
- * it, and the expiry of a waiver is mutable state that the review re-reads from
+ * <p>{@code commitSha} is deliberately absent: design 4.6 compares the <em>image digest</em> only
+ * ("实例镜像与快照 digest 不一致 → 40007"), and {@code admission_snapshot} has no commit column, so
+ * carrying the commit around would invite a check nobody agreed to.
+ *
+ * <p>{@code waiverExpireAt} is <em>not</em> stored either: {@code admission_snapshot} has no column
+ * for it, and the expiry of a waiver is mutable state that the review re-reads from
  * {@code gate_waiver} by id (design 4.6: "快照里的豁免必须仍是 APPROVED 且未过期"). Copying it into
  * the snapshot would let the two disagree.
  *
@@ -41,8 +45,7 @@ public record AdmissionPlan(
     Instant waiverExpireAt,
     String testConclusion,
     String testPassBy,
-    String imageDigest,
-    String commitSha) {
+    String imageDigest) {
 
     public AdmissionPlan {
         oaTicketNo = oaTicketNo == null ? null : oaTicketNo.trim();

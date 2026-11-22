@@ -7,10 +7,12 @@
 -- must not be "re-opened" by the new generation. Storing the snapshot id on each step is what
 -- separates the generations: the application reads, appends, drops and decides per snapshot.
 --
--- snapshot_id = 0 is the backfill value (rows written before this migration; in practice there
--- are none, because the approval table was only reachable from the Task 1 use cases). It is kept
--- as the column default only so the ALTER can run on a non-empty table; every insert made by the
--- application names the snapshot explicitly.
+-- The table is wiped first so this migration is DETERMINISTIC on a non-empty schema: every legacy
+-- row would otherwise backfill to snapshot_id = 0, and because every chain starts at step 1 the
+-- new unique key (snapshot_id, step_no) would then collide. V21 was never released (development
+-- and test schemas only, no production deployment), so there is no approval history to keep.
+
+DELETE FROM approval;
 
 ALTER TABLE approval
   ADD COLUMN snapshot_id BIGINT NOT NULL DEFAULT 0
@@ -24,3 +26,9 @@ ALTER TABLE approval
 ALTER TABLE approval
   DROP INDEX uk_approval_step,
   ADD UNIQUE KEY uk_approval_snapshot_step (snapshot_id, step_no);
+
+-- The default only existed to backfill legacy rows, and there are none now: dropping it makes a
+-- future insert that forgets snapshot_id fail loudly instead of silently landing on snapshot 0
+-- (a chain nobody would ever read again).
+ALTER TABLE approval
+  ALTER COLUMN snapshot_id DROP DEFAULT;

@@ -6,6 +6,9 @@ import com.sf.release.application.FreezeService;
 import com.sf.release.application.FreezeView;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.common.security.Permissions;
+import com.sf.release.infra.security.TestUserContext;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,6 +20,7 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -76,6 +80,15 @@ class FreezeServiceTest {
         unitB = givenUnit(subsystemB, "fz-unit-b");
         taskA = givenTask(subsystemA, "FZ-TASK-A");
         taskB = givenTask(subsystemB, "FZ-TASK-B");
+
+        // The service checks the permission point itself (not only the controller annotation).
+        TestUserContext.as(ACTOR, Set.of("DEPT_MANAGER", "OPS_LEAD"),
+            Set.of(Permissions.CONTROL_FREEZE, Permissions.CONTROL_UNFREEZE));
+    }
+
+    @AfterEach
+    void clearUser() {
+        TestUserContext.clear();
     }
 
     // ------------------------------------------------------------------ create
@@ -157,7 +170,7 @@ class FreezeServiceTest {
     void a_negative_subsystem_id_is_a_parameter_error() {
         assertBizError(() -> freezes.active(-1L, Instant.now()), BizError.PARAM_INVALID,
             "subsystemId");
-        assertBizError(() -> freezes.list(true, -1L), BizError.PARAM_INVALID, "subsystemId");
+        assertBizError(() -> freezes.list(true, -1L, null), BizError.PARAM_INVALID, "subsystemId");
     }
 
     // ------------------------------------------------------------------ in-flight handling
@@ -214,21 +227,56 @@ class FreezeServiceTest {
     }
 
     @Test
-    void a_scheduled_freeze_raises_the_requirement_at_declaration_time() {
-        // Deliberate: declaring the freeze is the governance act, and adding a signature early is
-        // fail-closed (it can only add an approval, never remove one). The in-force range still
-        // governs the admission step and the pre-execution review.
-        long itemId = givenItem(taskA, unitA, "READY");
-        long orderId = givenOrder(itemId, "PO-FZ-LATER");
-        long snapshotId = givenSnapshot(orderId, itemId, true);
+    void a_scheduled_freeze_raises_the_requirement_of_a_release_planned_inside_it() {
+        // The governing predicate (design 4.2/4.5): a freeze declared for next week already governs
+        // a release planned for next week today, so the second signature is raised now instead of
+        // being discovered at execution time (fail-closed).
         Instant now = Instant.now();
+        long itemId = givenItem(taskA, unitA, "READY");
+        long orderId = givenOrderPlanned(itemId, "PO-FZ-LATER", now.plusSeconds(5400));
+        long snapshotId = givenSnapshot(orderId, itemId, true);
 
         freezes.create("GLOBAL", null, "下周大促", null, now.plusSeconds(3600),
             now.plusSeconds(7200), ACTOR);
 
         assertThat(itemStatus(itemId)).isEqualTo("PENDING_APPROVAL");
+        assertThat(orderStatus(orderId)).isEqualTo("PENDING_APPROVAL");
         assertThat(approvals.stepViews(snapshotId)).extracting(ApprovalStepView::role)
             .containsExactly("DEPT_MANAGER");
+    }
+
+    @Test
+    void a_scheduled_freeze_does_not_pull_a_release_planned_before_it_starts() {
+        // The other side of the same predicate: that release will be gone before the freeze begins.
+        Instant now = Instant.now();
+        long itemId = givenItem(taskA, unitA, "READY");
+        long orderId = givenOrderPlanned(itemId, "PO-FZ-BEFORE", now.plusSeconds(600));
+        long snapshotId = givenSnapshot(orderId, itemId, true);
+
+        freezes.create("GLOBAL", null, "下周大促", null, now.plusSeconds(3600),
+            now.plusSeconds(7200), ACTOR);
+
+        assertThat(itemStatus(itemId)).isEqualTo("READY");
+        assertThat(approvals.stepViews(snapshotId)).isEmpty();
+    }
+
+    @Test
+    void governing_covers_a_future_freeze_for_a_later_plan_while_active_stays_strict() {
+        Instant now = Instant.now();
+        long future = freezes.create("GLOBAL", null, "下周大促", null, now.plusSeconds(3600),
+            now.plusSeconds(7200), ACTOR).id();
+
+        assertThat(freezes.governing(0L, now, null)).extracting(FreezeView::id)
+            .as("with no planned time the predicate is 'in force now'")
+            .isEmpty();
+        assertThat(freezes.governing(0L, now, now.plusSeconds(5400))).extracting(FreezeView::id)
+            .containsExactly(future);
+        assertThat(freezes.governing(0L, now, now.plusSeconds(600))).extracting(FreezeView::id)
+            .as("planned before the start: the release is gone before the freeze")
+            .isEmpty();
+        assertThat(freezes.active(0L, now)).extracting(FreezeView::id)
+            .as("active() stays the strict in-force range")
+            .isEmpty();
     }
 
     @Test
@@ -373,11 +421,49 @@ class FreezeServiceTest {
             Instant.now().plusSeconds(3600), ACTOR).id();
         freezes.release(freezeId, ACTOR, "解除");
 
-        assertThat(freezes.list(true, null)).isEmpty();
-        assertThat(freezes.list(false, null)).extracting(FreezeView::id).containsExactly(freezeId);
-        assertThat(freezes.list(false, subsystemA)).extracting(FreezeView::id)
+        assertThat(freezes.list(true, null, null)).isEmpty();
+        assertThat(freezes.list(false, null, null)).extracting(FreezeView::id)
+            .containsExactly(freezeId);
+        assertThat(freezes.list(false, subsystemA, null)).extracting(FreezeView::id)
             .as("a GLOBAL freeze belongs to every system's list")
             .containsExactly(freezeId);
+    }
+
+    @Test
+    void the_banner_list_accepts_a_planned_time_and_then_shows_a_scheduled_freeze() {
+        Instant now = Instant.now();
+        long future = freezes.create("GLOBAL", null, "下周大促", null, now.plusSeconds(3600),
+            now.plusSeconds(7200), ACTOR).id();
+
+        assertThat(freezes.list(true, null, null)).isEmpty();
+        assertThat(freezes.list(true, null, now.plusSeconds(5400))).extracting(FreezeView::id)
+            .containsExactly(future);
+    }
+
+    @Test
+    void expiry_recomputes_the_chain_so_a_pending_second_signature_can_go_away() {
+        Instant now = Instant.now();
+        long itemId = givenItem(taskA, unitA, "PENDING_APPROVAL");
+        long orderId = givenOrderWithStatus(itemId, "PO-FZ-EXPIRED", "PENDING_APPROVAL");
+        long snapshotId = givenSnapshot(orderId, itemId, true);
+        givenApproval(orderId, snapshotId, 1, "DEPT_MANAGER", "PENDING");
+        long freezeId = givenFreeze("ACTIVE", now.minusSeconds(7200), now.minusSeconds(3600));
+
+        assertThat(freezes.expireDue(now)).isEqualTo(1);
+
+        assertThat(freezeStatus(freezeId)).isEqualTo("EXPIRED");
+        assertThat(approvals.stepViews(snapshotId))
+            .as("the expired freeze no longer needs the second signature")
+            .isEmpty();
+        assertThat(itemStatus(itemId)).isEqualTo("READY");
+        assertThat(orderStatus(orderId)).isEqualTo("READY");
+    }
+
+    @Test
+    void a_global_freeze_must_not_name_a_subsystem() {
+        assertBizError(() -> freezes.create("GLOBAL", subsystemA, "大促封板", null, null,
+            Instant.now().plusSeconds(3600), ACTOR), BizError.PARAM_INVALID, "subsystemId");
+        assertThat(freezeCount()).isZero();
     }
 
     // ------------------------------------------------------------------ fixtures
@@ -425,10 +511,19 @@ class FreezeServiceTest {
     }
 
     private long givenOrderWithStatus(long itemId, String publishNo, String status) {
+        return givenOrderPlannedWithStatus(itemId, publishNo, status, Instant.now());
+    }
+
+    private long givenOrderPlanned(long itemId, String publishNo, Instant planned) {
+        return givenOrderPlannedWithStatus(itemId, publishNo, "INIT", planned);
+    }
+
+    private long givenOrderPlannedWithStatus(long itemId, String publishNo, String status,
+                                              Instant planned) {
         jdbc.update("INSERT INTO release_order (publish_no, item_id, planned_release_time,"
                 + " window_result, deadline_at, status, row_version, created_at)"
-                + " VALUES (?, ?, NOW(3), 'OUT', NOW(3), ?, 0, NOW(3))",
-            publishNo, itemId, status);
+                + " VALUES (?, ?, ?, 'OUT', ?, ?, 0, NOW(3))",
+            publishNo, itemId, Timestamp.from(planned), Timestamp.from(planned), status);
         Long id = jdbc.queryForObject("SELECT id FROM release_order WHERE publish_no = ?",
             Long.class, publishNo);
         return id == null ? 0L : id;

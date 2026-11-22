@@ -33,9 +33,14 @@ import org.springframework.web.bind.annotation.RestController;
  * (40002 for a gate/test finding, 40000 for the OA ticket or the planned time, 40001 for a repeat
  * submit), so the page can name the missing item instead of greying a button.
  *
- * <p>The controller only maps the web DTO to the service call; the permission point is enforced by
- * the interceptor annotation and again inside the service (which also has the caller identity for
- * the data-scope guard).
+ * <p><strong>The draft check writes nothing.</strong> {@code POST .../admission-check} answers the
+ * same six steps for the values currently in the submit dialog, needs only a logged-in caller
+ * inside the unit's data scope, and creates no snapshot — asking the question is not a release
+ * decision.
+ *
+ * <p>The controller only maps the web DTO to the service call; the permission point of the two
+ * writes is enforced by the interceptor annotation and again inside the service (which also has the
+ * caller identity for the data-scope guard).
  */
 @RestController
 @RequestMapping("/api/v1/releases")
@@ -62,6 +67,21 @@ public class AdmissionController {
     @GetMapping("/{publishNo}/admission")
     public ApiResponse<AdmissionResponse> admission(@PathVariable String publishNo) {
         return ApiResponse.ok(AdmissionDtos.of(submitProdService.admission(publishNo)));
+    }
+
+    /**
+     * The draft judgement of the submit dialog: same steps, no write, no snapshot. Login + unit
+     * scope only; {@link SubmitProdService#check} enforces the scope.
+     */
+    @DataScope
+    @PostMapping("/{publishNo}/admission-check")
+    public ApiResponse<AdmissionResponse> admissionCheck(@PathVariable String publishNo,
+                                                         @RequestBody(required = false)
+                                                         SubmitProdRequest request) {
+        SubmitProdRequest body = request == null ? new SubmitProdRequest(null, null) : request;
+        AdmissionView view = submitProdService.check(publishNo, body.plannedReleaseTime(),
+            body.oaTicketNo());
+        return ApiResponse.ok(AdmissionDtos.of(view));
     }
 
     @RequirePerm(Permissions.CONTROL_SUBMIT_PROD)

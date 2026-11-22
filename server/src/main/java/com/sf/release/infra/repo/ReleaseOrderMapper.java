@@ -34,6 +34,12 @@ public interface ReleaseOrderMapper extends BaseMapper<ReleaseOrderPO> {
      * one system (tech design 4.2, the 封板 in-flight handling). {@code subsystemId = 0} means "every
      * system", which is what a GLOBAL freeze affects; a positive id restricts the result to that
      * system. The caller still filters by item status when it only handles one of them.
+     *
+     * <p>The batch is capped at {@code limit} (the freeze use cases pass
+     * {@code FreezeService.IN_FLIGHT_LIMIT}): a platform-wide freeze must not walk an unbounded
+     * number of releases in one transaction. The cap and its consequence are documented in
+     * {@code FreezeService}; a run that hits it is logged and the next declaration/unfreeze picks
+     * the rest up.
      */
     @Select("""
         SELECT o.id                   AS orderId,
@@ -51,6 +57,8 @@ public interface ReleaseOrderMapper extends BaseMapper<ReleaseOrderPO> {
         WHERE i.status IN ('SUBMITTED', 'PENDING_APPROVAL', 'READY')
           AND (#{subsystemId} = 0 OR u.subsystem_id = #{subsystemId})
         ORDER BY o.id
+        LIMIT #{limit}
         """)
-    List<InFlightOrderRow> selectInFlight(@Param("subsystemId") long subsystemId);
+    List<InFlightOrderRow> selectInFlight(@Param("subsystemId") long subsystemId,
+                                          @Param("limit") int limit);
 }

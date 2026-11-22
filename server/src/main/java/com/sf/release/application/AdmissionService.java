@@ -109,7 +109,7 @@ public class AdmissionService {
             inWindow = window.inWindow();
             windowId = window.windowId();
         }
-        List<FreezeView> freezes = freezeService.active(subsystemId, now);
+        List<FreezeView> freezes = freezeService.governing(subsystemId, now, plannedAt);
         boolean frozen = !freezes.isEmpty();
         AdmissionDecision decision = AdmissionEvaluator.evaluate(new AdmissionFacts(oaTicketNo,
             plannedAt, now, GateConclusion.valueOf(gate.conclusion()), gate.waivable(),
@@ -134,11 +134,14 @@ public class AdmissionService {
             waiverCounted ? gate.waiver().expireAt() : null,
             gate.testStatus(),
             gate.testPassBy(),
-            gate.imageDigest(),
-            gate.commitSha());
+            gate.imageDigest());
     }
 
-    /** The main status of a stored item; a missing/corrupt word degrades to {@code PENDING}. */
+    /**
+     * The main status of a stored item. A blank word degrades to {@code PENDING} (the item row's
+     * documented default); an unknown word throws out of {@link ReleaseItemPO#toDomain()} and is not
+     * papered over here — a status the state machine does not know is a corrupt row, not a default.
+     */
     static ItemStatus statusOf(ReleaseItemPO item) {
         return item.toDomain().status();
     }
