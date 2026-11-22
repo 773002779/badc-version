@@ -154,6 +154,21 @@ class ItemStateMachineTest {
     }
 
     @Test
+    void a_production_rerun_starts_production_from_testing_only() {
+        // A rerun that resumes at PROD_DEPLOY reuses the approved admission, so it starts production
+        // from TESTING without a second EXECUTE approval round.
+        assertThat(transit(ItemStatus.TESTING, ItemEvent.EXECUTE_RERUN))
+            .isEqualTo(ItemStatus.PROD_DEPLOYING);
+        // The first execution still needs the READY state; TESTING alone is not executable.
+        assertThatThrownBy(() -> transit(ItemStatus.TESTING, ItemEvent.EXECUTE))
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.STATE_NOT_ALLOWED);
+        assertThatThrownBy(() -> transit(ItemStatus.GATE_PENDING, ItemEvent.EXECUTE_RERUN))
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.STATE_NOT_ALLOWED);
+    }
+
+    @Test
     void any_non_terminal_state_can_be_closed_or_exited() {
         List<ItemStatus> inFlightAndSideEnds = List.of(
             ItemStatus.PENDING, ItemStatus.BUILDING, ItemStatus.TESTING, ItemStatus.GATE_PENDING,
@@ -239,6 +254,7 @@ class ItemStateMachineTest {
         legal(matrix, ItemStatus.PENDING_APPROVAL, ItemEvent.GATE_INVALID,
             ItemStatus.GATE_FAILED);
         legal(matrix, ItemStatus.READY, ItemEvent.EXECUTE, ItemStatus.PROD_DEPLOYING);
+        legal(matrix, ItemStatus.TESTING, ItemEvent.EXECUTE_RERUN, ItemStatus.PROD_DEPLOYING);
         legal(matrix, ItemStatus.READY, ItemEvent.FREEZE_HIT, ItemStatus.PENDING_APPROVAL);
         legal(matrix, ItemStatus.READY, ItemEvent.CHECK_INVALID, ItemStatus.GATE_FAILED);
         legal(matrix, ItemStatus.PROD_DEPLOYING, ItemEvent.PROD_OK, ItemStatus.DONE);

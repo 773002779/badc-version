@@ -5,6 +5,8 @@ import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
 import com.sf.release.domain.approval.ApprovalRole;
+import com.sf.release.domain.approval.ApprovalStatus;
+import com.sf.release.domain.approval.ApprovalStep;
 import com.sf.release.domain.pipeline.InstanceStatus;
 import com.sf.release.domain.pipeline.NodeHandler;
 import com.sf.release.domain.pipeline.NodeHandlerRegistry;
@@ -14,9 +16,11 @@ import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineNode;
 import com.sf.release.domain.pipeline.TaskType;
+import com.sf.release.domain.pipeline.TriggerType;
 import com.sf.release.domain.pipeline.port.PipelineAdvancer;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.pipeline.port.TransactionRunner;
+import com.sf.release.domain.pipeline.port.UnitLease;
 import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.ItemStatus;
 import com.sf.release.infra.repo.AdmissionSnapshotMapper;
@@ -36,6 +40,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeSet;
@@ -44,7 +49,7 @@ import java.util.TreeSet;
  * 执行生产 / 恢复生产执行 of one 发布单 (tech design 4.6/4.7, {@code POST
  * /releases/{publishNo}/execute}): the human "go" of the production pipeline.
  *
- * <p><strong>One endpoint, two states.</strong>
+ * <p><strong>One endpoint, three states.</strong>
  * <ul>
  *   <li><strong>First execution</strong>: the 变更项 is {@code READY}. The review must pass, the
  *       order becomes {@code EXECUTING}, {@code EXECUTE} moves the item {@code READY →
@@ -55,9 +60,15 @@ import java.util.TreeSet;
  *       is re-run, but <strong>no second {@code EXECUTE} is applied</strong> (the state machine would
  *       reject it anyway); the instance is resumed and the handler is re-driven, which triggers the
  *       next batch.</li>
+ *   <li><strong>Production rerun</strong>: a rerun that starts at {@code PROD_DEPLOY} leaves the
+ *       item in {@code TESTING} (it reuses the previous image and its approved admission). The same
+ *       endpoint starts it with {@code EXECUTE_RERUN} ({@code TESTING → PROD_DEPLOYING}) instead of
+ *       {@code EXECUTE}, so a failed production release does not need a second approval round. A
+ *       plain {@code TESTING} item whose newest instance is not such a rerun is refused.</li>
  * </ul>
- * In both cases the instance must be paused at {@code PROD_DEPLOY}: an instance that is running is
- * already executing, and one paused elsewhere is not a production stop.
+ * In every case the instance must be paused at {@code PROD_DEPLOY}, and the unit lease must still be
+ * alive: an instance that is running is already executing, one paused elsewhere is not a production
+ * stop, and a lease that expired must be re-published rather than failed mid-advance (40006).
  *
  * <p><strong>A freeze that appeared while the item was READY pulls it back.</strong> If a freeze is
  * in force now and the snapshot did not know about it, the execute attempt appends the missing
@@ -93,6 +104,7 @@ public class ExecuteProdService {
     private final ApprovalService approvalService;
     private final ItemTransitions transitions;
     private final TransactionRunner transactionRunner;
+    private final UnitLease unitLease;
 
     public ExecuteProdService(ReleaseOrderMapper orderMapper,
                               ReleaseItemMapper itemMapper,
@@ -104,7 +116,8 @@ public class ExecuteProdService {
                               ReviewService reviewService,
                               ApprovalService approvalService,
                               ItemTransitions transitions,
-                              TransactionRunner transactionRunner) {
+                              TransactionRunner transactionRunner,
+                              UnitLease unitLease) {
         this.orderMapper = Objects.requireNonNull(orderMapper, "orderMapper must not be null");
         this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper must not be null");
         this.snapshotMapper = Objects.requireNonNull(snapshotMapper,
@@ -121,15 +134,17 @@ public class ExecuteProdService {
         this.transitions = Objects.requireNonNull(transitions, "transitions must not be null");
         this.transactionRunner = Objects.requireNonNull(transactionRunner,
             "transactionRunner must not be null");
+        this.unitLease = Objects.requireNonNull(unitLease, "unitLease must not be null");
     }
 
     /**
-     * What the execute endpoint answers: the 变更项 status after the call (always
-     * {@code PROD_DEPLOYING} on success), the node the pipeline is executing, the number of
-     * production batches the instance was generated with, and the review the call passed.
+     * What the execute endpoint answers: the 变更项 status after the call (re-read, so a handler that
+     * failed or paused right away is visible), the node the pipeline is executing, the number of
+     * production batches the instance was generated with, the review the call passed, and the
+     * instance's operator-facing reason when it stopped again.
      */
     public record ExecuteResult(String publishNo, String status, String node, int batchCount,
-                                ReviewService.ReviewView review) {
+                                ReviewService.ReviewView review, String statusReason) {
     }
 
     /**
@@ -148,10 +163,11 @@ public class ExecuteProdService {
         ReleaseItemPO item = requireItem(order);
         ScopeGuard.assertUnitInScope(item.getUnitId() == null ? 0L : item.getUnitId());
         ItemStatus status = AdmissionService.statusOf(item);
-        if (status != ItemStatus.READY && status != ItemStatus.PROD_DEPLOYING) {
+        if (status != ItemStatus.READY && status != ItemStatus.PROD_DEPLOYING
+                && status != ItemStatus.TESTING) {
             throw new BizException(BizError.STATE_NOT_ALLOWED,
-                "只有待执行（READY）或生产部署中（PROD_DEPLOYING）的变更项可以执行生产，当前是 "
-                    + status.name(),
+                "只有待执行（READY）、生产部署中（PROD_DEPLOYING）或生产重跑（TESTING）的变更项可以执行生产，"
+                    + "当前是 " + status.name(),
                 Map.of("publishNo", no, "itemId", item.getId(), "status", status.name()));
         }
         AdmissionSnapshotPO snapshot = snapshotMapper.selectLatestByOrder(order.getId());
@@ -173,6 +189,15 @@ public class ExecuteProdService {
             throw new BizException(BizError.STATE_NOT_ALLOWED, "流水线实例不存在",
                 Map.of("publishNo", no, "instanceId", head.getInstanceId()));
         }
+        boolean productionRerun = status == ItemStatus.TESTING && isProductionRerun(instance);
+        if (status == ItemStatus.TESTING && !productionRerun) {
+            // TESTING alone is not an execution state: only a rerun that resumes at PROD_DEPLOY
+            // (image + admission reused) may start production from there.
+            throw new BizException(BizError.STATE_NOT_ALLOWED,
+                "变更项处于 TESTING，但最新实例不是从生产部署（PROD_DEPLOY）开始的重跑，不能执行生产",
+                Map.of("publishNo", no, "itemId", item.getId(),
+                    "triggerType", instance.triggerType().name()));
+        }
         if (instance.status() != InstanceStatus.PAUSED
                 || instance.currentNode() != NodeType.PROD_DEPLOY) {
             throw new BizException(BizError.STATE_NOT_ALLOWED,
@@ -189,20 +214,37 @@ public class ExecuteProdService {
                 String.join("；", review.reasons()), reviewPayload(no, item, review));
         }
         if (review.blocked()) {
-            if (status == ItemStatus.READY && review.frozen()) {
+            // Only a freeze the snapshot did not know about can still need a signature (design 4.6:
+            // "封板生效，需重新审批"). A freeze the admission already recorded was signed at admission
+            // time, so a second execute attempt must not demote the item again -- that is what left
+            // a READY item stuck in PENDING_APPROVAL with nothing left to approve.
+            if (status == ItemStatus.READY && review.frozen()
+                    && introducesNewFreeze(snapshot, review)) {
                 pullBackForFreeze(order, item, snapshot, no);
             }
             throw new BizException(BizError.GATE_BLOCKED, String.join("；", review.reasons()),
                 reviewPayload(no, item, review));
         }
 
-        if (status == ItemStatus.READY) {
-            transactionRunner.inTransaction(() -> {
-                syncOrderStatus(order.getId(), ORDER_EXECUTING);
-                applyTransition(item.getId(), ItemEvent.EXECUTE, no);
-                return null;
-            });
+        // The unit lease must still be ours before anything is written: the orchestrator renews it
+        // on every advance and FAILS the instance when it is gone, which would turn a recoverable
+        // "the release is stale" into a dead pipeline. 40006 asks for a re-publish instead.
+        long unitId = item.getUnitId() == null ? 0L : item.getUnitId();
+        if (unitId > 0 && !unitLease.renew(unitId, instance.id())) {
+            throw new BizException(BizError.UNIT_LOCKED, "部署单元锁已失效，请重新发布",
+                Map.of("publishNo", no, "unitId", unitId, "instanceId", instance.id()));
         }
+
+        transactionRunner.inTransaction(() -> {
+            syncOrderStatus(order.getId(), ORDER_EXECUTING);
+            if (status == ItemStatus.READY) {
+                applyTransition(item.getId(), ItemEvent.EXECUTE, no);
+            } else if (status == ItemStatus.TESTING) {
+                // A production rerun never asks for a second approval: it reuses the admission.
+                applyTransition(item.getId(), ItemEvent.EXECUTE_RERUN, no);
+            }
+            return null;
+        });
         if (!repository.resumeInstance(instance.id(), Instant.now())) {
             throw new BizException(BizError.STATE_NOT_ALLOWED,
                 "实例状态已变化，执行未生效，请刷新后重试",
@@ -211,11 +253,18 @@ public class ExecuteProdService {
         advancer.advance(instance.id());
         reDriveProductionNode(instance.id());
         int batches = batchCount(instance.id());
+        // Re-read instead of assuming the happy path: the handler may have failed the node or paused
+        // the instance again immediately (an engine outage, a freeze at the boundary), and the page
+        // must show what actually happened plus the instance's own reason.
+        ReleaseItemPO afterItem = itemMapper.selectById(item.getId());
+        PipelineInstance afterInstance = repository.loadInstance(instance.id());
+        String afterStatus = afterItem == null ? status.name() : afterItem.getStatus();
+        String statusReason = afterInstance == null ? null : afterInstance.statusReason();
         log.info("production execution started: publishNo={}, instanceId={}, itemId={},"
                 + " previousStatus={}, batches={}, by={}", no, instance.id(), item.getId(),
             status, batches, user.userId());
-        return new ExecuteResult(no, ItemStatus.PROD_DEPLOYING.name(),
-            NodeType.PROD_DEPLOY.name(), batches, review);
+        return new ExecuteResult(no, afterStatus, NodeType.PROD_DEPLOY.name(), batches, review,
+            statusReason);
     }
 
     // ------------------------------------------------------------------ state changes
@@ -224,19 +273,35 @@ public class ExecuteProdService {
      * The freeze that appeared after admission: raise the second signature on the <em>latest</em>
      * snapshot's chain and pull the item back into approval, in one transaction so a release can
      * never be found {@code READY} with a chain that requires a signature nobody will be asked for.
+     * If the chain already carries an active (approved) {@code DEPT_MANAGER} — a freeze the snapshot
+     * did not record but whose signature was collected — nothing is added and the item is left
+     * {@code READY}: the freeze still blocks execution (40002), and the release becomes executable
+     * as soon as it is lifted. Demoting it then would leave a {@code PENDING_APPROVAL} item with no
+     * pending step, which neither approve nor execute could leave (the dead-end of review round 1).
      */
     private void pullBackForFreeze(ReleaseOrderPO order, ReleaseItemPO item,
                                    AdmissionSnapshotPO snapshot, String publishNo) {
-        transactionRunner.inTransaction(() -> {
-            approvalService.appendIfMissing(order.getId(), snapshot.getId(),
-                ApprovalRole.DEPT_MANAGER);
+        boolean demoted = Boolean.TRUE.equals(transactionRunner.inTransaction(() -> {
+            List<ApprovalStep> chain = approvalService.appendIfMissing(order.getId(),
+                snapshot.getId(), ApprovalRole.DEPT_MANAGER);
+            boolean pendingSecondSignature = chain.stream().anyMatch(step ->
+                step.role() == ApprovalRole.DEPT_MANAGER
+                    && step.status() == ApprovalStatus.PENDING);
+            if (!pendingSecondSignature) {
+                return false;
+            }
             applyTransition(item.getId(), ItemEvent.FREEZE_HIT, publishNo);
             syncOrderStatus(order.getId(), ItemStatus.PENDING_APPROVAL.name());
-            return null;
-        });
-        log.info("production execution blocked by a freeze: pulled back into approval:"
-                + " publishNo={}, itemId={}, snapshotId={}", publishNo, item.getId(),
-            snapshot.getId());
+            return true;
+        }));
+        if (demoted) {
+            log.info("production execution blocked by a new freeze: pulled back into approval:"
+                    + " publishNo={}, itemId={}, snapshotId={}", publishNo, item.getId(),
+                snapshot.getId());
+        } else {
+            log.info("production execution blocked by a freeze already covered by an approval:"
+                    + " item stays READY: publishNo={}, itemId={}", publishNo, item.getId());
+        }
     }
 
     /** Applies one main-state event, turning "the state changed under us" into a 40001. */
@@ -327,6 +392,20 @@ public class ExecuteProdService {
     }
 
     // ------------------------------------------------------------------ helpers
+
+    /** A rerun instance that resumes at {@code PROD_DEPLOY} (the release is re-deployed, re-approved). */
+    private static boolean isProductionRerun(PipelineInstance instance) {
+        TriggerType type = instance.triggerType();
+        return instance.currentNode() == NodeType.PROD_DEPLOY
+            && (type == TriggerType.RERUN_FROM_NODE || type == TriggerType.RERUN_FULL);
+    }
+
+    /** Whether any freeze in force now was <em>not</em> part of the admission snapshot (design 4.6). */
+    private static boolean introducesNewFreeze(AdmissionSnapshotPO snapshot,
+                                               ReviewService.ReviewView review) {
+        List<Long> recorded = SnapshotJson.longsOf(snapshot.getFreezeIds());
+        return review.freezeIds().stream().anyMatch(id -> !recorded.contains(id));
+    }
 
     private static Map<String, Object> reviewPayload(String publishNo, ReleaseItemPO item,
                                                      ReviewService.ReviewView review) {

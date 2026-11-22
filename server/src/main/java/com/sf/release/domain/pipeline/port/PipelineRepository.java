@@ -65,6 +65,14 @@ public interface PipelineRepository {
     boolean startNode(long nodeId, Instant now);
 
     /**
+     * Claims one task for an engine trigger: a compare-and-set {@code PENDING → RUNNING}. Returns
+     * {@code true} only for the caller that won, so a handler can call the engine <em>after</em>
+     * claiming and a concurrent callback cannot trigger the same task twice. A task that is already
+     * running, waiting or terminal is never claimed again.
+     */
+    boolean claimTaskStart(long taskId);
+
+    /**
      * Completes the node only when, at the moment of the update, every task of the node is
      * {@code SUCCESS} or {@code SKIPPED} and none is {@code FAILED}/{@code TIMEOUT}. The guard is
      * part of the SQL (not an in-memory check only) because task completions persist outside the

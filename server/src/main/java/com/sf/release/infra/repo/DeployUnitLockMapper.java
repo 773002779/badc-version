@@ -2,9 +2,13 @@ package com.sf.release.infra.repo;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.sf.release.infra.repo.po.DeployUnitLockPO;
+import com.sf.release.infra.repo.po.LockedInstanceRow;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
+
+import java.util.List;
 
 /**
  * MyBatis-Plus mapper for {@code deploy_unit_lock}.
@@ -30,4 +34,20 @@ public interface DeployUnitLockMapper extends BaseMapper<DeployUnitLockPO> {
         + " SET expire_at = DATE_SUB(expire_at, INTERVAL 1 DAY)"
         + " WHERE unit_id = #{unitId}")
     int forceExpire(@Param("unitId") long unitId);
+
+    /**
+     * The lock rows whose owning pipeline is still live ({@code RUNNING} or {@code PAUSED}), bounded
+     * by {@code limit}. The scheduler renews exactly these leases: a pause can last hours (approval,
+     * a freeze), and without renewal the four-hour lease would expire and let another publisher
+     * reclaim the unit while the release still owns it.
+     *
+     * <p>A terminal instance is not returned: its lease is supposed to end (the orchestrator releases
+     * it), and renewing it would block the unit forever.
+     */
+    @Select("SELECT l.unit_id AS unitId, l.instance_id AS instanceId"
+        + " FROM deploy_unit_lock l"
+        + " JOIN pipeline_instance pi ON pi.id = l.instance_id"
+        + " WHERE pi.status IN ('RUNNING', 'PAUSED')"
+        + " ORDER BY l.unit_id LIMIT #{limit}")
+    List<LockedInstanceRow> selectLiveOwners(@Param("limit") int limit);
 }

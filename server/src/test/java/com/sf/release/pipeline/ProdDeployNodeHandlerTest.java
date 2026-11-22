@@ -37,6 +37,12 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -251,6 +257,59 @@ class ProdDeployNodeHandlerTest {
             .containsExactlyInAnyOrder(BATCH_ONE_A, BATCH_ONE_B);
     }
 
+    @Test
+    void a_partially_started_batch_completes_only_its_still_pending_task() {
+        handler.start(repository.loadInstance(instanceId));
+        assertThat(engine.deployCalls).hasSize(2);
+
+        // The state a crash between the claim and the engine call leaves behind: one task of the
+        // batch is still PENDING while its sibling is already waiting for the engine.
+        jdbc.update("UPDATE node_task SET status = 'PENDING', external_id = NULL, external_url = NULL,"
+            + " deadline_at = NULL, started_at = NULL WHERE id = ?", taskOneB);
+
+        handler.start(repository.loadInstance(instanceId));
+
+        assertThat(engine.triggeredDeNames()).filteredOn(BATCH_ONE_A::equals)
+            .as("the waiting sibling is not triggered again")
+            .hasSize(1);
+        assertThat(engine.triggeredDeNames()).filteredOn(BATCH_ONE_B::equals)
+            .as("the pending task of the same batch is completed")
+            .hasSize(2);
+        assertThat(taskStatus(taskOneA)).isEqualTo("WAITING_EXTERNAL");
+        assertThat(taskStatus(taskOneB)).isEqualTo("WAITING_EXTERNAL");
+        assertThat(taskStatus(taskTwo)).isEqualTo("PENDING");
+    }
+
+    @Test
+    void two_concurrent_entries_trigger_every_task_at_most_once() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<?>> calls = new ArrayList<>();
+            for (int attempt = 0; attempt < 2; attempt++) {
+                calls.add(pool.submit(() -> {
+                    start.await();
+                    handler.start(repository.loadInstance(instanceId));
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> call : calls) {
+                call.get(10, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(engine.triggeredDeNames())
+            .as("the completion callbacks run outside the instance lock: a plain status check would "
+                + "let both entries trigger the same task")
+            .containsExactlyInAnyOrder(BATCH_ONE_A, BATCH_ONE_B);
+        assertThat(taskStatus(taskOneA)).isEqualTo("WAITING_EXTERNAL");
+        assertThat(taskStatus(taskOneB)).isEqualTo("WAITING_EXTERNAL");
+        assertThat(taskStatus(taskTwo)).isEqualTo("PENDING");
+    }
+
     // ------------------------------------------------------------------ fixtures
 
     /**
@@ -434,7 +493,7 @@ class ProdDeployNodeHandlerTest {
     /** Stub engine: records each production deploy trigger. */
     static final class StubEngine implements CicdEngine {
 
-        private final List<DeployCall> deployCalls = new ArrayList<>();
+        private final List<DeployCall> deployCalls = new CopyOnWriteArrayList<>();
 
         @Override
         public String name() {

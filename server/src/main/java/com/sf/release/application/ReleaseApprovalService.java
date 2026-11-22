@@ -4,7 +4,9 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
+import com.sf.release.common.security.Roles;
 import com.sf.release.domain.approval.ApprovalChain;
+import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.approval.ApprovalStep;
 import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.ItemStatus;
@@ -130,14 +132,14 @@ public class ReleaseApprovalService {
                 && submittedBy.equals(user.userId())) {
             throw new BizException(BizError.SELF_APPROVAL_FORBIDDEN,
                 "提交人不能审批自己提交的发布单，请由其他审批人操作",
-                payload(no, step, Map.of("submittedBy", submittedBy,
+                payload(no, step, roleNameOf(step.role()), Map.of("submittedBy", submittedBy,
                     "actor", user.userId())));
         }
-        String requiredRole = step.role().name();
+        String requiredRole = roleNameOf(step.role());
         if (!user.hasRole(requiredRole)) {
             throw new BizException(BizError.FORBIDDEN,
                 "第 " + step.stepNo() + " 步需要「" + step.role().label() + "」角色审批，当前账号没有该角色",
-                payload(no, step, Map.of("requiredRole", requiredRole,
+                payload(no, step, requiredRole, Map.of("requiredRole", requiredRole,
                     "actor", user.userId())));
         }
         ApprovalService.DecideResult result = approvalService.decide(snapshot.getId(),
@@ -209,14 +211,27 @@ public class ReleaseApprovalService {
 
     // ------------------------------------------------------------------ helpers
 
-    private static Map<String, Object> payload(String publishNo, ApprovalStep step,
+    private static Map<String, Object> payload(String publishNo, ApprovalStep step, String role,
                                                Map<String, Object> extra) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("publishNo", publishNo);
         payload.put("stepNo", step.stepNo());
-        payload.put("role", step.role().name());
+        payload.put("role", role);
         payload.putAll(extra);
         return payload;
+    }
+
+    /**
+     * The platform role that may sign a step. The mapping is explicit (not {@code name()}): the
+     * domain enum and {@link Roles} are two contracts that happen to share their identifiers today,
+     * and a rename on either side must be a compile error here instead of silently opening or
+     * closing a step.
+     */
+    private static String roleNameOf(ApprovalRole role) {
+        return switch (role) {
+            case OPS_LEAD -> Roles.OPS_LEAD;
+            case DEPT_MANAGER -> Roles.DEPT_MANAGER;
+        };
     }
 
     private static void requirePerm(CurrentUser user, String perm) {

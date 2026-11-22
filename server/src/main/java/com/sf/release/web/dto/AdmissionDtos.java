@@ -121,12 +121,18 @@ public final class AdmissionDtos {
         String status,
         String node,
         int batchCount,
-        Object review) {
+        Object review,
+        String statusReason) {
     }
 
+    /**
+     * The status is re-read after the pipeline was driven, so a handler that failed or paused right
+     * away is visible (with the instance's {@code statusReason}); it is not an optimistic echo of the
+     * request.
+     */
     public static ExecuteResponse of(ExecuteProdService.ExecuteResult result) {
         return new ExecuteResponse(result.publishNo(), result.status(), result.node(),
-            result.batchCount(), result.review());
+            result.batchCount(), result.review(), result.statusReason());
     }
 
     public static AdmissionResponse of(AdmissionView view) {

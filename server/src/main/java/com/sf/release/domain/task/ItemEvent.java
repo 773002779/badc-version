@@ -37,6 +37,13 @@ public enum ItemEvent {
     REJECT,
     /** Operations starts the production deployment ({@code READY → PROD_DEPLOYING}). */
     EXECUTE,
+    /**
+     * Operations starts a rerun that resumes at {@code PROD_DEPLOY} ({@code TESTING →
+     * PROD_DEPLOYING}). A from-node rerun reuses the image and the approved admission, so the
+     * release is already in {@code TESTING}; re-approving it would be a second signature for the
+     * same admission. The normal first execution stays {@link #EXECUTE}.
+     */
+    EXECUTE_RERUN,
     /** Engine callback: the production deployment succeeded ({@code PROD_DEPLOYING → DONE}). */
     PROD_OK,
     /** Engine callback: the production deployment failed ({@code PROD_DEPLOYING → FAILED}). */

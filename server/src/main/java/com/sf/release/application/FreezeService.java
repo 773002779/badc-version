@@ -49,13 +49,20 @@ import java.util.Set;
  *       banner.</li>
  *   <li>{@link #governing(long, Instant, Instant)} — <em>governing</em>: {@code ACTIVE AND end_at >
  *       now AND start_at <= max(now, plannedAt)}. This is the decision question used by the
- *       admission step, the in-flight handling and (Task 4) the pre-execution review: a freeze
+ *       admission step and the in-flight handling: a freeze
  *       declared for next week already governs a release planned for next week <em>today</em>, so
  *       the second signature is raised now instead of being discovered at execution time
  *       (fail-closed). With no planned time the predicate degenerates to the in-force one; that is
  *       what the banner passes. Both are documented on {@link FreezeEvent#governsAt(Instant,
  *       Instant)}.</li>
  * </ul>
+ *
+ * <p><strong>The pre-execution review uses the in-force predicate, not {@code governing}.</strong>
+ * A freeze declared for later already raised the second signature at admission; blocking execution
+ * for it today would stop releases planned before it starts. The review therefore asks
+ * {@link #active(long, Instant)} ("is production frozen right now", design 4.6) — the same question
+ * the batch-boundary probe asks. Every other freeze consumer (admission, in-flight raise, unfreeze
+ * recompute) uses {@code governing}.
  *
  * <p><strong>Declaring.</strong> {@link #create} writes the event with status {@code ACTIVE}
  * immediately (a scheduled freeze is recorded and visible at once) and, in the same transaction,

@@ -6,6 +6,7 @@ import com.sf.release.domain.engine.DeployCmd;
 import com.sf.release.domain.engine.EngineResult;
 import com.sf.release.domain.engine.JobKind;
 import com.sf.release.domain.engine.TriggerResult;
+import com.sf.release.domain.pipeline.port.DistributedLock;
 import com.sf.release.infra.lock.InMemoryDistributedLock;
 import com.sf.release.infra.lock.UnitLockService;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,6 +54,7 @@ class ExecuteProdServiceTest {
     private static final String OPS = "ex-ops";
     private static final String OPS_NO_SCOPE = "ex-ops-noscope";
     private static final String DEV = "ex-dev";
+    private static final String MANAGER = "ex-manager";
     private static final String PUBLISH_NO = "PO-EX-1";
     private static final String DIGEST = "sha256:exec";
     private static final String PROD_PLAN = "P-PROD-EX";
@@ -62,6 +64,7 @@ class ExecuteProdServiceTest {
     @Autowired MockMvc mvc;
     @Autowired JdbcTemplate jdbc;
     @Autowired UnitLockService unitLockService;
+    @Autowired DistributedLock distributedLock;
     @Autowired StubEngine engine;
 
     private long subsystemId;
@@ -81,6 +84,7 @@ class ExecuteProdServiceTest {
         givenUser(OPS, "OPS");
         givenUser(OPS_NO_SCOPE, "OPS");
         givenUser(DEV, "DEV");
+        givenUser(MANAGER, "DEPT_MANAGER");
 
         subsystemId = givenSubsystem("EX-SYS");
         unitId = givenUnit(subsystemId, "ex-unit");
@@ -100,6 +104,8 @@ class ExecuteProdServiceTest {
             OPS, unitId);
         jdbc.update("INSERT INTO user_scope (user_id, scope_type, scope_id) VALUES (?, 'UNIT', ?)",
             DEV, unitId);
+        jdbc.update("INSERT INTO user_scope (user_id, scope_type, scope_id) VALUES (?, 'UNIT', ?)",
+            MANAGER, unitId);
         // The unit lease the publishing flow would hold while the instance is alive.
         unitLockService.acquire(unitId, instanceId);
     }
@@ -131,7 +137,8 @@ class ExecuteProdServiceTest {
             .andExpect(jsonPath("$.data.node").value("PROD_DEPLOY"))
             .andExpect(jsonPath("$.data.batchCount").value(2))
             .andExpect(jsonPath("$.data.review.blocked").value(false))
-            .andExpect(jsonPath("$.data.review.digestMatched").value(true));
+            .andExpect(jsonPath("$.data.review.digestMatched").value(true))
+            .andExpect(jsonPath("$.data.statusReason").doesNotExist());
     }
 
     // ------------------------------------------------------------------ resume
@@ -175,6 +182,106 @@ class ExecuteProdServiceTest {
             "SELECT COUNT(*) FROM approval WHERE order_id = ? AND role = 'DEPT_MANAGER'"
                 + " AND status = 'PENDING'", Integer.class, orderId);
         assertThat(pending).as("the freeze adds the second signature").isEqualTo(1);
+    }
+
+    @Test
+    void a_freeze_the_snapshot_already_recorded_blocks_without_demoting_a_ready_release()
+            throws Exception {
+        long freezeId = givenFreezeInForce();
+        // The admission knew this freeze and its second signature was collected at admission time.
+        jdbc.update("UPDATE admission_snapshot SET frozen = 1, freeze_ids = ? WHERE order_id = ?",
+            "[" + freezeId + "]", orderId);
+        givenDecidedApproval("DEPT_MANAGER", "APPROVED");
+
+        mvc.perform(post("/api/v1/releases/{publishNo}/execute", PUBLISH_NO)
+                .header(USER_HEADER, OPS))
+            .andExpect(jsonPath("$.code").value(40002))
+            .andExpect(jsonPath("$.data.review.frozen").value(true));
+
+        assertThatItem("READY");
+        assertThatOrder("READY");
+        assertThat(instanceStatus()).isEqualTo("PAUSED");
+        assertThat(engine.deployCalls).isEmpty();
+        assertThat(pendingSecondSignatures())
+            .as("a recorded freeze must not raise a signature that was already given")
+            .isZero();
+    }
+
+    @Test
+    void a_new_freeze_demotes_once_and_a_second_attempt_leaves_the_release_ready()
+            throws Exception {
+        // Review H1 regression: a freeze in force that the snapshot did not know about raises the
+        // missing DEPT_MANAGER signature and pulls the item back. Once that signature is given the
+        // release is READY again; a second execute attempt while the freeze persists must answer
+        // 40002 and leave it READY -- not demote it again into a PENDING_APPROVAL dead-end.
+        long freezeId = givenFreezeInForce();
+
+        mvc.perform(post("/api/v1/releases/{publishNo}/execute", PUBLISH_NO)
+                .header(USER_HEADER, OPS))
+            .andExpect(jsonPath("$.code").value(40002));
+        assertThatItem("PENDING_APPROVAL");
+        assertThat(pendingSecondSignatures()).isEqualTo(1);
+
+        mvc.perform(post("/api/v1/releases/{publishNo}/approve", PUBLISH_NO)
+                .header(USER_HEADER, MANAGER)
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content("{}"))
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.itemStatus").value("READY"));
+
+        mvc.perform(post("/api/v1/releases/{publishNo}/execute", PUBLISH_NO)
+                .header(USER_HEADER, OPS))
+            .andExpect(jsonPath("$.code").value(40002));
+        assertThatItem("READY");
+        assertThat(instanceStatus()).isEqualTo("PAUSED");
+        assertThat(engine.deployCalls).isEmpty();
+        assertThat(pendingSecondSignatures()).isZero();
+
+        // Lifting the freeze makes the same release executable without another approval round.
+        jdbc.update("UPDATE freeze_event SET status = 'RELEASED', released_at = NOW(3) WHERE id = ?",
+            freezeId);
+        executeOk();
+
+        assertThatItem("PROD_DEPLOYING");
+        assertThat(engine.triggeredDeNames()).containsExactlyInAnyOrder(BATCH_ONE);
+    }
+
+    @Test
+    void an_expired_unit_lease_is_40006_instead_of_a_failed_advance() throws Exception {
+        distributedLock.unlock(UnitLockService.KEY_PREFIX + unitId);
+
+        mvc.perform(post("/api/v1/releases/{publishNo}/execute", PUBLISH_NO)
+                .header(USER_HEADER, OPS))
+            .andExpect(jsonPath("$.code").value(40006))
+            .andExpect(jsonPath("$.data.unitId").value(unitId));
+
+        assertThatItem("READY");
+        assertThat(instanceStatus()).isEqualTo("PAUSED");
+        assertThat(engine.deployCalls).isEmpty();
+    }
+
+    @Test
+    void a_production_rerun_executes_without_a_second_approval() throws Exception {
+        intoProductionRerunAtProd();
+
+        executeOk();
+
+        assertThatItem("PROD_DEPLOYING");
+        assertThat(instanceStatus()).isEqualTo("RUNNING");
+        assertThat(engine.triggeredDeNames()).containsExactlyInAnyOrder(BATCH_ONE);
+    }
+
+    @Test
+    void a_plain_testing_item_whose_instance_is_not_a_production_rerun_is_rejected()
+            throws Exception {
+        jdbc.update("UPDATE release_item SET status = 'TESTING' WHERE id = ?", itemId);
+
+        mvc.perform(post("/api/v1/releases/{publishNo}/execute", PUBLISH_NO)
+                .header(USER_HEADER, OPS))
+            .andExpect(jsonPath("$.code").value(40001))
+            .andExpect(jsonPath("$.data.status").doesNotExist())
+            .andExpect(jsonPath("$.data.triggerType").value("INITIAL"));
+        assertThat(engine.deployCalls).isEmpty();
     }
 
     @Test
@@ -262,6 +369,30 @@ class ExecuteProdServiceTest {
             + " AND target_id = ?", instanceId, batchOneDe);
         jdbc.update("UPDATE pipeline_instance SET status_reason = '批次边界封板' WHERE id = ?",
             instanceId);
+    }
+
+    /** A rerun that resumes at PROD_DEPLOY: the item is TESTING, the production node never started. */
+    private void intoProductionRerunAtProd() {
+        jdbc.update("UPDATE release_item SET status = 'TESTING' WHERE id = ?", itemId);
+        jdbc.update("UPDATE release_order SET status = 'FAILED' WHERE id = ?", orderId);
+        jdbc.update("UPDATE pipeline_instance SET trigger_type = 'RERUN_FROM_NODE' WHERE id = ?",
+            instanceId);
+    }
+
+    /** One decided DEPT_MANAGER step on the latest snapshot (the second signature of a freeze). */
+    private void givenDecidedApproval(String role, String status) {
+        Long snapshotId = jdbc.queryForObject("SELECT MAX(id) FROM admission_snapshot"
+            + " WHERE order_id = ?", Long.class, orderId);
+        jdbc.update("INSERT INTO approval (order_id, snapshot_id, step_no, role, status,"
+                + " decided_by, decided_at, comment, created_at)"
+                + " VALUES (?, ?, 1, ?, ?, ?, NOW(3), '同意', NOW(3))",
+            orderId, snapshotId, role, status, MANAGER);
+    }
+
+    private int pendingSecondSignatures() {
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM approval WHERE order_id = ?"
+            + " AND role = 'DEPT_MANAGER' AND status = 'PENDING'", Integer.class, orderId);
+        return count == null ? 0 : count;
     }
 
     private void assertThatItem(String status) {

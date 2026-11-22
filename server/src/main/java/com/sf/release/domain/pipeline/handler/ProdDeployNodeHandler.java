@@ -51,10 +51,13 @@ import java.util.TreeMap;
  * node: an operator resumes through {@code POST /releases/{publishNo}/execute} once the block is
  * gone, and the handler picks the next batch up on re-entry.
  *
- * <p><strong>Idempotent re-entry.</strong> {@link #start(PipelineInstance)} re-reads the committed
- * aggregate and ignores a batch that already has a deploy in flight, so a duplicate entry (a replay,
- * a recovery, a resume after the batch-boundary pause) never triggers a second deploy for the same
- * DE. The production deploy plan and the DE coordinates come from
+ * <p><strong>Idempotent re-entry by claim.</strong> {@link #start(PipelineInstance)} re-reads the
+ * committed aggregate and triggers only the batch's still-{@code PENDING} tasks; each one is claimed
+ * ({@code PENDING → RUNNING}, {@link PipelineRepository#claimTaskStart(long)}) <em>before</em> the
+ * engine call. A duplicate entry (a replay, a recovery, a resume after the batch-boundary pause, or a
+ * second completion callback racing the first) therefore never triggers a second deploy for the same
+ * DE, and a partially started batch completes the rest of its DEs instead of staying stuck. The
+ * production deploy plan and the DE coordinates come from
  * {@link PipelineRepository#prodDeployContextOf(long)}; the image is the one the instance already
  * built ({@code image_digest}) — production never rebuilds.
  *
@@ -98,9 +101,10 @@ public final class ProdDeployNodeHandler implements NodeHandler {
     }
 
     /**
-     * Triggers the lowest batch that still has work, after the boundary check. A batch that is
-     * already running is left alone; a batch with a failed task is left to the orchestrator's
-     * failure path; a paused or terminal instance is not driven at all.
+     * Triggers the lowest batch that still has work, after the boundary check. Only the batch's
+     * {@code PENDING} tasks are started (a task already triggered, waiting or terminal is skipped by
+     * its claim); a batch with a failed task is left to the orchestrator's failure path; a paused or
+     * terminal instance is not driven at all.
      */
     @Override
     public void start(PipelineInstance instance) {
@@ -121,11 +125,6 @@ public final class ProdDeployNodeHandler implements NodeHandler {
         }
         Batch batch = nextBatch(node);
         if (batch == null) {
-            return;
-        }
-        if (batch.inFlight()) {
-            log.debug("production batch already in flight: instanceId={}, batchNo={}",
-                current.id(), batch.batchNo());
             return;
         }
         if (batch.failed()) {
@@ -160,6 +159,15 @@ public final class ProdDeployNodeHandler implements NodeHandler {
             throw new BizException(BizError.STATE_NOT_ALLOWED, reason);
         }
         for (NodeTask task : pending) {
+            // Claim before calling the engine: the completion callbacks run outside the instance
+            // lock, so two "the batch succeeded" decisions could otherwise trigger the same task
+            // twice. Only the caller whose compare-and-set matched calls the engine; a task that is
+            // already RUNNING/WAITING_EXTERNAL is not PENDING any more and is skipped here.
+            if (!repository.claimTaskStart(task.id())) {
+                log.debug("production task was claimed by another caller: instanceId={},"
+                    + " taskId={}", current.id(), task.id());
+                continue;
+            }
             PipelineRepository.DeployTarget target = context.targetOf(task.targetId());
             if (target == null) {
                 String reason = "DE_NOT_CONFIGURED: env_de " + task.targetId()
@@ -309,13 +317,6 @@ public final class ProdDeployNodeHandler implements NodeHandler {
 
         Batch {
             tasks = List.copyOf(tasks);
-        }
-
-        /** A deploy of this batch was triggered and has not finished yet. */
-        boolean inFlight() {
-            return tasks.stream().anyMatch(task ->
-                task.status() == NodeTaskStatus.RUNNING
-                    || task.status() == NodeTaskStatus.WAITING_EXTERNAL);
         }
 
         /** A task of this batch failed/timed out; the orchestrator fails the node from here. */

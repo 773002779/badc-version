@@ -15,6 +15,25 @@ import java.util.List;
 public interface PipelineNodeMapper extends BaseMapper<PipelineNodePO> {
 
     /**
+     * Claims one task for an engine trigger: {@code PENDING → RUNNING} in a single compare-and-set,
+     * bumping {@code attempt} as the "this row was started" marker.
+     *
+     * <p><strong>Why a claim, not a status check.</strong> A node handler runs outside the instance
+     * lock (the orchestrator holds it only for the entry and the visit), so two completion callbacks
+     * can decide "the batch succeeded" at the same time and both start the next batch. Claiming each
+     * task <em>before</em> the engine call makes the trigger exactly-once: only the caller whose
+     * update matched may call {@code triggerDeploy}, the loser skips the task.
+     *
+     * <p>The {@code attempt} counter is bumped for the row-liveness marker; the command keeps the
+     * attempt number the task was generated with (a retry is a new row, design §5.4).
+     *
+     * @return 1 when this caller claimed the task, 0 when it was not {@code PENDING} any more
+     */
+    @Update("UPDATE node_task SET status = 'RUNNING', attempt = attempt + 1, started_at = #{now}"
+        + " WHERE id = #{taskId} AND status = 'PENDING'")
+    int claimTaskStart(@Param("taskId") long taskId, @Param("now") Instant now);
+
+    /**
      * Completes a node only when every counted task is {@code SUCCESS} (or {@code SKIPPED}) at
      * the instant of the update (tech design §5.2 rule 2), and only when at least one counted
      * task exists. Two rules are mirrored from the domain fold:

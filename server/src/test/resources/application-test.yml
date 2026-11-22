@@ -35,6 +35,9 @@ release:
   freeze:
     # Same reason: the daily 封板 expiry scan is invoked explicitly by the freeze tests.
     expiry-enabled: false
+  unit-lease:
+    # Same reason: the 60s unit lease renewer is invoked explicitly by its own test.
+    renew-enabled: false
   redis:
     enabled: false
   pipeline:

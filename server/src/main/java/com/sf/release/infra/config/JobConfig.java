@@ -8,10 +8,13 @@ import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.port.DistributedLock;
 import com.sf.release.domain.pipeline.port.ItemFailureRepairer;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
+import com.sf.release.domain.pipeline.port.UnitLease;
 import com.sf.release.infra.engine.EngineRegistry;
 import com.sf.release.infra.job.FreezeExpiryJob;
 import com.sf.release.infra.job.GateReconcileJob;
 import com.sf.release.infra.job.ReconcileJob;
+import com.sf.release.infra.job.UnitLeaseRenewJob;
+import com.sf.release.infra.repo.DeployUnitLockMapper;
 import com.sf.release.infra.repo.NodeTaskMapper;
 import com.sf.release.infra.repo.PipelineInstanceMapper;
 import com.sf.release.infra.repo.PipelineNodeMapper;
@@ -70,5 +73,19 @@ public class JobConfig {
         matchIfMissing = true)
     public FreezeExpiryJob freezeExpiryJob(FreezeService freezeService) {
         return new FreezeExpiryJob(freezeService);
+    }
+
+    /**
+     * The 60s 部署单元 lease renewer (review M2): a pipeline paused at {@code PROD_DEPLOY} for
+     * approval/freeze/batch reasons must keep its four-hour unit lease, otherwise another publish
+     * could take the unit while the release still owns it. Its own switch, like the other jobs: the
+     * test profile turns it off and the tests call {@link UnitLeaseRenewJob#renewLeases()} explicitly.
+     */
+    @Bean
+    @ConditionalOnProperty(name = "release.unit-lease.renew-enabled", havingValue = "true",
+        matchIfMissing = true)
+    public UnitLeaseRenewJob unitLeaseRenewJob(DeployUnitLockMapper lockMapper,
+                                               UnitLease unitLease) {
+        return new UnitLeaseRenewJob(lockMapper, unitLease);
     }
 }

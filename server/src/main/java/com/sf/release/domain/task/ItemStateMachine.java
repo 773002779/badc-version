@@ -111,6 +111,9 @@ public final class ItemStateMachine {
         put(matrix, ItemStatus.PENDING_APPROVAL, ItemEvent.REJECT, ItemStatus.REJECTED);
         put(matrix, ItemStatus.PENDING_APPROVAL, ItemEvent.GATE_INVALID, ItemStatus.GATE_FAILED);
         put(matrix, ItemStatus.READY, ItemEvent.EXECUTE, ItemStatus.PROD_DEPLOYING);
+        // A rerun that resumes at PROD_DEPLOY is already TESTING (image + admission reused); the
+        // operator's execution starts production from there without a second approval round.
+        put(matrix, ItemStatus.TESTING, ItemEvent.EXECUTE_RERUN, ItemStatus.PROD_DEPLOYING);
         put(matrix, ItemStatus.READY, ItemEvent.FREEZE_HIT, ItemStatus.PENDING_APPROVAL);
         put(matrix, ItemStatus.READY, ItemEvent.CHECK_INVALID, ItemStatus.GATE_FAILED);
         put(matrix, ItemStatus.PROD_DEPLOYING, ItemEvent.PROD_OK, ItemStatus.DONE);

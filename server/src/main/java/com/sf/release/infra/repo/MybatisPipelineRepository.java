@@ -206,6 +206,11 @@ public class MybatisPipelineRepository implements PipelineRepository {
     }
 
     @Override
+    public boolean claimTaskStart(long taskId) {
+        return nodeMapper.claimTaskStart(taskId, Instant.now()) == 1;
+    }
+
+    @Override
     public boolean finishNodeIfComplete(long nodeId, Instant now) {
         return nodeMapper.completeIfAllTasksSucceeded(nodeId, now) == 1;
     }
