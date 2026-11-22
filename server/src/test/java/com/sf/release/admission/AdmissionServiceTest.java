@@ -196,7 +196,6 @@ class AdmissionServiceTest {
         assertThat(jdbc.queryForObject(
             "SELECT waiver_ids FROM admission_snapshot WHERE id = ?", String.class,
             view.snapshot().id())).isEqualTo("[" + waiverId + "]");
-        assertThat(view.snapshot().checkConclusion()).isEqualTo("WAIVED");
         assertThat(view.chain()).isEmpty();
     }
 

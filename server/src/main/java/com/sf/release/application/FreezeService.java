@@ -28,6 +28,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -65,21 +67,27 @@ import java.util.Set;
  * snapshot is recomputed from what the snapshot recorded: inside the window the release needs no
  * signature ({@code OPS_LEAD} and {@code DEPT_MANAGER} pending steps are dropped), outside it needs
  * {@code OPS_LEAD} (only the pending {@code DEPT_MANAGER} is dropped). Decided steps are never
- * deleted — the approval already given stays as evidence. While a <em>different</em> freeze still
- * covers the same system the {@code DEPT_MANAGER} step stays. If the chain then needs nothing more,
- * {@code APPROVE_ALL} moves the 变更项 to {@code READY}. {@link #expireDue(Instant)} applies exactly
- * the same recompute after closing the overdue freezes, otherwise their pending second signature
- * could never be dropped.
+ * deleted — the approval already given stays as evidence. Whether the second signature is still
+ * required is decided by the <em>same</em> governing predicate that raised it, evaluated per order
+ * at its own planned time: an unrelated freeze expiring must not drop a step that another,
+ * still-governing freeze requires. If the chain then needs nothing more, {@code APPROVE_ALL} moves
+ * the 变更项 to {@code READY}. {@link #expireDue(Instant)} closes all overdue freezes first and then
+ * applies exactly that recompute once, so their pending second signatures can go away.
  *
  * <p><strong>The release reason has no column.</strong> {@code freeze_event} records
  * {@code released_by}/{@code released_at} only (design 4.2), so the mandatory release reason is
  * validated and written to the audit log; it is not stored. Adding a column would be a schema
  * change the design does not ask for.
  *
- * <p><strong>Bounded batches.</strong> Both in-flight passes read at most
- * {@link #IN_FLIGHT_LIMIT} orders in one statement and load their latest snapshots in one more;
- * the scan is logged when it hits the cap. A platform-wide freeze on a larger backlog therefore
- * does not turn into an unbounded transaction, and the next declaration/unfreeze picks up the rest.
+ * <p><strong>Bounded, paged in-flight scans.</strong> Both in-flight passes walk the affected
+ * orders with keyset pagination ({@code o.id > lastId}) in pages of
+ * {@link #IN_FLIGHT_PAGE_SIZE}, until the last page, capped at
+ * {@link #IN_FLIGHT_PAGE_SIZE} x {@link #IN_FLIGHT_MAX_PAGES} orders per pass. A pass that reaches
+ * the cap logs a WARN and stops: the orders beyond it keep their current chain (they are still
+ * governed by the freeze for admission and the pre-execution review — those read the freeze table,
+ * not the scan — but their chains were not extended in this pass), and the next declaration or
+ * unfreeze starts the scan from the lowest id again. The cap is a blast-radius guard for a
+ * platform-wide freeze on an unusually large backlog, not the normal operating point.
  */
 @Service
 public class FreezeService {
@@ -89,8 +97,11 @@ public class FreezeService {
     /** Upper bound of freezes the daily scan closes per round. */
     static final int EXPIRE_LIMIT = 200;
 
-    /** Upper bound of in-flight orders one freeze pass touches (one statement, one transaction). */
-    static final int IN_FLIGHT_LIMIT = 200;
+    /** Rows read per in-flight page. */
+    static final int IN_FLIGHT_PAGE_SIZE = 200;
+
+    /** Hard cap of one in-flight pass: {@code PAGE_SIZE x MAX_PAGES} orders (2000). */
+    static final int IN_FLIGHT_MAX_PAGES = 10;
 
     /** Upper bound of rows the history list returns; the page never shows more. */
     static final int HISTORY_LIMIT = 200;
@@ -199,7 +210,7 @@ public class FreezeService {
             throw new BizException(BizError.STATE_NOT_ALLOWED, "封板状态已被并发修改，请刷新后重试",
                 Map.of("id", id));
         }
-        int ready = recomputeAffectedOrders(released, now);
+        int ready = recomputeAffectedOrders(List.of(released), now);
         log.info("freeze released: id={}, by={}, reason={}, recomputedToReady={}", id, who, why,
             ready);
         return toView(released, now);
@@ -286,22 +297,27 @@ public class FreezeService {
     public int expireDue(Instant now) {
         Instant when = now == null ? Instant.now() : now;
         List<FreezeEventPO> due = freezeMapper.selectDueForExpiry(when, EXPIRE_LIMIT);
-        int expired = 0;
+        List<FreezeEvent> closed = new ArrayList<>(due.size());
         for (FreezeEventPO po : due) {
             // The aggregate owns the status rule: an ACTIVE freeze may expire, anything else throws.
-            FreezeEvent closed = po.toDomain().expired(when);
+            FreezeEvent event = po.toDomain().expired(when);
             int rows = freezeMapper.update(null, Wrappers.<FreezeEventPO>lambdaUpdate()
-                .eq(FreezeEventPO::getId, closed.id())
+                .eq(FreezeEventPO::getId, event.id())
                 .eq(FreezeEventPO::getStatus, FreezeStatus.ACTIVE.name())
-                .set(FreezeEventPO::getStatus, closed.status().name()));
+                .set(FreezeEventPO::getStatus, event.status().name()));
             if (rows != 1) {
                 continue;
             }
-            expired++;
-            log.info("freeze expired: id={}, endAt={}", closed.id(), closed.endAt());
-            recomputeAffectedOrders(closed, when);
+            closed.add(event);
+            log.info("freeze expired: id={}, endAt={}", event.id(), event.endAt());
         }
-        return expired;
+        if (closed.isEmpty()) {
+            return 0;
+        }
+        // One recompute pass for the whole round: all rows are already EXPIRED above, so the
+        // "still governed" checks see the post-expiry state.
+        recomputeAffectedOrders(closed, when);
+        return closed.size();
     }
 
     // ------------------------------------------------------------------ in-flight handling
@@ -315,8 +331,7 @@ public class FreezeService {
      */
     private int applyInFlight(FreezeEvent freeze, Instant now) {
         long filter = freeze.scope() == FreezeScope.GLOBAL ? 0L : freeze.subsystemId();
-        List<InFlightOrderRow> rows = orderMapper.selectInFlight(filter, IN_FLIGHT_LIMIT);
-        warnWhenCapped(rows, "freeze", freeze.id());
+        List<InFlightOrderRow> rows = loadInFlight(Set.of(filter));
         Map<Long, AdmissionSnapshotPO> snapshots = latestSnapshots(rows);
         int pulled = 0;
         for (InFlightOrderRow row : rows) {
@@ -370,15 +385,20 @@ public class FreezeService {
      * recomputed: a {@code READY} one no longer needs a signature, and a {@code SUBMITTED} one has
      * no snapshot yet.
      *
+     * <p><strong>Symmetry with the raise.</strong> The second signature is dropped only when no
+     * freeze <em>governs</em> the order any more, evaluated at that order's own planned time with the
+     * same predicate that raised it ({@link #governing(long, Instant, Instant)}). An unrelated freeze
+     * expiring therefore cannot drop a step that another freeze, declared for the order's planned
+     * time, still requires.
+     *
+     * @param closed the freezes that just stopped governing (one from a release, several from the
+     *               expiry scan); all of them are already non-ACTIVE in the database
      * @return the number of 变更项 moved to {@code READY} by the recompute
      */
-    private int recomputeAffectedOrders(FreezeEvent closed, Instant now) {
-        long filter = closed.scope() == FreezeScope.GLOBAL ? 0L
-            : (closed.subsystemId() == null ? 0L : closed.subsystemId());
-        List<InFlightOrderRow> rows = orderMapper.selectInFlight(filter, IN_FLIGHT_LIMIT);
-        warnWhenCapped(rows, "unfreeze", closed.id());
+    private int recomputeAffectedOrders(Collection<FreezeEvent> closed, Instant now) {
+        List<InFlightOrderRow> rows = loadInFlight(filtersOf(closed));
         Map<Long, AdmissionSnapshotPO> snapshots = latestSnapshots(rows);
-        FrozenSystems stillFrozen = frozenSystems(now);
+        Map<GovernorKey, Boolean> governed = new HashMap<>();
         int ready = 0;
         for (InFlightOrderRow row : rows) {
             if (!ItemStatus.PENDING_APPROVAL.name().equals(row.getItemStatus())) {
@@ -391,14 +411,13 @@ public class FreezeService {
                 continue;
             }
             boolean inWindow = Boolean.TRUE.equals(snapshot.getInWindow());
-            long subsystemId = row.getSubsystemId() == null ? 0L : row.getSubsystemId();
             if (inWindow) {
                 approvalService.dropPending(row.getOrderId(), snapshot.getId(),
                     ApprovalRole.OPS_LEAD);
             }
-            // Another freeze of the same system may still be in force: then the second signature
-            // stays required and only the roles the snapshot no longer needs are dropped.
-            if (!stillFrozen.covers(subsystemId)) {
+            // Another freeze may still govern this release (possibly one declared for later and
+            // matching the planned time): then the second signature stays.
+            if (!stillGoverned(row, now, governed)) {
                 approvalService.dropPending(row.getOrderId(), snapshot.getId(),
                     ApprovalRole.DEPT_MANAGER);
             }
@@ -421,29 +440,80 @@ public class FreezeService {
         return ready;
     }
 
-    /**
-     * Which systems are still frozen <em>now</em>, resolved with one query before the row loop (a
-     * per-row {@code selectActiveForSubsystem} would be an N+1 on a freeze over many releases).
-     */
-    private FrozenSystems frozenSystems(Instant now) {
-        boolean global = false;
-        Set<Long> subsystems = new HashSet<>();
-        for (FreezeEventPO po : freezeMapper.selectActive(now)) {
-            FreezeEvent event = po.toDomain();
-            if (event.scope() == FreezeScope.GLOBAL) {
-                global = true;
-            } else if (event.subsystemId() != null) {
-                subsystems.add(event.subsystemId());
+    /** The scan filters of a closed set: any GLOBAL freeze means "every system". */
+    private static Set<Long> filtersOf(Collection<FreezeEvent> closed) {
+        Set<Long> filters = new HashSet<>();
+        for (FreezeEvent freeze : closed) {
+            if (freeze.scope() == FreezeScope.GLOBAL || freeze.subsystemId() == null) {
+                return Set.of(0L);
             }
+            filters.add(freeze.subsystemId());
         }
-        return new FrozenSystems(global, subsystems);
+        return filters.isEmpty() ? Set.of(0L) : filters;
     }
 
-    private record FrozenSystems(boolean global, Set<Long> subsystems) {
-
-        boolean covers(long subsystemId) {
-            return global || subsystems.contains(subsystemId);
+    /**
+     * Whether a freeze still governs {@code row} at its planned time. One query per distinct
+     * {@code (subsystemId, plannedAt)} pair, not per order: the {@code cache} is shared by the loop.
+     */
+    private boolean stillGoverned(InFlightOrderRow row, Instant now,
+                                  Map<GovernorKey, Boolean> cache) {
+        long subsystemId = row.getSubsystemId() == null ? 0L : row.getSubsystemId();
+        Instant planned = row.getPlannedReleaseTime();
+        GovernorKey key = new GovernorKey(subsystemId, planned);
+        Boolean cached = cache.get(key);
+        if (cached != null) {
+            return cached;
         }
+        Instant threshold = planned == null || planned.isBefore(now) ? now : planned;
+        boolean frozen = subsystemId > 0
+            ? !freezeMapper.selectGoverningForSubsystem(subsystemId, now, threshold).isEmpty()
+            : !freezeMapper.selectGoverning(now, threshold).isEmpty();
+        cache.put(key, frozen);
+        return frozen;
+    }
+
+    /** Cache key of the "still governed" question: one system, one planned time. */
+    private record GovernorKey(long subsystemId, Instant plannedAt) {
+    }
+
+    /**
+     * The in-flight orders of one pass, walked page by page with keyset pagination
+     * ({@code o.id > lastId}) so no order is skipped by re-reading the same first page. A pass stops
+     * after {@link #IN_FLIGHT_MAX_PAGES} pages and logs a WARN; the orders beyond the cap keep their
+     * current chain (they are still governed by the freeze for admission and the pre-execution
+     * review) and the next pass starts again from the lowest order id.
+     */
+    private List<InFlightOrderRow> loadInFlight(Set<Long> filters) {
+        List<InFlightOrderRow> rows = new ArrayList<>();
+        Set<Long> seen = new HashSet<>();
+        for (long filter : filters) {
+            long afterId = 0;
+            int pages = 0;
+            boolean exhausted = false;
+            while (pages < IN_FLIGHT_MAX_PAGES) {
+                List<InFlightOrderRow> page = orderMapper.selectInFlight(filter, afterId,
+                    IN_FLIGHT_PAGE_SIZE);
+                for (InFlightOrderRow row : page) {
+                    if (seen.add(row.getOrderId())) {
+                        rows.add(row);
+                    }
+                }
+                pages++;
+                if (page.size() < IN_FLIGHT_PAGE_SIZE) {
+                    exhausted = true;
+                    break;
+                }
+                afterId = page.get(page.size() - 1).getOrderId();
+            }
+            if (!exhausted) {
+                log.warn("in-flight scan stopped at the {} page cap ({} orders, filter={}); the"
+                        + " remaining orders keep their chain — they are still governed by the"
+                        + " freeze for admission and the pre-execution review", IN_FLIGHT_MAX_PAGES,
+                    IN_FLIGHT_PAGE_SIZE * IN_FLIGHT_MAX_PAGES, filter);
+            }
+        }
+        return rows;
     }
 
     /** The newest snapshot of every order in {@code rows}, loaded with one statement. */
@@ -461,14 +531,6 @@ public class FreezeService {
             byOrder.put(po.getOrderId(), po);
         }
         return byOrder;
-    }
-
-    private static void warnWhenCapped(List<InFlightOrderRow> rows, String phase, Long freezeId) {
-        if (rows.size() >= IN_FLIGHT_LIMIT) {
-            log.warn("{} in-flight pass reached the {} order cap (freezeId={}); the remaining"
-                + " releases are handled by the next declaration or unfreeze", phase,
-                IN_FLIGHT_LIMIT, freezeId);
-        }
     }
 
     /**

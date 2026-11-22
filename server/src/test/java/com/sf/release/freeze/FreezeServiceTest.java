@@ -460,6 +460,52 @@ class FreezeServiceTest {
     }
 
     @Test
+    void an_expiring_unrelated_freeze_keeps_the_signature_a_declared_freeze_still_requires() {
+        // Regression: the raise uses `governing`, so the drop must use it too. A future freeze that
+        // governs the planned time keeps DEPT_MANAGER even when a different, in-force freeze expires.
+        Instant now = Instant.now();
+        long itemId = givenItem(taskA, unitA, "PENDING_APPROVAL");
+        long orderId = givenOrderPlannedWithStatus(itemId, "PO-FZ-KEEP", "PENDING_APPROVAL",
+            now.plusSeconds(7200));
+        long snapshotId = givenSnapshot(orderId, itemId, true);
+        long future = freezes.create("GLOBAL", null, "下周大促", null, now.plusSeconds(3600),
+            now.plusSeconds(3 * 3600), ACTOR).id();
+        assertThat(approvals.stepViews(snapshotId)).extracting(ApprovalStepView::role)
+            .containsExactly("DEPT_MANAGER");
+        long unrelated = givenFreeze("ACTIVE", now.minusSeconds(7200), now.minusSeconds(3600));
+
+        assertThat(freezes.expireDue(now)).isEqualTo(1);
+
+        assertThat(freezeStatus(unrelated)).isEqualTo("EXPIRED");
+        assertThat(freezeStatus(future)).isEqualTo("ACTIVE");
+        assertThat(approvals.stepViews(snapshotId)).extracting(ApprovalStepView::role)
+            .as("the declared freeze still governs the planned time")
+            .containsExactly("DEPT_MANAGER");
+        assertThat(itemStatus(itemId)).isEqualTo("PENDING_APPROVAL");
+    }
+
+    @Test
+    void a_freeze_that_starts_after_the_plan_does_not_keep_the_signature() {
+        Instant now = Instant.now();
+        long itemId = givenItem(taskA, unitA, "PENDING_APPROVAL");
+        long orderId = givenOrderPlannedWithStatus(itemId, "PO-FZ-DROP", "PENDING_APPROVAL",
+            now.plusSeconds(600));
+        long snapshotId = givenSnapshot(orderId, itemId, true);
+        givenApproval(orderId, snapshotId, 1, "DEPT_MANAGER", "PENDING");
+        long future = freezes.create("GLOBAL", null, "下周大促", null, now.plusSeconds(3600),
+            now.plusSeconds(7200), ACTOR).id();
+        assertThat(approvals.stepViews(snapshotId)).as("the seeded step predates this rule")
+            .extracting(ApprovalStepView::role).containsExactly("DEPT_MANAGER");
+
+        freezes.release(future, ACTOR, "取消下周封板");
+
+        assertThat(approvals.stepViews(snapshotId))
+            .as("no freeze governs a plan that ends before the freeze starts")
+            .isEmpty();
+        assertThat(itemStatus(itemId)).isEqualTo("READY");
+    }
+
+    @Test
     void a_global_freeze_must_not_name_a_subsystem() {
         assertBizError(() -> freezes.create("GLOBAL", subsystemA, "大促封板", null, null,
             Instant.now().plusSeconds(3600), ACTOR), BizError.PARAM_INVALID, "subsystemId");

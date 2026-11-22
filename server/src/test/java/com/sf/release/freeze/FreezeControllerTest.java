@@ -10,6 +10,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.time.Instant;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -206,6 +208,29 @@ class FreezeControllerTest {
     }
 
     @Test
+    void the_list_with_a_planned_time_reports_a_future_freeze_as_governing() throws Exception {
+        Instant now = Instant.now();
+        mvc.perform(post("/api/v1/freezes")
+                .header(USER_HEADER, MANAGER)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"scope\":\"GLOBAL\",\"reason\":\"下周大促\","
+                    + "\"startAt\":\"" + now.plusSeconds(3600) + "\","
+                    + "\"endAt\":\"" + now.plusSeconds(7200) + "\"}"))
+            .andExpect(jsonPath("$.code").value(0));
+
+        mvc.perform(get("/api/v1/freezes").header(USER_HEADER, TESTER))
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data").isEmpty());
+
+        mvc.perform(get("/api/v1/freezes").param("plannedAt", now.plusSeconds(5400).toString())
+                .header(USER_HEADER, TESTER))
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.length()").value(1))
+            .andExpect(jsonPath("$.data[0].status").value("ACTIVE"))
+            .andExpect(jsonPath("$.data[0].active").value(false));
+    }
+
+    @Test
     void a_negative_subsystem_filter_is_40000() throws Exception {
         mvc.perform(get("/api/v1/freezes").param("subsystemId", "-1")
                 .header(USER_HEADER, TESTER))
@@ -216,7 +241,7 @@ class FreezeControllerTest {
     // ------------------------------------------------------------------ fixtures
 
     private static String freezeBody(String scope, Long subsystemId) {
-        String end = java.time.Instant.now().plusSeconds(3600).toString();
+        String end = Instant.now().plusSeconds(3600).toString();
         return "{\"scope\":\"" + scope + "\",\"reason\":\"大促封板\",\"impact\":\"全平台只读\","
             + "\"subsystemId\":" + subsystemId + ",\"endAt\":\"" + end + "\"}";
     }

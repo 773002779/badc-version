@@ -11,8 +11,8 @@ import java.util.List;
  * <p>The decision is the pure verdict ({@link AdmissionDecision}); everything else in this record
  * is what the submit use case must write: the order fields ({@code plannedAt}, {@code
  * oaTicketNo}, {@code inWindow} → {@code window_result}) and the snapshot columns ({@code
- * windowId}, {@code freezeIds}, {@code maxSeverity}, {@code checkConclusion}, {@code waiverIds},
- * {@code testConclusion}, {@code testPassBy}, {@code imageDigest}).
+ * windowId}, {@code freezeIds} → {@code frozen}, {@code maxSeverity}, {@code checkConclusion},
+ * {@code waiverIds}, {@code testConclusion}, {@code testPassBy}, {@code imageDigest}).
  *
  * <p>{@code commitSha} is deliberately absent: design 4.6 compares the <em>image digest</em> only
  * ("实例镜像与快照 digest 不一致 → 40007"), and {@code admission_snapshot} has no commit column, so
@@ -53,7 +53,8 @@ public record AdmissionPlan(
         waiverIds = waiverIds == null ? List.of() : List.copyOf(waiverIds);
     }
 
-    /** True when at least one freeze was in force at submission time. */
+    /** True when at least one freeze <em>governs</em> this release (the governing predicate, not the
+     * in-force range). */
     public boolean frozen() {
         return !freezeIds.isEmpty();
     }

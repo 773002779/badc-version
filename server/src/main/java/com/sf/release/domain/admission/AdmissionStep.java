@@ -23,7 +23,8 @@ public record AdmissionStep(Key key, boolean passed, String reason, String nextA
         OA_TICKET,
         /** 发布窗口: inside needs nothing, outside adds {@code OPS_LEAD}. */
         WINDOW,
-        /** 封板: in force now adds {@code DEPT_MANAGER} on top. */
+        /** 封板: a freeze that governs the release (declared, not ended, starting no later than the
+         * later of now and the planned time) adds {@code DEPT_MANAGER} on top. */
         FREEZE,
         /** 计划发布时间: after now and at most 30 days ahead. */
         PLANNED_TIME;

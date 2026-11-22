@@ -23,10 +23,11 @@ import java.util.regex.Pattern;
  *       the test gate).</li>
  *   <li><strong>OA 工单号</strong> — required and matching {@link #OA_TICKET} (design 4.3).</li>
  *   <li><strong>发布窗口</strong> — inside needs nothing; outside adds {@code OPS_LEAD}.</li>
- *   <li><strong>封板</strong> — in force <em>at submission time</em> adds {@code DEPT_MANAGER} on
- *       top. The design evaluates the freeze at submission, not at the planned instant: the
- *       signature answers "is it acceptable to release while production is frozen", which is a
- *       question of the moment the release is handed over.</li>
+ *   <li><strong>封板</strong> — a freeze that <em>governs</em> the release adds {@code DEPT_MANAGER}
+ *       on top. Governing is {@code ACTIVE}, not ended, and starting no later than
+ *       {@code max(now, plannedAt)} (see {@code FreezeEvent.governsAt}); the facts are resolved by
+ *       the application layer with that one predicate, so a freeze declared for the planned week
+ *       already raises the requirement at submission (fail-closed).</li>
  *   <li><strong>计划发布时间</strong> — after now, at most {@link #MAX_HORIZON} ahead.</li>
  * </ol>
  *

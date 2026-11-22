@@ -30,12 +30,14 @@ import java.util.Map;
  * control:submit-prod} and the deployment-unit scope, then calls {@link #plan}. A future "check
  * before submit" preview endpoint must do the same.
  *
- * <p><strong>The freeze is judged at submission time, the window at the planned time.</strong> The
- * window question is "will the release happen inside an allowed slot" and uses the planned instant;
- * the freeze question is "is production frozen while we hand this release over" and uses now. That
- * asymmetry is in design 4.5 (step 4 uses the planned time, step 5 says "生效中") and is deliberate:
- * a freeze that starts later must not block the submission, it only adds a signature when the
- * release is actually handed over during the freeze.
+ * <p><strong>The freeze is judged by the governing predicate, the window at the planned time.</strong>
+ * The window question is "will the release happen inside an allowed slot" and uses the planned
+ * instant. The freeze question uses the same governing predicate as every other freeze check
+ * ({@code FREEZE_EVENT.governsAt(now, plannedAt)}: {@code ACTIVE}, not ended, and starting no later
+ * than {@code max(now, plannedAt)}): a freeze declared for next week already governs a release
+ * planned for next week, so the second signature is raised at submission instead of being
+ * discovered at execution time (fail-closed, design 4.5 step 5). A freeze that starts after the
+ * release is planned does not govern it.
  */
 @Service
 public class AdmissionService {
