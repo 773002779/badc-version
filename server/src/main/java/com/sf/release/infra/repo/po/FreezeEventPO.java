@@ -3,6 +3,9 @@ package com.sf.release.infra.repo.po;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.sf.release.domain.freeze.FreezeEvent;
+import com.sf.release.domain.freeze.FreezeScope;
+import com.sf.release.domain.freeze.FreezeStatus;
 
 import java.time.Instant;
 
@@ -13,9 +16,6 @@ import java.time.Instant;
  * mapper's active queries encode that predicate. {@code subsystem_id} is NULL for a GLOBAL freeze
  * and set for a SUBSYSTEM one, so "which system" is never confused with the sentinel 0 used by
  * {@code release_window}.
- *
- * <p>No {@code toDomain()} yet: the freeze use cases (creation, release, in-flight转双签) belong to
- * the next task of the round, which will add the domain object together with them.
  */
 @TableName("freeze_event")
 public class FreezeEventPO {
@@ -34,6 +34,45 @@ public class FreezeEventPO {
     private String releasedBy;
     private Instant releasedAt;
     private Instant createdAt;
+
+    public static FreezeEventPO of(FreezeEvent event) {
+        FreezeEventPO po = new FreezeEventPO();
+        po.id = event.id();
+        po.scope = event.scope().name();
+        po.subsystemId = event.subsystemId();
+        po.reason = event.reason();
+        po.impact = event.impact();
+        po.initiatorId = event.initiatorId();
+        po.startAt = event.startAt();
+        po.endAt = event.endAt();
+        po.status = event.status().name();
+        po.releasedBy = event.releasedBy();
+        po.releasedAt = event.releasedAt();
+        po.createdAt = event.createdAt();
+        return po;
+    }
+
+    /**
+     * The domain freeze.
+     *
+     * @throws IllegalStateException a required column is NULL or not a known word. Defaulting a
+     *                               missing status to ACTIVE would invent a freeze that blocks
+     *                               releases, so a corrupt row throws instead.
+     */
+    public FreezeEvent toDomain() {
+        if (scope == null || scope.isBlank()) {
+            throw new IllegalStateException("freeze " + id + " has no scope");
+        }
+        if (status == null || status.isBlank()) {
+            throw new IllegalStateException("freeze " + id + " has no status");
+        }
+        if (startAt == null || endAt == null) {
+            throw new IllegalStateException("freeze " + id + " has no start_at/end_at");
+        }
+        return new FreezeEvent(id, FreezeScope.valueOf(scope), subsystemId, reason, impact,
+            initiatorId, startAt, endAt, FreezeStatus.valueOf(status), releasedBy, releasedAt,
+            createdAt);
+    }
 
     public Long getId() {
         return id;

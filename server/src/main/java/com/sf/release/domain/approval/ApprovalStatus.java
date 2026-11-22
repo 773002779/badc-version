@@ -15,5 +15,15 @@ public enum ApprovalStatus {
     PENDING,
     APPROVED,
     REJECTED,
-    CANCELED
+    CANCELED;
+
+    /** Chinese label for the page; the enum name is the API value. */
+    public String label() {
+        return switch (this) {
+            case PENDING -> "待审批";
+            case APPROVED -> "已通过";
+            case REJECTED -> "已驳回";
+            case CANCELED -> "已取消";
+        };
+    }
 }

@@ -32,6 +32,9 @@ release:
   gate:
     # Same reason: the gate polling / waiver expiry jobs are invoked explicitly by tests.
     reconcile-enabled: false
+  freeze:
+    # Same reason: the daily 封板 expiry scan is invoked explicitly by the freeze tests.
+    expiry-enabled: false
   redis:
     enabled: false
   pipeline:

@@ -32,4 +32,12 @@ public interface FreezeMapper extends BaseMapper<FreezeEventPO> {
         + " ORDER BY id")
     List<FreezeEventPO> selectActiveForSubsystem(@Param("subsystemId") long subsystemId,
                                                  @Param("at") Instant at);
+
+    /**
+     * The freezes the daily scan must close: still {@code ACTIVE} although their {@code end_at}
+     * already passed. A released freeze is never touched again (a person's lift stays the record).
+     */
+    @Select("SELECT * FROM freeze_event WHERE status = 'ACTIVE' AND end_at <= #{now}"
+        + " ORDER BY id LIMIT #{limit}")
+    List<FreezeEventPO> selectDueForExpiry(@Param("now") Instant now, @Param("limit") int limit);
 }

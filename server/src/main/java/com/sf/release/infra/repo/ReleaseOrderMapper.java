@@ -1,10 +1,13 @@
 package com.sf.release.infra.repo;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.sf.release.infra.repo.po.InFlightOrderRow;
 import com.sf.release.infra.repo.po.ReleaseOrderPO;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+
+import java.util.List;
 
 /**
  * MyBatis-Plus mapper for {@code release_order}. The publish number is the unique business key.
@@ -25,4 +28,29 @@ public interface ReleaseOrderMapper extends BaseMapper<ReleaseOrderPO> {
      */
     @Select("SELECT * FROM release_order WHERE id = #{id} FOR UPDATE")
     ReleaseOrderPO selectByIdForUpdate(@Param("id") long id);
+
+    /**
+     * The orders whose 变更项 is already in the production flow and whose deployment unit belongs to
+     * one system (tech design 4.2, the 封板 in-flight handling). {@code subsystemId = 0} means "every
+     * system", which is what a GLOBAL freeze affects; a positive id restricts the result to that
+     * system. The caller still filters by item status when it only handles one of them.
+     */
+    @Select("""
+        SELECT o.id                   AS orderId,
+               o.publish_no           AS publishNo,
+               o.row_version          AS orderRowVersion,
+               o.status               AS orderStatus,
+               o.planned_release_time AS plannedReleaseTime,
+               i.id                   AS itemId,
+               i.status               AS itemStatus,
+               i.unit_id              AS unitId,
+               u.subsystem_id         AS subsystemId
+        FROM release_order o
+        JOIN release_item i ON i.id = o.item_id
+        JOIN deploy_unit u ON u.id = i.unit_id
+        WHERE i.status IN ('SUBMITTED', 'PENDING_APPROVAL', 'READY')
+          AND (#{subsystemId} = 0 OR u.subsystem_id = #{subsystemId})
+        ORDER BY o.id
+        """)
+    List<InFlightOrderRow> selectInFlight(@Param("subsystemId") long subsystemId);
 }

@@ -49,3 +49,7 @@ release:
     # Start the pipeline immediately after the publish/rerun transaction commits. Turning it
     # off leaves the instance PENDING for the reconcile pass; only tests do that.
     auto-start: true
+  freeze:
+    # Daily expiry scan of the 封板 events (tech design 4.2); disable it in environments that run a
+    # single externally scheduled scanner, and in tests that invoke expireDue() themselves.
+    expiry-enabled: true

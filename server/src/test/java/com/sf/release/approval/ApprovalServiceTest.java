@@ -42,14 +42,19 @@ import static org.mockito.Mockito.when;
  * The 分级审批 service against the real test schema: chain construction, idempotency, append and
  * drop, sequential signatures and the rejection that cancels the rest.
  *
- * <p>{@code ensureChain} locks the {@code release_order} row before reading the chain, so every
- * test seeds the order it works on. The approval table itself has no foreign key to the order.
+ * <p><strong>Snapshot scope (V22).</strong> A chain belongs to one {@code admission_snapshot}, not to
+ * the order: every call names the snapshot, and a resubmission appends a <em>second</em> chain under
+ * a new snapshot id while the rejected generation keeps its rows. {@code ensureChain} and
+ * {@code dropPending} lock the {@code release_order} row first, so every test seeds the order it
+ * works on. The approval table itself has no foreign key to the order or the snapshot.
  */
 @SpringBootTest
 @ActiveProfiles("test")
 class ApprovalServiceTest {
 
     private static final long ORDER = 9101L;
+    private static final long SNAPSHOT = 9201L;
+    private static final long NEXT_SNAPSHOT = 9202L;
     private static final String ACTOR = "t21-lead";
 
     /**
@@ -75,7 +80,7 @@ class ApprovalServiceTest {
 
     @Test
     void ensure_chain_builds_the_signature_order() {
-        List<ApprovalStep> chain = approvals.ensureChain(ORDER,
+        List<ApprovalStep> chain = approvals.ensureChain(ORDER, SNAPSHOT,
             List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
 
         assertThat(chain).hasSize(2);
@@ -89,8 +94,9 @@ class ApprovalServiceTest {
 
     @Test
     void ensure_chain_is_idempotent() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
-        List<ApprovalStep> second = approvals.ensureChain(ORDER,
+        approvals.ensureChain(ORDER, SNAPSHOT,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        List<ApprovalStep> second = approvals.ensureChain(ORDER, SNAPSHOT,
             List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
 
         assertThat(second).hasSize(2);
@@ -100,8 +106,8 @@ class ApprovalServiceTest {
 
     @Test
     void ensure_chain_can_add_the_second_role_later() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD));
-        List<ApprovalStep> chain = approvals.ensureChain(ORDER,
+        approvals.ensureChain(ORDER, SNAPSHOT, List.of(ApprovalRole.OPS_LEAD));
+        List<ApprovalStep> chain = approvals.ensureChain(ORDER, SNAPSHOT,
             List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
 
         assertThat(chain).extracting(ApprovalStep::role)
@@ -110,12 +116,13 @@ class ApprovalServiceTest {
 
     @Test
     void ensure_chain_preserves_a_decided_step() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        approvals.ensureChain(ORDER, SNAPSHOT,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
         Timestamp createdAt = stepCreatedAt(1);
 
-        approvals.decide(ORDER, 1, true, ACTOR, "同意");
+        approvals.decide(SNAPSHOT, 1, true, ACTOR, "同意");
 
-        List<ApprovalStep> chain = approvals.ensureChain(ORDER,
+        List<ApprovalStep> chain = approvals.ensureChain(ORDER, SNAPSHOT,
             List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
 
         assertThat(chain).hasSize(2);
@@ -130,8 +137,15 @@ class ApprovalServiceTest {
 
     @Test
     void an_empty_requirement_leaves_the_chain_empty() {
-        assertThat(approvals.ensureChain(ORDER, List.of())).isEmpty();
-        assertThat(approvals.stepViews(ORDER)).isEmpty();
+        assertThat(approvals.ensureChain(ORDER, SNAPSHOT, List.of())).isEmpty();
+        assertThat(approvals.stepViews(SNAPSHOT)).isEmpty();
+        assertThat(count()).isZero();
+    }
+
+    @Test
+    void a_chain_without_a_snapshot_id_is_an_internal_error() {
+        assertThatThrownBy(() -> approvals.ensureChain(ORDER, 0L, List.of(ApprovalRole.OPS_LEAD)))
+            .isInstanceOf(IllegalArgumentException.class);
         assertThat(count()).isZero();
     }
 
@@ -139,10 +153,11 @@ class ApprovalServiceTest {
 
     @Test
     void append_if_missing_adds_only_a_missing_role() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD));
+        approvals.ensureChain(ORDER, SNAPSHOT, List.of(ApprovalRole.OPS_LEAD));
 
-        assertThat(approvals.appendIfMissing(ORDER, ApprovalRole.DEPT_MANAGER)).hasSize(2);
-        assertThat(approvals.appendIfMissing(ORDER, ApprovalRole.OPS_LEAD))
+        assertThat(approvals.appendIfMissing(ORDER, SNAPSHOT, ApprovalRole.DEPT_MANAGER))
+            .hasSize(2);
+        assertThat(approvals.appendIfMissing(ORDER, SNAPSHOT, ApprovalRole.OPS_LEAD))
             .as("the present role is not appended twice")
             .hasSize(2);
         assertThat(count()).isEqualTo(2);
@@ -150,27 +165,29 @@ class ApprovalServiceTest {
 
     @Test
     void drop_pending_removes_only_the_unsigned_step() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
-        approvals.decide(ORDER, 1, true, ACTOR, "同意");
+        approvals.ensureChain(ORDER, SNAPSHOT,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        approvals.decide(SNAPSHOT, 1, true, ACTOR, "同意");
 
-        assertThat(approvals.dropPending(ORDER, ApprovalRole.DEPT_MANAGER)).isEqualTo(1);
-        assertThat(approvals.dropPending(ORDER, ApprovalRole.DEPT_MANAGER)).isZero();
-        assertThat(approvals.steps(ORDER)).hasSize(1);
-        assertThat(approvals.steps(ORDER).get(0).status()).isEqualTo(ApprovalStatus.APPROVED);
+        assertThat(approvals.dropPending(ORDER, SNAPSHOT, ApprovalRole.DEPT_MANAGER)).isEqualTo(1);
+        assertThat(approvals.dropPending(ORDER, SNAPSHOT, ApprovalRole.DEPT_MANAGER)).isZero();
+        assertThat(approvals.steps(SNAPSHOT)).hasSize(1);
+        assertThat(approvals.steps(SNAPSHOT).get(0).status()).isEqualTo(ApprovalStatus.APPROVED);
 
-        assertThat(approvals.dropPending(ORDER, ApprovalRole.OPS_LEAD))
+        assertThat(approvals.dropPending(ORDER, SNAPSHOT, ApprovalRole.OPS_LEAD))
             .as("a decided step is history and is never dropped")
             .isZero();
-        assertThat(approvals.steps(ORDER)).hasSize(1);
+        assertThat(approvals.steps(SNAPSHOT)).hasSize(1);
     }
 
     @Test
     void drop_then_ensure_reuses_the_freed_step_number_without_duplicating_a_role() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
-        approvals.decide(ORDER, 1, true, ACTOR, null);
+        approvals.ensureChain(ORDER, SNAPSHOT,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        approvals.decide(SNAPSHOT, 1, true, ACTOR, null);
 
-        assertThat(approvals.dropPending(ORDER, ApprovalRole.DEPT_MANAGER)).isEqualTo(1);
-        List<ApprovalStep> chain = approvals.ensureChain(ORDER,
+        assertThat(approvals.dropPending(ORDER, SNAPSHOT, ApprovalRole.DEPT_MANAGER)).isEqualTo(1);
+        List<ApprovalStep> chain = approvals.ensureChain(ORDER, SNAPSHOT,
             List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
 
         assertThat(chain).extracting(ApprovalStep::stepNo).containsExactly(1, 2);
@@ -182,10 +199,11 @@ class ApprovalServiceTest {
 
     @Test
     void a_gap_left_by_dropping_the_first_step_does_not_break_the_next_append() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
-        assertThat(approvals.dropPending(ORDER, ApprovalRole.OPS_LEAD)).isEqualTo(1);
+        approvals.ensureChain(ORDER, SNAPSHOT,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        assertThat(approvals.dropPending(ORDER, SNAPSHOT, ApprovalRole.OPS_LEAD)).isEqualTo(1);
 
-        List<ApprovalStep> chain = approvals.ensureChain(ORDER,
+        List<ApprovalStep> chain = approvals.ensureChain(ORDER, SNAPSHOT,
             List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
 
         assertThat(chain).extracting(ApprovalStep::stepNo)
@@ -196,49 +214,94 @@ class ApprovalServiceTest {
             .isEqualTo(2);
     }
 
+    // ------------------------------------------------------------------ snapshot generations
+
+    @Test
+    void a_resubmission_starts_a_clean_chain_under_a_new_snapshot_and_keeps_the_old_one() {
+        approvals.ensureChain(ORDER, SNAPSHOT,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        approvals.decide(SNAPSHOT, 1, false, ACTOR, "窗口外风险过大");
+
+        List<ApprovalStep> fresh = approvals.ensureChain(ORDER, NEXT_SNAPSHOT,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+
+        assertThat(fresh).extracting(ApprovalStep::stepNo)
+            .as("the new snapshot's chain restarts at step 1 (V22 unique key is per snapshot)")
+            .containsExactly(1, 2);
+        assertThat(fresh).extracting(ApprovalStep::status)
+            .containsExactly(ApprovalStatus.PENDING, ApprovalStatus.PENDING);
+
+        assertThat(approvals.steps(SNAPSHOT)).extracting(ApprovalStep::status)
+            .as("the rejected generation is history and is untouched")
+            .containsExactly(ApprovalStatus.REJECTED, ApprovalStatus.CANCELED);
+
+        assertThat(approvals.decide(NEXT_SNAPSHOT, 1, true, ACTOR, "重提后同意").complete())
+            .isFalse();
+        assertThat(approvals.decide(NEXT_SNAPSHOT, 2, true, "t21-manager", null).complete())
+            .isTrue();
+        assertThat(approvals.steps(SNAPSHOT).get(0).status())
+            .as("deciding the new snapshot does not touch the old chain")
+            .isEqualTo(ApprovalStatus.REJECTED);
+    }
+
+    @Test
+    void the_two_snapshots_of_one_order_keep_separate_chain_reads() {
+        approvals.ensureChain(ORDER, SNAPSHOT, List.of(ApprovalRole.OPS_LEAD));
+        approvals.ensureChain(ORDER, NEXT_SNAPSHOT,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+
+        assertThat(approvals.stepViews(SNAPSHOT)).hasSize(1);
+        assertThat(approvals.stepViews(NEXT_SNAPSHOT)).hasSize(2);
+        assertThat(count())
+            .as("both generations live in the table")
+            .isEqualTo(3);
+    }
+
     // ------------------------------------------------------------------ decide
 
     @Test
     void only_the_lowest_pending_step_can_be_decided() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        approvals.ensureChain(ORDER, SNAPSHOT,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
 
-        assertBizError(() -> approvals.decide(ORDER, 2, true, ACTOR, "同意"),
+        assertBizError(() -> approvals.decide(SNAPSHOT, 2, true, ACTOR, "同意"),
             BizError.STATE_NOT_ALLOWED, "nextPending");
-        assertThat(approvals.steps(ORDER).get(1).status()).isEqualTo(ApprovalStatus.PENDING);
+        assertThat(approvals.steps(SNAPSHOT).get(1).status()).isEqualTo(ApprovalStatus.PENDING);
     }
 
     @Test
     void a_decided_step_cannot_be_decided_again() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
-        approvals.decide(ORDER, 1, true, ACTOR, null);
+        approvals.ensureChain(ORDER, SNAPSHOT,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        approvals.decide(SNAPSHOT, 1, true, ACTOR, null);
 
-        assertBizError(() -> approvals.decide(ORDER, 1, true, ACTOR, null),
+        assertBizError(() -> approvals.decide(SNAPSHOT, 1, true, ACTOR, null),
             BizError.STATE_NOT_ALLOWED, "status");
     }
 
     @Test
     void a_missing_step_is_a_parameter_error() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD));
+        approvals.ensureChain(ORDER, SNAPSHOT, List.of(ApprovalRole.OPS_LEAD));
 
-        assertBizError(() -> approvals.decide(ORDER, 9, true, ACTOR, null),
+        assertBizError(() -> approvals.decide(SNAPSHOT, 9, true, ACTOR, null),
             BizError.PARAM_INVALID, "stepNo");
     }
 
     @Test
     void the_actor_is_required() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD));
+        approvals.ensureChain(ORDER, SNAPSHOT, List.of(ApprovalRole.OPS_LEAD));
 
-        assertBizError(() -> approvals.decide(ORDER, 1, true, "  ", null),
+        assertBizError(() -> approvals.decide(SNAPSHOT, 1, true, "  ", null),
             BizError.PARAM_INVALID, "actor");
     }
 
     @Test
     void an_actor_longer_than_the_column_is_rejected_before_writing() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD));
+        approvals.ensureChain(ORDER, SNAPSHOT, List.of(ApprovalRole.OPS_LEAD));
 
-        assertBizError(() -> approvals.decide(ORDER, 1, true, "u".repeat(33), null),
+        assertBizError(() -> approvals.decide(SNAPSHOT, 1, true, "u".repeat(33), null),
             BizError.PARAM_INVALID, "actor");
-        assertThat(approvals.steps(ORDER).get(0).status()).isEqualTo(ApprovalStatus.PENDING);
+        assertThat(approvals.steps(SNAPSHOT).get(0).status()).isEqualTo(ApprovalStatus.PENDING);
     }
 
     @Test
@@ -247,16 +310,17 @@ class ApprovalServiceTest {
         ReleaseOrderMapper orderMapper = mock(ReleaseOrderMapper.class);
         List<ApprovalPO> rows = new ArrayList<>();
         when(orderMapper.selectByIdForUpdate(ORDER)).thenReturn(givenLockedOrder());
-        when(mapper.selectByOrder(ORDER)).thenAnswer(invocation -> List.copyOf(rows));
-        when(mapper.selectByOrderForUpdate(ORDER)).thenAnswer(invocation -> List.copyOf(rows));
+        when(mapper.selectBySnapshot(SNAPSHOT)).thenAnswer(invocation -> List.copyOf(rows));
+        when(mapper.selectBySnapshotForUpdate(SNAPSHOT))
+            .thenAnswer(invocation -> List.copyOf(rows));
         when(mapper.insert(any(ApprovalPO.class))).thenAnswer(invocation -> {
-            // The other transaction's insert wins, then our insert hits uk_approval_step.
+            // The other transaction's insert wins, then our insert hits uk_approval_snapshot_step.
             rows.add(invocation.getArgument(0));
             throw new DuplicateKeyException("simulated concurrent append");
         });
 
         List<ApprovalStep> chain = new ApprovalService(orderMapper, mapper)
-            .ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD));
+            .ensureChain(ORDER, SNAPSHOT, List.of(ApprovalRole.OPS_LEAD));
 
         assertThat(chain).hasSize(1);
         assertThat(chain.get(0).role()).isEqualTo(ApprovalRole.OPS_LEAD);
@@ -269,8 +333,9 @@ class ApprovalServiceTest {
         ReleaseOrderMapper orderMapper = mock(ReleaseOrderMapper.class);
         List<ApprovalPO> rows = new ArrayList<>();
         when(orderMapper.selectByIdForUpdate(ORDER)).thenReturn(givenLockedOrder());
-        when(mapper.selectByOrder(ORDER)).thenAnswer(invocation -> List.copyOf(rows));
-        when(mapper.selectByOrderForUpdate(ORDER)).thenAnswer(invocation -> List.copyOf(rows));
+        when(mapper.selectBySnapshot(SNAPSHOT)).thenAnswer(invocation -> List.copyOf(rows));
+        when(mapper.selectBySnapshotForUpdate(SNAPSHOT))
+            .thenAnswer(invocation -> List.copyOf(rows));
         when(mapper.insert(any(ApprovalPO.class))).thenAnswer(invocation -> {
             ApprovalPO added = invocation.getArgument(0);
             rows.add(added);
@@ -281,7 +346,8 @@ class ApprovalServiceTest {
         });
 
         List<ApprovalStep> chain = new ApprovalService(orderMapper, mapper)
-            .ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+            .ensureChain(ORDER, SNAPSHOT,
+                List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
 
         assertThat(chain).extracting(ApprovalStep::stepNo).containsExactly(1, 2);
         assertThat(chain).extracting(ApprovalStep::role)
@@ -300,9 +366,10 @@ class ApprovalServiceTest {
             try (Connection connection = dataSource.getConnection()) {
                 connection.setAutoCommit(false);
                 try (PreparedStatement statement = connection.prepareStatement(
-                    "INSERT INTO approval (order_id, step_no, role, status, created_at)"
-                        + " VALUES (?, 1, 'OPS_LEAD', 'PENDING', NOW(3))")) {
+                    "INSERT INTO approval (order_id, snapshot_id, step_no, role, status, created_at)"
+                        + " VALUES (?, ?, 1, 'OPS_LEAD', 'PENDING', NOW(3))")) {
                     statement.setLong(1, ORDER);
+                    statement.setLong(2, SNAPSHOT);
                     statement.executeUpdate();
                 }
                 inserted.countDown();
@@ -317,7 +384,7 @@ class ApprovalServiceTest {
         try {
             assertThat(inserted.await(5, TimeUnit.SECONDS)).isTrue();
 
-            List<ApprovalStep> chain = approvals.ensureChain(ORDER,
+            List<ApprovalStep> chain = approvals.ensureChain(ORDER, SNAPSHOT,
                 List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
 
             assertThat(chain).extracting(ApprovalStep::stepNo).containsExactly(1, 2);
@@ -332,14 +399,15 @@ class ApprovalServiceTest {
 
     @Test
     void approving_every_step_completes_the_chain() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        approvals.ensureChain(ORDER, SNAPSHOT,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
 
-        DecideResult first = approvals.decide(ORDER, 1, true, ACTOR, null);
+        DecideResult first = approvals.decide(SNAPSHOT, 1, true, ACTOR, null);
         assertThat(first.approved()).isTrue();
         assertThat(first.complete()).isFalse();
         assertThat(first.rejected()).isFalse();
 
-        DecideResult second = approvals.decide(ORDER, 2, true, "t21-manager", "同意");
+        DecideResult second = approvals.decide(SNAPSHOT, 2, true, "t21-manager", "同意");
         assertThat(second.complete()).isTrue();
         assertThat(second.rejected()).isFalse();
         assertThat(second.steps()).extracting(ApprovalStepView::status)
@@ -350,9 +418,10 @@ class ApprovalServiceTest {
 
     @Test
     void rejecting_a_step_cancels_the_later_steps() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        approvals.ensureChain(ORDER, SNAPSHOT,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
 
-        DecideResult result = approvals.decide(ORDER, 1, false, ACTOR, "窗口外风险过大");
+        DecideResult result = approvals.decide(SNAPSHOT, 1, false, ACTOR, "窗口外风险过大");
 
         assertThat(result.approved()).isFalse();
         assertThat(result.rejected()).isTrue();
@@ -365,47 +434,31 @@ class ApprovalServiceTest {
             .isNull();
 
         List<Map<String, Object>> rows = jdbc.queryForList(
-            "SELECT step_no, status FROM approval WHERE order_id = ? ORDER BY step_no", ORDER);
+            "SELECT step_no, status FROM approval WHERE snapshot_id = ? ORDER BY step_no", SNAPSHOT);
         assertThat(rows).extracting(row -> row.get("status"))
             .containsExactly("REJECTED", "CANCELED");
     }
 
     @Test
     void a_rejection_requires_a_reason() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD));
+        approvals.ensureChain(ORDER, SNAPSHOT, List.of(ApprovalRole.OPS_LEAD));
 
-        assertBizError(() -> approvals.decide(ORDER, 1, false, ACTOR, "   "),
+        assertBizError(() -> approvals.decide(SNAPSHOT, 1, false, ACTOR, "   "),
             BizError.PARAM_INVALID, "comment");
-        assertThat(approvals.steps(ORDER).get(0).status()).isEqualTo(ApprovalStatus.PENDING);
-    }
-
-    @Test
-    void a_resubmission_appends_a_new_generation_after_a_rejection() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
-        approvals.decide(ORDER, 1, false, ACTOR, "驳回");
-
-        List<ApprovalStep> chain = approvals.ensureChain(ORDER,
-            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
-
-        assertThat(chain).extracting(ApprovalStep::stepNo).containsExactly(1, 2, 3, 4);
-        assertThat(chain).extracting(ApprovalStep::status)
-            .containsExactly(ApprovalStatus.REJECTED, ApprovalStatus.CANCELED,
-                ApprovalStatus.PENDING, ApprovalStatus.PENDING);
-
-        DecideResult first = approvals.decide(ORDER, 3, true, ACTOR, "重提后同意");
-        assertThat(first.complete()).isFalse();
-        assertThat(approvals.decide(ORDER, 4, true, "t21-manager", null).complete()).isTrue();
+        assertThat(approvals.steps(SNAPSHOT).get(0).status()).isEqualTo(ApprovalStatus.PENDING);
     }
 
     @Test
     void step_views_flatten_the_domain_enums() {
-        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD));
+        approvals.ensureChain(ORDER, SNAPSHOT, List.of(ApprovalRole.OPS_LEAD));
 
-        List<ApprovalStepView> views = approvals.stepViews(ORDER);
+        List<ApprovalStepView> views = approvals.stepViews(SNAPSHOT);
 
         assertThat(views).hasSize(1);
         assertThat(views.get(0).role()).isEqualTo("OPS_LEAD");
+        assertThat(views.get(0).roleLabel()).isEqualTo("运维组长");
         assertThat(views.get(0).status()).isEqualTo("PENDING");
+        assertThat(views.get(0).statusLabel()).isEqualTo("待审批");
         assertThat(views.get(0).stepNo()).isEqualTo(1);
         assertThat(views.get(0).decidedBy()).isNull();
     }
@@ -419,8 +472,8 @@ class ApprovalServiceTest {
 
     private Timestamp stepCreatedAt(int stepNo) {
         return jdbc.queryForObject(
-            "SELECT created_at FROM approval WHERE order_id = ? AND step_no = ?",
-            Timestamp.class, ORDER, stepNo);
+            "SELECT created_at FROM approval WHERE snapshot_id = ? AND step_no = ?",
+            Timestamp.class, SNAPSHOT, stepNo);
     }
 
     /** The order row the mocked mapper returns for the locking read; only the id is used. */

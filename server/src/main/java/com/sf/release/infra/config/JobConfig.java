@@ -1,5 +1,6 @@
 package com.sf.release.infra.config;
 
+import com.sf.release.application.FreezeService;
 import com.sf.release.application.GateCheckService;
 import com.sf.release.application.GateService;
 import com.sf.release.application.GateWaiverService;
@@ -8,6 +9,7 @@ import com.sf.release.domain.pipeline.port.DistributedLock;
 import com.sf.release.domain.pipeline.port.ItemFailureRepairer;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.infra.engine.EngineRegistry;
+import com.sf.release.infra.job.FreezeExpiryJob;
 import com.sf.release.infra.job.GateReconcileJob;
 import com.sf.release.infra.job.ReconcileJob;
 import com.sf.release.infra.repo.NodeTaskMapper;
@@ -56,5 +58,17 @@ public class JobConfig {
                                              GateService gateService,
                                              GateWaiverService waiverService) {
         return new GateReconcileJob(lock, checkService, gateService, waiverService);
+    }
+
+    /**
+     * The daily 封板 expiry scan (tech design 4.2). Its own switch, like the gate job: the test
+     * profile turns it off so the shared schema is not mutated by a background thread, and the
+     * tests call {@code FreezeService.expireDue} explicitly.
+     */
+    @Bean
+    @ConditionalOnProperty(name = "release.freeze.expiry-enabled", havingValue = "true",
+        matchIfMissing = true)
+    public FreezeExpiryJob freezeExpiryJob(FreezeService freezeService) {
+        return new FreezeExpiryJob(freezeService);
     }
 }

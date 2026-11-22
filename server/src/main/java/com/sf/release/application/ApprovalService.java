@@ -22,26 +22,34 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The 分级审批 use cases of one 发布单 (tech design 4.4): keep the chain in sync with the current
- * admission requirements, read it, and decide one step.
+ * The 分级审批 use cases of one admission snapshot (tech design 4.4): keep the chain in sync with
+ * the current admission requirements, read it, and decide one step.
+ *
+ * <p><strong>The chain belongs to a snapshot, not to an order.</strong> V22 adds
+ * {@code approval.snapshot_id} and makes {@code (snapshot_id, step_no)} unique: one admission
+ * snapshot owns one chain. A resubmission produces a new snapshot, whose chain starts at step 1
+ * again while the rejected generation keeps its rows — that is what "the old approval stays as
+ * history, the new one starts clean" (design 4.4) means in the data. Every method therefore takes
+ * the snapshot id; there is no order-wide chain read.
  *
  * <p><strong>Chain construction is append-only and idempotent.</strong> {@link #ensureChain} adds a
  * step only for a role that has no pending or approved step; decided steps are never touched and
  * never deleted. A frozen order gets {@code DEPT_MANAGER} appended when it is missing, an unfrozen
  * one drops only the <em>unsigned</em> {@code DEPT_MANAGER} again — the signed ones stay as
- * evidence (design 4.2). After a rejection the next {@code ensureChain} appends a new generation of
- * steps at the end instead of resurrecting the rejected rows.
+ * evidence (design 4.2).
  *
- * <p><strong>Two submits of one order never interleave.</strong> {@code ensureChain} locks the
- * order row before reading the chain, so a second concurrent caller reads the chain only after the
- * first committed it. See the method javadoc for why a plain re-read cannot do that under MySQL's
- * {@code REPEATABLE READ}.
+ * <p><strong>Two mutating calls of one order never interleave.</strong> {@code ensureChain} and
+ * {@code dropPending} lock the {@code release_order} row as their <em>first</em> statement, so a
+ * freeze hook and an unfreeze recompute (or two submits) serialize on the order. The lock is taken
+ * broadly on purpose: the freeze path appends a step while the release path drops one, and both
+ * must see the same chain. See the method javadoc for why a plain re-read cannot do that under
+ * MySQL's {@code REPEATABLE READ}.
  *
  * <p><strong>Sequential signatures.</strong> {@link #decide} refuses to decide anything but the
  * lowest pending step, requires a reason to reject, and lets {@link ApprovalChain} flip the later
- * pending steps to {@code CANCELED} when a step is rejected. Self-approval is <em>not</em> checked
- * here: the caller knows the submitter (the chain only knows roles), so that check belongs to the
- * admission flow that owns the 发布单.
+ * pending steps to {@code CANCELED} when a step is rejected. Self-approval and the signature role
+ * are <em>not</em> checked here: the caller knows the submitter and the caller (the approval
+ * endpoints, Task 3), so those checks belong to the flow that owns the 发布单.
  *
  * <p>The returned {@link DecideResult} tells the caller what the chain now is — {@code complete}
  * maps to the {@code APPROVE_ALL} item event, {@code rejected} to {@code REJECT} — without making
@@ -72,24 +80,24 @@ public class ApprovalService {
      * The outcome of one {@link #decide}: the decided step plus whether the chain now needs no
      * further signature ({@code complete}) or ended in a rejection ({@code rejected}).
      */
-    public record DecideResult(long orderId, int stepNo, String role, boolean approved,
+    public record DecideResult(long snapshotId, int stepNo, String role, boolean approved,
                                boolean complete, boolean rejected, List<ApprovalStepView> steps) {
     }
 
     /**
-     * Makes sure the chain contains an active step for every required role, appending only what is
-     * missing. Appends always go to the <em>tail</em> with the next free step numbers; callers pass
-     * the full required set at submission time, and a later, larger requirement (a freeze adding
-     * {@code DEPT_MANAGER}) is appended in the order it is passed — an already present role keeps
-     * its original position.
+     * Makes sure the chain of {@code snapshotId} contains an active step for every required role,
+     * appending only what is missing. Appends always go to the <em>tail</em> with the next free step
+     * numbers; callers pass the full required set at submission time, and a later, larger
+     * requirement (a freeze adding {@code DEPT_MANAGER}) is appended in the order it is passed.
      *
      * <p><strong>Concurrency.</strong> The first statement is a locking read of the order row
-     * ({@code ReleaseOrderMapper.selectByIdForUpdate}), which serializes two concurrent submits of
-     * the same order: the second caller waits at the lock and then reads the chain as a
-     * <em>fresh</em> snapshot, so it sees what the first one committed. A plain read alone would not
-     * help — MySQL's default {@code REPEATABLE READ} keeps the transaction's first snapshot. If the
-     * unique key still rejects an append (a writer bypassing that lock), the method re-reads the
-     * chain with a locking read and continues with the remaining roles instead of returning early.
+     * ({@code ReleaseOrderMapper.selectByIdForUpdate}), which serializes every chain mutation of
+     * that order — two concurrent submits, and a freeze hook racing an unfreeze recompute. The
+     * second caller waits at the lock and then reads the chain as a <em>fresh</em> snapshot, so it
+     * sees what the first one committed. A plain read alone would not help: MySQL's default
+     * {@code REPEATABLE READ} keeps the transaction's first snapshot. If the unique key still
+     * rejects an append (a writer bypassing that lock), the method re-reads the chain with a locking
+     * read and continues with the remaining roles instead of returning early.
      *
      * <p>Idempotent: calling it twice with the same roles changes nothing the second time, and
      * calling it with fewer roles never removes a step (that is {@link #dropPending}'s job).
@@ -99,11 +107,12 @@ public class ApprovalService {
      *                               existing order; fail loudly instead of locking nothing)
      */
     @Transactional
-    public List<ApprovalStep> ensureChain(long orderId, List<ApprovalRole> roles) {
+    public List<ApprovalStep> ensureChain(long orderId, long snapshotId, List<ApprovalRole> roles) {
         List<ApprovalRole> required = new ArrayList<>();
         for (ApprovalRole role : roles == null ? List.<ApprovalRole>of() : roles) {
             required.add(requireRole(role));
         }
+        requireSnapshotId(snapshotId);
         // FIRST statement of the transaction: serialize concurrent chain builders of this order.
         // A locking read is a current read, so the plain chain read below starts its snapshot after
         // the competing transaction committed (a plain read on its own would not).
@@ -111,7 +120,7 @@ public class ApprovalService {
             throw new IllegalStateException(
                 "approval chain requires an existing release_order: " + orderId);
         }
-        ApprovalChain chain = chainOf(approvalMapper.selectByOrder(orderId));
+        ApprovalChain chain = chainOf(approvalMapper.selectBySnapshot(snapshotId));
         Instant now = Instant.now();
         int appended = 0;
         for (ApprovalRole role : required) {
@@ -121,68 +130,80 @@ public class ApprovalService {
                 ApprovalChain extended = chain.appendIfMissing(role);
                 ApprovalStep step = extended.steps().get(extended.steps().size() - 1);
                 try {
-                    approvalMapper.insert(ApprovalPO.of(orderId, step, now));
+                    approvalMapper.insert(ApprovalPO.of(orderId, snapshotId, step, now));
                     chain = extended;
                     appended++;
                 } catch (DuplicateKeyException ex) {
-                    // uk_approval_step kept the chain single. Refresh with a locking read (a plain
-                    // re-read would still see the pre-collision snapshot) and try the role again,
-                    // then continue with the remaining roles rather than returning early.
-                    chain = chainOf(approvalMapper.selectByOrderForUpdate(orderId));
-                    log.info("approval chain append raced: orderId={}, role={}, attempt={}",
-                        orderId, role, attempts);
+                    // uk_approval_snapshot_step kept the chain single. Refresh with a locking read
+                    // (a plain re-read would still see the pre-collision snapshot) and try the role
+                    // again, then continue with the remaining roles rather than returning early.
+                    chain = chainOf(approvalMapper.selectBySnapshotForUpdate(snapshotId));
+                    log.info("approval chain append raced: orderId={}, snapshotId={}, role={},"
+                        + " attempt={}", orderId, snapshotId, role, attempts);
                 }
             }
             if (!chain.hasActive(role)) {
                 throw new BizException(BizError.STATE_NOT_ALLOWED,
                     "审批链并发更新失败，请重试",
-                    Map.of("orderId", orderId, "role", role.name()));
+                    Map.of("orderId", orderId, "snapshotId", snapshotId, "role", role.name()));
             }
         }
         if (appended > 0) {
-            log.info("approval chain extended: orderId={}, appended={}, total={}",
-                orderId, appended, chain.steps().size());
+            log.info("approval chain extended: orderId={}, snapshotId={}, appended={}, total={}",
+                orderId, snapshotId, appended, chain.steps().size());
         }
         return chain.steps();
     }
 
     /**
-     * Appends one role at the end of the chain when it has no active step. This is the
+     * Appends one role at the end of the snapshot's chain when it has no active step. This is the
      * "封板生效 → 补一个 DEPT_MANAGER" hook of design 4.2.
      */
     @Transactional
-    public List<ApprovalStep> appendIfMissing(long orderId, ApprovalRole role) {
-        return ensureChain(orderId, List.of(requireRole(role)));
+    public List<ApprovalStep> appendIfMissing(long orderId, long snapshotId, ApprovalRole role) {
+        return ensureChain(orderId, snapshotId, List.of(requireRole(role)));
     }
 
     /**
-     * Removes the still-pending steps of one role (design 4.2: "解除封板后移除尚未签的
-     * DEPT_MANAGER"). Decided steps are kept, so an approval that already happened stays visible.
+     * Removes the still-pending steps of one role from the snapshot's chain (design 4.2: "解除封板
+     * 后移除尚未签的 DEPT_MANAGER"). Decided steps are kept, so an approval that already happened
+     * stays visible.
+     *
+     * <p>The order row is locked first for the same reason as {@link #ensureChain}: the unfreeze
+     * recompute and a freeze hook must not interleave on one order's chain.
      *
      * @return how many pending steps were removed
      */
     @Transactional
-    public int dropPending(long orderId, ApprovalRole role) {
-        int removed = approvalMapper.deletePendingByRole(orderId, requireRole(role).name());
+    public int dropPending(long orderId, long snapshotId, ApprovalRole role) {
+        ApprovalRole required = requireRole(role);
+        requireSnapshotId(snapshotId);
+        // FIRST statement of the transaction: serialize with ensureChain (see its javadoc).
+        if (releaseOrderMapper.selectByIdForUpdate(orderId) == null) {
+            throw new IllegalStateException(
+                "approval chain requires an existing release_order: " + orderId);
+        }
+        int removed = approvalMapper.deletePendingBySnapshotRole(snapshotId, required.name());
         if (removed > 0) {
-            log.info("approval pending steps dropped: orderId={}, role={}, removed={}",
-                orderId, role, removed);
+            log.info("approval pending steps dropped: orderId={}, snapshotId={}, role={},"
+                + " removed={}", orderId, snapshotId, required, removed);
         }
         return removed;
     }
 
-    /** The whole chain of one order, in signature order (empty when nothing was required). */
-    public List<ApprovalStep> steps(long orderId) {
-        return chainOf(approvalMapper.selectByOrder(orderId)).steps();
+    /** The whole chain of one snapshot, in signature order (empty when nothing was required). */
+    public List<ApprovalStep> steps(long snapshotId) {
+        requireSnapshotId(snapshotId);
+        return chainOf(approvalMapper.selectBySnapshot(snapshotId)).steps();
     }
 
     /** The chain flattened for the web layer, so {@code web} never sees a domain enum. */
-    public List<ApprovalStepView> stepViews(long orderId) {
-        return viewsOf(chainOf(approvalMapper.selectByOrder(orderId)));
+    public List<ApprovalStepView> stepViews(long snapshotId) {
+        return viewsOf(chainOf(approvalMapper.selectBySnapshot(requireSnapshotId(snapshotId))));
     }
 
     /**
-     * Decides one approval step.
+     * Decides one approval step of one snapshot's chain.
      *
      * @param approved {@code true} to approve, {@code false} to reject (a reason is then required)
      * @param actor    the user id that signs; the caller has already checked the role and that the
@@ -192,8 +213,9 @@ public class ApprovalService {
      *                      was already decided
      */
     @Transactional
-    public DecideResult decide(long orderId, int stepNo, boolean approved, String actor,
+    public DecideResult decide(long snapshotId, int stepNo, boolean approved, String actor,
                                String comment) {
+        requireSnapshotId(snapshotId);
         String signer = trimToNull(actor);
         if (signer == null) {
             throw new BizException(BizError.PARAM_INVALID, "审批人不能为空",
@@ -204,7 +226,7 @@ public class ApprovalService {
                 "审批人长度不能超过 " + ACTOR_MAX_LENGTH,
                 Map.of("actor", "长度超限：" + signer.length()));
         }
-        List<ApprovalPO> stored = approvalMapper.selectByOrder(orderId);
+        List<ApprovalPO> stored = approvalMapper.selectBySnapshot(snapshotId);
         ApprovalChain chain = chainOf(stored);
         ApprovalStep target = chain.step(stepNo).orElseThrow(() -> new BizException(
             BizError.PARAM_INVALID, "审批步骤不存在", Map.of("stepNo", stepNo)));
@@ -233,11 +255,11 @@ public class ApprovalService {
             ? chain.approve(stepNo, signer, now, note)
             : chain.reject(stepNo, signer, now, note);
         persistDecisions(chain, updated, stored);
-        log.info("approval step decided: orderId={}, stepNo={}, role={}, approved={}, by={},"
+        log.info("approval step decided: snapshotId={}, stepNo={}, role={}, approved={}, by={},"
                 + " complete={}, rejected={}",
-            orderId, stepNo, target.role(), approved, signer, updated.complete(),
+            snapshotId, stepNo, target.role(), approved, signer, updated.complete(),
             updated.rejected());
-        return new DecideResult(orderId, stepNo, target.role().name(), approved,
+        return new DecideResult(snapshotId, stepNo, target.role().name(), approved,
             updated.complete(), updated.rejected(), viewsOf(updated));
     }
 
@@ -250,7 +272,8 @@ public class ApprovalService {
     private static List<ApprovalStepView> viewsOf(ApprovalChain chain) {
         return chain.steps().stream()
             .map(step -> new ApprovalStepView(step.stepNo(), step.role().name(),
-                step.status().name(), step.decidedBy(), step.decidedAt(), step.comment()))
+                step.role().label(), step.status().name(), step.status().label(),
+                step.decidedBy(), step.decidedAt(), step.comment()))
             .toList();
     }
 
@@ -293,6 +316,19 @@ public class ApprovalService {
                 Map.of("role", "不能为空"));
         }
         return role;
+    }
+
+    /**
+     * A chain is always read, appended and dropped per admission snapshot; snapshot id 0 is the
+     * legacy backfill value of V22 and never a real chain, so a missing id is an internal error
+     * instead of a query that silently reads the wrong rows.
+     */
+    private static long requireSnapshotId(long snapshotId) {
+        if (snapshotId <= 0) {
+            throw new IllegalArgumentException(
+                "an approval chain requires an admission snapshot id: " + snapshotId);
+        }
+        return snapshotId;
     }
 
     private static String trimToNull(String value) {

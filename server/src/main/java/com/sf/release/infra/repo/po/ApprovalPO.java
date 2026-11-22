@@ -10,11 +10,13 @@ import com.sf.release.domain.approval.ApprovalStep;
 import java.time.Instant;
 
 /**
- * Persistence object for {@code approval} (V21): one step of the 分级审批 chain of one 发布单.
+ * Persistence object for {@code approval} (V21/V22): one step of the 分级审批 chain of one 发布单.
  *
- * <p>{@code (order_id, step_no)} is unique, so the chain can be appended without a lock: a
- * concurrent duplicate append fails on the key instead of silently creating two step 2s. The role
- * and the status are stored as their enum names, which are part of the API contract.
+ * <p>{@code (snapshot_id, step_no)} is unique (V22), so a chain can be appended without a lock — a
+ * concurrent duplicate append fails on the key instead of silently creating two step 2s — and a new
+ * admission snapshot can build its own chain from step 1 while the earlier generations stay
+ * untouched. The role and the status are stored as their enum names, which are part of the API
+ * contract.
  */
 @TableName("approval")
 public class ApprovalPO {
@@ -23,6 +25,14 @@ public class ApprovalPO {
     private Long id;
 
     private Long orderId;
+
+    /**
+     * The admission snapshot the step belongs to. A chain is snapshot-scoped: the freeze hooks and
+     * the resubmission build and read steps per {@code admission_snapshot}, so a rejected
+     * generation keeps its rows and the next one starts clean.
+     */
+    private Long snapshotId;
+
     private Integer stepNo;
     private String role;
     private String status;
@@ -31,9 +41,11 @@ public class ApprovalPO {
     private String comment;
     private Instant createdAt;
 
-    public static ApprovalPO of(long orderId, ApprovalStep step, Instant createdAt) {
+    public static ApprovalPO of(long orderId, long snapshotId, ApprovalStep step,
+                                Instant createdAt) {
         ApprovalPO po = new ApprovalPO();
         po.orderId = orderId;
+        po.snapshotId = snapshotId;
         po.stepNo = step.stepNo();
         po.role = step.role().name();
         po.status = step.status().name();
@@ -79,6 +91,14 @@ public class ApprovalPO {
 
     public void setOrderId(Long orderId) {
         this.orderId = orderId;
+    }
+
+    public Long getSnapshotId() {
+        return snapshotId;
+    }
+
+    public void setSnapshotId(Long snapshotId) {
+        this.snapshotId = snapshotId;
     }
 
     public Integer getStepNo() {

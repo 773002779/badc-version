@@ -24,6 +24,15 @@ public final class TestUserContext {
         UserContext.set(new CurrentUser(userId, Set.of(), Set.of(), ids, false));
     }
 
+    /**
+     * A caller with permission points but no unit scope at all: the request passes every permission
+     * check and is then denied by the data-scope guard (40009) — the fail-closed case.
+     */
+    public static void scopedWithPerms(String userId, Set<String> perms, long... unitIds) {
+        Set<Long> ids = Arrays.stream(unitIds).boxed().collect(java.util.stream.Collectors.toSet());
+        UserContext.set(new CurrentUser(userId, Set.of(), perms, ids, false));
+    }
+
     /** A caller with no unit scope at all, which must be denied every unit. */
     public static void noUnits(String userId) {
         UserContext.set(new CurrentUser(userId, Set.of(), Set.of(), Set.of(), false));

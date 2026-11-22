@@ -10,32 +10,37 @@ import org.apache.ibatis.annotations.Select;
 import java.util.List;
 
 /**
- * MyBatis-Plus mapper for {@code approval} (V21): the 分级审批 steps of one 发布单.
- * {@code (order_id, step_no)} is unique, so an append is safe without an advisory lock.
+ * MyBatis-Plus mapper for {@code approval} (V21/V22): the 分级审批 steps of one admission snapshot.
+ *
+ * <p>The chain is <em>snapshot-scoped</em> (V22): {@code (snapshot_id, step_no)} is unique, so a new
+ * admission snapshot starts its own chain at step 1 while the rejected generation keeps its rows,
+ * and an append is still safe without an advisory lock.
  */
 @Mapper
 public interface ApprovalMapper extends BaseMapper<ApprovalPO> {
 
-    /** The whole chain of one order, in signature order. */
-    @Select("SELECT * FROM approval WHERE order_id = #{orderId} ORDER BY step_no")
-    List<ApprovalPO> selectByOrder(@Param("orderId") long orderId);
+    /** The whole chain of one snapshot, in signature order. */
+    @Select("SELECT * FROM approval WHERE snapshot_id = #{snapshotId} ORDER BY step_no")
+    List<ApprovalPO> selectBySnapshot(@Param("snapshotId") long snapshotId);
 
     /**
-     * The whole chain again, as a <em>current read</em> that locks the order's rows.
+     * The same chain again, as a <em>current read</em> that locks the snapshot's rows.
      *
      * <p>The duplicate-key recovery path of {@code ensureChain} uses this: after the unique key
      * rejected our insert, a plain re-read would still see the pre-collision snapshot (MySQL
      * {@code REPEATABLE READ}) and loop forever on the same step number. A locking read waits for
      * the winner's transaction and returns the committed chain.
      */
-    @Select("SELECT * FROM approval WHERE order_id = #{orderId} ORDER BY step_no FOR UPDATE")
-    List<ApprovalPO> selectByOrderForUpdate(@Param("orderId") long orderId);
+    @Select("SELECT * FROM approval WHERE snapshot_id = #{snapshotId} ORDER BY step_no FOR UPDATE")
+    List<ApprovalPO> selectBySnapshotForUpdate(@Param("snapshotId") long snapshotId);
 
     /**
-     * Removes the unsigned steps of one role. Decided steps are history and are never touched; a
-     * chain that no longer needs a role (the freeze was lifted) drops only what nobody signed.
+     * Removes the unsigned steps of one role from one snapshot's chain. Decided steps are history
+     * and are never touched; a chain that no longer needs a role (the freeze was lifted) drops only
+     * what nobody signed.
      */
-    @Delete("DELETE FROM approval WHERE order_id = #{orderId} AND role = #{role}"
+    @Delete("DELETE FROM approval WHERE snapshot_id = #{snapshotId} AND role = #{role}"
         + " AND status = 'PENDING'")
-    int deletePendingByRole(@Param("orderId") long orderId, @Param("role") String role);
+    int deletePendingBySnapshotRole(@Param("snapshotId") long snapshotId,
+                                    @Param("role") String role);
 }
