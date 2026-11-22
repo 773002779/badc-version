@@ -279,3 +279,147 @@ export interface CodingProbeView {
   /** True when the tested values were the saved connection, so the result became "last verified". */
   persisted: boolean
 }
+
+// -------------------------------------------- production control (P3)
+
+export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELED'
+
+/** One step of the current snapshot's approval chain. */
+export interface ApprovalStepView {
+  stepNo: number
+  role: string
+  roleLabel: string
+  status: ApprovalStatus | string
+  statusLabel: string
+  decidedBy?: string | null
+  decidedAt?: string | null
+  comment?: string | null
+}
+
+/** One of the six admission judgements of a fresh decision. */
+export interface AdmissionStepView {
+  key: string
+  label: string
+  passed: boolean
+  reason?: string | null
+  nextAction?: string | null
+}
+
+export interface AdmissionSnapshot {
+  id: number
+  orderId: number
+  itemId: number
+  submittedBy?: string | null
+  plannedReleaseTime?: string | null
+  inWindow: boolean
+  windowId?: number | null
+  frozen: boolean
+  freezeIds: number[]
+  maxSeverity?: string | null
+  checkConclusion?: string | null
+  waiverIds: number[]
+  testConclusion?: string | null
+  testPassBy?: string | null
+  oaTicketNo?: string | null
+  imageDigest?: string | null
+  chain: string[]
+  createdAt?: string | null
+}
+
+/** The pre-execution review (design 4.6): only the changed items are compared. */
+export interface ReviewView {
+  checkedAt?: string | null
+  frozen: boolean
+  freezeIds: number[]
+  waiverInvalid: boolean
+  digestMatched: boolean
+  blocked: boolean
+  reasons: string[]
+}
+
+/** The admission of one 发布单: the latest snapshot, its chain, the current statuses. */
+export interface AdmissionView {
+  publishNo: string
+  orderId: number
+  itemId: number
+  itemStatus: string
+  orderStatus: string
+  snapshot?: AdmissionSnapshot | null
+  chain: ApprovalStepView[]
+  nextAction?: string | null
+  /** Non-null only on a fresh judgement (submit / resubmit / admission-check). */
+  admitted?: boolean | null
+  steps: AdmissionStepView[]
+  review?: ReviewView | null
+}
+
+export interface ExecuteResult {
+  publishNo: string
+  status: string
+  node: string
+  batchCount: number
+  review?: ReviewView | null
+  statusReason?: string | null
+}
+
+export interface FreezeView {
+  id: number
+  scope: string
+  scopeLabel: string
+  subsystemId?: number | null
+  reason: string
+  impact?: string | null
+  initiator: string
+  startAt?: string | null
+  endAt?: string | null
+  status: string
+  statusLabel: string
+  releasedBy?: string | null
+  releasedAt?: string | null
+  /** In force right now (not derived from `status` on the client). */
+  active: boolean
+  createdAt?: string | null
+}
+
+export interface WindowRuleView {
+  dayOfWeek: number
+  start: string
+  end: string
+}
+
+export interface WindowExceptionView {
+  date: string
+  mode: string
+  start?: string | null
+  end?: string | null
+}
+
+export interface WindowView {
+  configured: boolean
+  id?: number | null
+  scope?: string | null
+  subsystemId: number
+  enabled: boolean
+  inherited: boolean
+  timezone?: string | null
+  rules: WindowRuleView[]
+  exceptions: WindowExceptionView[]
+  warnings: string[]
+}
+
+export interface WindowSpan {
+  start: string
+  end: string
+}
+
+export interface WindowCheckView {
+  inWindow: boolean
+  span?: WindowSpan | null
+  next?: WindowSpan | null
+  configured: boolean
+  windowId?: number | null
+  enabled: boolean
+  timezone?: string | null
+  scope?: string | null
+  inherited: boolean
+}

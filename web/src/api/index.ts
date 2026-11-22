@@ -1,10 +1,13 @@
 import { api, qs } from './http'
 import type {
+  AdmissionView,
   BindingView,
   CodingConnView,
   CodingJobView,
   CodingProbeView,
   EnvDeView,
+  ExecuteResult,
+  FreezeView,
   ItemGate,
   ItemView,
   MeView,
@@ -14,7 +17,9 @@ import type {
   SubsystemView,
   TaskDetailView,
   TaskView,
-  UnitView
+  UnitView,
+  WindowCheckView,
+  WindowView
 } from './types'
 
 // ---------------------------------------------------------------- subsystems
@@ -234,3 +239,89 @@ export const testCodingConn = (
     method: 'POST',
     body: JSON.stringify(body)
   })
+
+// ------------------------------------------------- production control (P3)
+
+/** The stored admission of one 发布单: latest snapshot, its chain, the review preview. */
+export const getAdmission = (publishNo: string) =>
+  api<AdmissionView>(`/api/v1/releases/${publishNo}/admission`)
+
+/** The draft judgement of the submit dialog: six steps, no write, no snapshot. */
+export const checkAdmission = (
+  publishNo: string,
+  body: { plannedReleaseTime?: string | null; oaTicketNo?: string | null }
+) =>
+  api<AdmissionView>(`/api/v1/releases/${publishNo}/admission-check`, {
+    method: 'POST',
+    body: JSON.stringify(body)
+  })
+
+export const submitProd = (
+  publishNo: string,
+  body: { plannedReleaseTime?: string | null; oaTicketNo?: string | null }
+) =>
+  api<AdmissionView>(`/api/v1/releases/${publishNo}/submit-prod`, {
+    method: 'POST',
+    body: JSON.stringify(body)
+  })
+
+/** After a rejection: a new snapshot and a fresh chain; the old chain stays as history. */
+export const resubmitProd = (
+  publishNo: string,
+  body: { plannedReleaseTime?: string | null; oaTicketNo?: string | null }
+) =>
+  api<AdmissionView>(`/api/v1/releases/${publishNo}/resubmit`, {
+    method: 'POST',
+    body: JSON.stringify(body)
+  })
+
+export const approveRelease = (publishNo: string, comment?: string) =>
+  api<AdmissionView>(`/api/v1/releases/${publishNo}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({ comment })
+  })
+
+export const rejectRelease = (publishNo: string, reason: string) =>
+  api<AdmissionView>(`/api/v1/releases/${publishNo}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ reason })
+  })
+
+/** Executes production, or resumes the batch-boundary pause; the answer is the real status. */
+export const executeRelease = (publishNo: string) =>
+  api<ExecuteResult>(`/api/v1/releases/${publishNo}/execute`, { method: 'POST' })
+
+export const listFreezes = (
+  params: { active?: boolean; subsystemId?: number; plannedAt?: string } = {}
+) => api<FreezeView[]>(`/api/v1/freezes${qs({ ...params, active: params.active === undefined ? undefined : String(params.active) })}`)
+
+export const createFreeze = (body: {
+  scope: string
+  subsystemId?: number | null
+  reason: string
+  impact?: string
+  startAt?: string | null
+  endAt: string
+}) => api<FreezeView>('/api/v1/freezes', { method: 'POST', body: JSON.stringify(body) })
+
+export const releaseFreeze = (id: number, reason: string) =>
+  api<FreezeView>(`/api/v1/freezes/${id}/release`, {
+    method: 'POST',
+    body: JSON.stringify({ reason })
+  })
+
+/** The effective window of a system (subsystem override → GLOBAL default). */
+export const getWindow = (subsystemId?: number) =>
+  api<WindowView>(`/api/v1/windows${qs({ subsystemId })}`)
+
+export const saveWindow = (body: {
+  scope: string
+  subsystemId?: number | null
+  enabled: boolean
+  timezone: string
+  rules: Array<{ dayOfWeek: number; start: string; end: string }>
+  exceptions: Array<{ date: string; mode: string; start?: string | null; end?: string | null }>
+}) => api<WindowView>('/api/v1/windows', { method: 'PUT', body: JSON.stringify(body) })
+
+export const checkWindow = (body: { subsystemId?: number; at?: string | null }) =>
+  api<WindowCheckView>('/api/v1/windows/check', { method: 'POST', body: JSON.stringify(body) })

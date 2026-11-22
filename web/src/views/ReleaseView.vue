@@ -12,6 +12,7 @@ import StatusDot from '../components/StatusDot.vue'
 import StepBar from '../components/StepBar.vue'
 import KeyValue from '../components/KeyValue.vue'
 import VerifyPanel from '../components/VerifyPanel.vue'
+import AdmissionPanel from '../components/AdmissionPanel.vue'
 import { formatDateTime, formatDuration, shortSha, statusLabel } from '../utils/format'
 
 const route = useRoute()
@@ -30,6 +31,12 @@ const busy = computed(() => {
 })
 
 const gateStatusHint = computed(() => detail.value?.statusReason ?? '（未记录原因）')
+
+/** A pause at PROD_DEPLOY is resumed by 「执行生产发布」 (with the review), not by the generic resume. */
+const isProdPause = computed(() => {
+  const prod = detail.value?.nodes.find((n) => n.nodeType === 'PROD_DEPLOY')
+  return detail.value?.status === 'PAUSED' && prod?.status === 'RUNNING'
+})
 
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -72,7 +79,11 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
 <template>
   <div>
     <PageHeader :title="`发布内容 ${publishNo}`" :description="detail ? `流水单 ${detail.pipelineNo}` : ''">
-      <el-button v-if="detail?.status === 'PAUSED'" :title="`当前挂起原因：${gateStatusHint}`" @click="doResume">
+      <el-button
+        v-if="detail?.status === 'PAUSED' && !isProdPause"
+        :title="`当前挂起原因：${gateStatusHint}`"
+        @click="doResume"
+      >
         恢复执行
       </el-button>
       <el-button :loading="loading" @click="load()">刷新</el-button>
@@ -134,6 +145,14 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
 
             <div v-if="node.nodeType === 'VERIFY' && detail.itemId" class="verify-slot">
               <VerifyPanel :item-id="detail.itemId" :running="busy" @changed="load(true)" />
+            </div>
+            <div v-else-if="node.nodeType === 'PROD_DEPLOY' && detail.itemId" class="verify-slot">
+              <AdmissionPanel
+                :publish-no="publishNo"
+                :running="busy || detail.status === 'PAUSED'"
+                :paused="detail.status === 'PAUSED'"
+                @changed="load(true)"
+              />
             </div>
             <div v-else-if="node.status !== 'PENDING' && node.tasks.length" class="task-list">
               <div v-for="(t, i) in node.tasks" :key="`${t.taskType}-${t.batchNo}-${t.targetId}-${i}`" class="task-row">

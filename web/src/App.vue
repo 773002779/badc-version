@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
+  Checked,
   Grid,
   Monitor,
   Moon,
@@ -71,6 +72,9 @@ const initial = computed(() => (userId.value || '?').slice(0, 1).toUpperCase())
       </router-link>
 
       <div class="nav-group">平台</div>
+      <router-link class="nav-item" to="/control">
+        <el-icon><Checked /></el-icon><span>生产管控</span>
+      </router-link>
       <router-link class="nav-item" to="/">
         <el-icon><Odometer /></el-icon><span>总览</span>
       </router-link>
@@ -78,7 +82,7 @@ const initial = computed(() => (userId.value || '?').slice(0, 1).toUpperCase())
         <el-icon><Setting /></el-icon><span>设置</span>
       </router-link>
 
-      <div class="sidebar-foot">P2 · 门禁与对接配置</div>
+      <div class="sidebar-foot">P3 · 生产管控</div>
     </aside>
 
     <div class="main">
