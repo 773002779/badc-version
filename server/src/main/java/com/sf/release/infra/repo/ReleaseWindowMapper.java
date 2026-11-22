@@ -6,8 +6,6 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
-import java.util.List;
-
 /**
  * MyBatis-Plus mapper for {@code release_window} (V21). The natural key is
  * {@code (scope, subsystem_id)} with the sentinel {@code 0} for the GLOBAL row, so "the window of
@@ -20,8 +18,4 @@ public interface ReleaseWindowMapper extends BaseMapper<ReleaseWindowPO> {
     @Select("SELECT * FROM release_window WHERE scope = #{scope} AND subsystem_id = #{subsystemId}")
     ReleaseWindowPO selectByScope(@Param("scope") String scope,
                                   @Param("subsystemId") long subsystemId);
-
-    /** Every configured window, GLOBAL first (settings screen). */
-    @Select("SELECT * FROM release_window ORDER BY FIELD(scope, 'GLOBAL', 'SUBSYSTEM'), subsystem_id")
-    List<ReleaseWindowPO> selectAll();
 }

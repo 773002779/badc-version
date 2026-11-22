@@ -9,10 +9,17 @@ import com.sf.release.application.WindowService.SaveResult;
 import com.sf.release.application.WindowView;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.infra.repo.ReleaseWindowMapper;
+import com.sf.release.infra.repo.SubsystemMapper;
+import com.sf.release.infra.repo.WindowExceptionMapper;
+import com.sf.release.infra.repo.WindowRuleMapper;
+import com.sf.release.infra.repo.po.ReleaseWindowPO;
+import com.sf.release.infra.repo.po.WindowRulePO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
@@ -21,11 +28,16 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * The 发布窗口 service against the real test schema: persistence of rules and exceptions, the
@@ -257,6 +269,9 @@ class WindowServiceTest {
         assertThat(check.windowId()).isNull();
         assertThat(check.span()).isNull();
         assertThat(check.next()).isNull();
+        assertThat(check.timezone()).isNull();
+        assertThat(check.scope()).isNull();
+        assertThat(check.inherited()).isFalse();
     }
 
     @Test
@@ -269,10 +284,19 @@ class WindowServiceTest {
         assertThat(check.enabled()).isTrue();
         assertThat(check.inWindow()).isTrue();
         assertThat(check.windowId()).isNotNull();
+        assertThat(check.timezone()).isEqualTo("Asia/Shanghai");
+        assertThat(check.scope()).isEqualTo("GLOBAL");
+        assertThat(check.inherited()).isFalse();
         assertThat(check.span().start()).isEqualTo(MONDAY.atTime(22, 0));
         assertThat(check.span().end()).isEqualTo(TUESDAY.atTime(2, 0));
         assertThat(check.next().start()).isEqualTo(MONDAY.plusWeeks(1).atTime(22, 0));
         assertThat(check.next().end()).isEqualTo(TUESDAY.plusWeeks(1).atTime(2, 0));
+    }
+
+    @Test
+    void a_negative_subsystem_id_is_a_parameter_error() {
+        assertParamInvalid(() -> windows.effectiveWindow(-1L), "subsystemId");
+        assertParamInvalid(() -> windows.check(-1L, Instant.now()), "subsystemId");
     }
 
     @Test
@@ -289,14 +313,19 @@ class WindowServiceTest {
 
     @Test
     void a_switched_off_window_answers_inside_and_says_why() {
-        SaveResult saved = saveGlobal(false, List.of(new RuleInput(MON, NINE, TEN)), List.of());
+        SaveResult saved = saveGlobal(false, List.of(), List.of());
 
         WindowCheckView check = windows.check(0L, instant(TUESDAY, 3, 0));
 
-        assertThat(check.inWindow()).isTrue();
+        assertThat(check.inWindow())
+            .as("enabled=false is the constraint switched off: always inside, even with no rules")
+            .isTrue();
         assertThat(check.configured()).isTrue();
         assertThat(check.enabled()).isFalse();
         assertThat(check.windowId()).isEqualTo(saved.window().id());
+        assertThat(check.timezone()).isEqualTo("Asia/Shanghai");
+        assertThat(check.scope()).isEqualTo("GLOBAL");
+        assertThat(check.inherited()).isFalse();
         assertThat(check.span()).isNull();
         assertThat(check.next()).isNull();
     }
@@ -308,9 +337,16 @@ class WindowServiceTest {
         windows.save(new SaveCommand("SUBSYSTEM", subsystemId, true, null,
             List.of(new RuleInput(TUE, NINE, TEN)), List.of()));
 
-        assertThat(windows.check(subsystemId, instant(TUESDAY, 9, 30)).inWindow())
+        WindowCheckView override = windows.check(subsystemId, instant(TUESDAY, 9, 30));
+
+        assertThat(override.inWindow())
             .as("the override opens Tuesday morning")
             .isTrue();
+        assertThat(override.scope()).isEqualTo("SUBSYSTEM");
+        assertThat(override.inherited())
+            .as("the subsystem has its own window, it is not inherited")
+            .isFalse();
+        assertThat(override.windowId()).isNotEqualTo(windows.effectiveWindow(0L).id());
         assertThat(windows.check(subsystemId, instant(MONDAY, 23, 0)).inWindow())
             .as("the global evening rule does not apply to the overridden subsystem")
             .isFalse();
@@ -327,16 +363,24 @@ class WindowServiceTest {
 
         assertThat(check.inWindow()).isTrue();
         assertThat(check.windowId()).isEqualTo(saved.window().id());
+        assertThat(check.scope()).isEqualTo("GLOBAL");
+        assertThat(check.inherited()).isTrue();
     }
 
     @Test
     void a_check_without_an_explicit_instant_uses_now() {
-        SaveResult saved = saveGlobal(false, List.of(), List.of());
+        // A window that opens on a fixed date two days from now: if a null `at` were silently
+        // replaced by some default (epoch, a fixed date), the next window would not be this date.
+        LocalDate target = LocalDate.now(SHANGHAI).plusDays(2);
+        saveGlobal(true, List.of(), List.of(new ExceptionInput(target, "OPEN", null, null)));
 
-        WindowCheckView check = windows.check(0L, null);
+        WindowCheckView viaNull = windows.check(0L, null);
+        WindowCheckView viaNow = windows.check(0L, Instant.now());
 
-        assertThat(check.configured()).isTrue();
-        assertThat(check.windowId()).isEqualTo(saved.window().id());
+        assertThat(viaNull.configured()).isTrue();
+        assertThat(viaNull.inWindow()).isFalse();
+        assertThat(viaNull.next().start()).isEqualTo(target.atStartOfDay());
+        assertThat(viaNow.next().start()).isEqualTo(target.atStartOfDay());
     }
 
     @Test
@@ -350,6 +394,69 @@ class WindowServiceTest {
             .as("01:00 UTC is Monday 22:00-24:00 in the UTC window")
             .isTrue();
         assertThat(check.span().start()).isEqualTo(LocalDateTime.of(2026, 11, 23, 22, 0));
+    }
+
+    // ------------------------------------------------------------------ input bounds
+
+    @Test
+    void a_rule_time_with_seconds_is_rejected() {
+        assertParamInvalid(() -> saveGlobal(true, List.of(
+            new RuleInput(MON, LocalTime.of(22, 0, 30), LocalTime.of(23, 0))), List.of()), "start");
+        assertParamInvalid(() -> saveGlobal(true, List.of(
+            new RuleInput(MON, LocalTime.of(22, 0), LocalTime.of(23, 0, 0, 1))), List.of()), "end");
+    }
+
+    @Test
+    void an_exception_time_with_seconds_is_rejected() {
+        assertParamInvalid(() -> saveGlobal(true, List.of(), List.of(
+            new ExceptionInput(MONDAY, "OPEN", LocalTime.of(20, 0, 0, 500_000_000),
+                TWENTY_TWO))), "start");
+    }
+
+    @Test
+    void more_rules_than_the_page_can_show_are_rejected() {
+        List<RuleInput> rules = new ArrayList<>();
+        for (int i = 0; i < 29; i++) {
+            rules.add(new RuleInput(MON, NINE, TEN));
+        }
+        assertParamInvalid(() -> saveGlobal(true, rules, List.of()), "rules");
+    }
+
+    @Test
+    void more_exceptions_than_the_contract_allows_are_rejected() {
+        List<ExceptionInput> exceptions = new ArrayList<>();
+        for (int i = 0; i <= 100; i++) {
+            exceptions.add(new ExceptionInput(MONDAY.plusDays(i), "CLOSED", null, null));
+        }
+        assertParamInvalid(() -> saveGlobal(true, List.of(), exceptions), "exceptions");
+    }
+
+    @Test
+    void a_concurrently_created_header_is_reused_instead_of_failing() {
+        ReleaseWindowMapper windowMapper = mock(ReleaseWindowMapper.class);
+        WindowRuleMapper ruleMapper = mock(WindowRuleMapper.class);
+        WindowExceptionMapper exceptionMapper = mock(WindowExceptionMapper.class);
+        SubsystemMapper subsystemMapper = mock(SubsystemMapper.class);
+        ReleaseWindowPO raced = new ReleaseWindowPO();
+        raced.setId(77L);
+        raced.setScope("GLOBAL");
+        raced.setSubsystemId(0L);
+        raced.setEnabled(true);
+        raced.setTimezone("Asia/Shanghai");
+        when(windowMapper.selectByScope("GLOBAL", 0L)).thenReturn(null, raced);
+        when(windowMapper.insert(any(ReleaseWindowPO.class)))
+            .thenThrow(new DuplicateKeyException("simulated concurrent save"));
+
+        WindowService racing = new WindowService(windowMapper, ruleMapper, exceptionMapper,
+            subsystemMapper);
+        SaveResult result = racing.save(new SaveCommand("GLOBAL", null, true, null,
+            List.of(new RuleInput(MON, NINE, EIGHTEEN)), List.of()));
+
+        assertThat(result.window().id())
+            .as("the save adopts the row the other transaction created")
+            .isEqualTo(77L);
+        assertThat(result.window().rules()).hasSize(1);
+        verify(ruleMapper).insert(any(WindowRulePO.class));
     }
 
     // ------------------------------------------------------------------ fixtures

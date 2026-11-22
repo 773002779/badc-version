@@ -118,8 +118,8 @@ public final class ApprovalChain {
         return append(role);
     }
 
-    /** Appends the role unconditionally; used by the service's {@code ensureChain} diff. */
-    public ApprovalChain append(ApprovalRole role) {
+    /** Appends the role unconditionally; used by {@link #appendIfMissing(ApprovalRole)}. */
+    private ApprovalChain append(ApprovalRole role) {
         Objects.requireNonNull(role, "role must not be null");
         List<ApprovalStep> next = new ArrayList<>(steps);
         next.add(ApprovalStep.pending(nextStepNo(), role));

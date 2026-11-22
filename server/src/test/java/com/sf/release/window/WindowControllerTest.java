@@ -108,6 +108,17 @@ class WindowControllerTest {
             .andExpect(jsonPath("$.data.configured").value(true))
             .andExpect(jsonPath("$.data.inherited").value(true))
             .andExpect(jsonPath("$.data.scope").value("GLOBAL"));
+
+        mvc.perform(post("/api/v1/windows/check")
+                .header(USER_HEADER, ADMIN)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"subsystemId\":" + subsystemId
+                    + ",\"at\":\"2026-11-23T17:00:00Z\"}"))
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.inWindow").value(true))
+            .andExpect(jsonPath("$.data.scope").value("GLOBAL"))
+            .andExpect(jsonPath("$.data.inherited").value(true))
+            .andExpect(jsonPath("$.data.timezone").value("Asia/Shanghai"));
     }
 
     @Test
@@ -193,7 +204,10 @@ class WindowControllerTest {
             .andExpect(jsonPath("$.data.configured").value(false))
             .andExpect(jsonPath("$.data.enabled").value(false))
             .andExpect(jsonPath("$.data.windowId").doesNotExist())
-            .andExpect(jsonPath("$.data.span").doesNotExist());
+            .andExpect(jsonPath("$.data.span").doesNotExist())
+            .andExpect(jsonPath("$.data.timezone").doesNotExist())
+            .andExpect(jsonPath("$.data.scope").doesNotExist())
+            .andExpect(jsonPath("$.data.inherited").value(false));
     }
 
     @Test
@@ -209,12 +223,30 @@ class WindowControllerTest {
             .andExpect(jsonPath("$.data.configured").value(true))
             .andExpect(jsonPath("$.data.enabled").value(true))
             .andExpect(jsonPath("$.data.windowId").isNumber())
+            .andExpect(jsonPath("$.data.scope").value("GLOBAL"))
+            .andExpect(jsonPath("$.data.timezone").value("Asia/Shanghai"))
+            .andExpect(jsonPath("$.data.inherited").value(false))
             .andExpect(jsonPath("$.data.span.start")
                 .value(startsWith("2026-11-23T22:00")))
             .andExpect(jsonPath("$.data.span.end")
                 .value(startsWith("2026-11-24T02:00")))
             .andExpect(jsonPath("$.data.next.start")
                 .value(startsWith("2026-11-30T22:00")));
+    }
+
+    @Test
+    void a_negative_subsystem_id_is_40000() throws Exception {
+        mvc.perform(get("/api/v1/windows").param("subsystemId", "-1")
+                .header(USER_HEADER, ADMIN))
+            .andExpect(jsonPath("$.code").value(40000))
+            .andExpect(jsonPath("$.data.subsystemId").isNotEmpty());
+
+        mvc.perform(post("/api/v1/windows/check")
+                .header(USER_HEADER, ADMIN)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"subsystemId\":-1,\"at\":\"2026-11-23T14:00:00Z\"}"))
+            .andExpect(jsonPath("$.code").value(40000))
+            .andExpect(jsonPath("$.data.subsystemId").isNotEmpty());
     }
 
     @Test

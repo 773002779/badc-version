@@ -8,18 +8,26 @@ import com.sf.release.common.BizException;
 import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.approval.ApprovalStatus;
 import com.sf.release.domain.approval.ApprovalStep;
+import com.sf.release.infra.repo.ApprovalMapper;
+import com.sf.release.infra.repo.po.ApprovalPO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
+import java.sql.Timestamp;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * The 分级审批 service against the real test schema: chain construction, idempotency, append and
@@ -83,6 +91,8 @@ class ApprovalServiceTest {
     @Test
     void ensure_chain_preserves_a_decided_step() {
         approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        Timestamp createdAt = stepCreatedAt(1);
+
         approvals.decide(ORDER, 1, true, ACTOR, "同意");
 
         List<ApprovalStep> chain = approvals.ensureChain(ORDER,
@@ -93,6 +103,9 @@ class ApprovalServiceTest {
         assertThat(chain.get(0).decidedBy()).isEqualTo(ACTOR);
         assertThat(chain.get(0).comment()).isEqualTo("同意");
         assertThat(chain.get(1).status()).isEqualTo(ApprovalStatus.PENDING);
+        assertThat(stepCreatedAt(1))
+            .as("a decision is an explicit column update, not a whole-row rewrite")
+            .isEqualTo(createdAt);
     }
 
     @Test
@@ -131,6 +144,38 @@ class ApprovalServiceTest {
         assertThat(approvals.steps(ORDER)).hasSize(1);
     }
 
+    @Test
+    void drop_then_ensure_reuses_the_freed_step_number_without_duplicating_a_role() {
+        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        approvals.decide(ORDER, 1, true, ACTOR, null);
+
+        assertThat(approvals.dropPending(ORDER, ApprovalRole.DEPT_MANAGER)).isEqualTo(1);
+        List<ApprovalStep> chain = approvals.ensureChain(ORDER,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+
+        assertThat(chain).extracting(ApprovalStep::stepNo).containsExactly(1, 2);
+        assertThat(chain).extracting(ApprovalStep::role)
+            .containsExactly(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER);
+        assertThat(chain.get(1).status()).isEqualTo(ApprovalStatus.PENDING);
+        assertThat(count()).isEqualTo(2);
+    }
+
+    @Test
+    void a_gap_left_by_dropping_the_first_step_does_not_break_the_next_append() {
+        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+        assertThat(approvals.dropPending(ORDER, ApprovalRole.OPS_LEAD)).isEqualTo(1);
+
+        List<ApprovalStep> chain = approvals.ensureChain(ORDER,
+            List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+
+        assertThat(chain).extracting(ApprovalStep::stepNo)
+            .as("the append continues after the highest stored step, leaving the hole")
+            .containsExactly(2, 3);
+        assertThat(chain.stream().map(ApprovalStep::role).distinct().count())
+            .as("no role is duplicated")
+            .isEqualTo(2);
+    }
+
     // ------------------------------------------------------------------ decide
 
     @Test
@@ -165,6 +210,34 @@ class ApprovalServiceTest {
 
         assertBizError(() -> approvals.decide(ORDER, 1, true, "  ", null),
             BizError.PARAM_INVALID, "actor");
+    }
+
+    @Test
+    void an_actor_longer_than_the_column_is_rejected_before_writing() {
+        approvals.ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD));
+
+        assertBizError(() -> approvals.decide(ORDER, 1, true, "u".repeat(33), null),
+            BizError.PARAM_INVALID, "actor");
+        assertThat(approvals.steps(ORDER).get(0).status()).isEqualTo(ApprovalStatus.PENDING);
+    }
+
+    @Test
+    void a_racing_append_is_absorbed_and_leaves_one_chain() {
+        ApprovalMapper mapper = mock(ApprovalMapper.class);
+        List<ApprovalPO> rows = new ArrayList<>();
+        when(mapper.selectByOrder(ORDER)).thenAnswer(invocation -> List.copyOf(rows));
+        when(mapper.insert(any(ApprovalPO.class))).thenAnswer(invocation -> {
+            // The other transaction's insert wins, then our insert hits uk_approval_step.
+            rows.add(invocation.getArgument(0));
+            throw new DuplicateKeyException("simulated concurrent append");
+        });
+
+        List<ApprovalStep> chain = new ApprovalService(mapper)
+            .ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD));
+
+        assertThat(chain).hasSize(1);
+        assertThat(chain.get(0).role()).isEqualTo(ApprovalRole.OPS_LEAD);
+        assertThat(chain.get(0).status()).isEqualTo(ApprovalStatus.PENDING);
     }
 
     @Test
@@ -252,6 +325,12 @@ class ApprovalServiceTest {
     private long count() {
         Long value = jdbc.queryForObject("SELECT COUNT(*) FROM approval", Long.class);
         return value == null ? 0L : value;
+    }
+
+    private Timestamp stepCreatedAt(int stepNo) {
+        return jdbc.queryForObject(
+            "SELECT created_at FROM approval WHERE order_id = ? AND step_no = ?",
+            Timestamp.class, ORDER, stepNo);
     }
 
     private static void assertBizError(org.assertj.core.api.ThrowableAssert.ThrowingCallable call,

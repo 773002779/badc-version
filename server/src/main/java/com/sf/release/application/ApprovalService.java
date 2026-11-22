@@ -1,5 +1,6 @@
 package com.sf.release.application;
 
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.domain.approval.ApprovalChain;
@@ -9,6 +10,7 @@ import com.sf.release.infra.repo.ApprovalMapper;
 import com.sf.release.infra.repo.po.ApprovalPO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -47,6 +49,9 @@ public class ApprovalService {
 
     private static final int COMMENT_MAX_LENGTH = 512;
 
+    /** {@code approval.decided_by} is a user id column of 32 characters. */
+    private static final int ACTOR_MAX_LENGTH = 32;
+
     private final ApprovalMapper approvalMapper;
 
     public ApprovalService(ApprovalMapper approvalMapper) {
@@ -62,10 +67,17 @@ public class ApprovalService {
     }
 
     /**
-     * Makes sure the chain contains an active step for every required role, in the given order,
-     * appending only what is missing. Idempotent: calling it twice with the same roles changes
-     * nothing the second time, and calling it with fewer roles never removes a step (that is
-     * {@link #dropPending}'s job).
+     * Makes sure the chain contains an active step for every required role, appending only what is
+     * missing. Appends always go to the <em>tail</em> with the next free step numbers; callers pass
+     * the full required set at submission time, and a later, larger requirement (a freeze adding
+     * {@code DEPT_MANAGER}) is appended in the order it is passed — an already present role keeps
+     * its original position.
+     *
+     * <p>Idempotent: calling it twice with the same roles changes nothing the second time, and
+     * calling it with fewer roles never removes a step (that is {@link #dropPending}'s job). If a
+     * concurrent transaction appended the same step first, {@code uk_approval_step} rejects the
+     * duplicate insert; that collision is not an error — the method re-reads and returns the stored
+     * chain, so two racers end with exactly one chain.
      *
      * @return the chain after the append, in signature order
      */
@@ -83,9 +95,18 @@ public class ApprovalService {
         Instant now = Instant.now();
         int appended = 0;
         for (ApprovalStep step : chain.steps()) {
-            if (!existing.contains(step.stepNo())) {
+            if (existing.contains(step.stepNo())) {
+                continue;
+            }
+            try {
                 approvalMapper.insert(ApprovalPO.of(orderId, step, now));
                 appended++;
+            } catch (DuplicateKeyException ex) {
+                // Another transaction appended the same step number first. The unique key kept the
+                // chain single, so return what is actually stored instead of surfacing a 500.
+                log.info("approval chain append raced: orderId={}, stepNo={}; returning stored"
+                    + " chain", orderId, step.stepNo());
+                return chainOf(approvalMapper.selectByOrder(orderId)).steps();
             }
         }
         if (appended > 0) {
@@ -148,6 +169,11 @@ public class ApprovalService {
             throw new BizException(BizError.PARAM_INVALID, "审批人不能为空",
                 Map.of("actor", "不能为空"));
         }
+        if (signer.length() > ACTOR_MAX_LENGTH) {
+            throw new BizException(BizError.PARAM_INVALID,
+                "审批人长度不能超过 " + ACTOR_MAX_LENGTH,
+                Map.of("actor", "长度超限：" + signer.length()));
+        }
         List<ApprovalPO> stored = approvalMapper.selectByOrder(orderId);
         ApprovalChain chain = chainOf(stored);
         ApprovalStep target = chain.step(stepNo).orElseThrow(() -> new BizException(
@@ -176,7 +202,7 @@ public class ApprovalService {
         ApprovalChain updated = approved
             ? chain.approve(stepNo, signer, now, note)
             : chain.reject(stepNo, signer, now, note);
-        persistDecisions(orderId, chain, updated, stored);
+        persistDecisions(chain, updated, stored);
         log.info("approval step decided: orderId={}, stepNo={}, role={}, approved={}, by={},"
                 + " complete={}, rejected={}",
             orderId, stepNo, target.role(), approved, signer, updated.complete(),
@@ -199,11 +225,14 @@ public class ApprovalService {
     }
 
     /**
-     * Writes only the steps whose status or decision fields changed. {@code created_at} is left
-     * null on purpose: MyBatis-Plus skips null fields on update, so the original insert timestamp
-     * is preserved.
+     * Writes only the steps whose status or decision fields changed, with an explicit column
+     * update. It deliberately does not send a whole {@code ApprovalPO} through
+     * {@code updateById}: that would rely on the global null-field strategy to leave
+     * {@code created_at} untouched, and a strategy change elsewhere would silently rewrite the
+     * history timestamps. Only {@code status}, {@code decided_by}, {@code decided_at} and
+     * {@code comment} are written.
      */
-    private void persistDecisions(long orderId, ApprovalChain before, ApprovalChain after,
+    private void persistDecisions(ApprovalChain before, ApprovalChain after,
                                   List<ApprovalPO> stored) {
         Map<Integer, Long> ids = new HashMap<>();
         for (ApprovalPO po : stored) {
@@ -219,9 +248,12 @@ public class ApprovalService {
                 throw new IllegalStateException("cannot persist a decision for a new step "
                     + step.stepNo());
             }
-            ApprovalPO po = ApprovalPO.of(orderId, step, null);
-            po.setId(id);
-            approvalMapper.updateById(po);
+            approvalMapper.update(null, Wrappers.<ApprovalPO>lambdaUpdate()
+                .eq(ApprovalPO::getId, id)
+                .set(ApprovalPO::getStatus, step.status().name())
+                .set(ApprovalPO::getDecidedBy, step.decidedBy())
+                .set(ApprovalPO::getDecidedAt, step.decidedAt())
+                .set(ApprovalPO::getComment, step.comment()));
         }
     }
 

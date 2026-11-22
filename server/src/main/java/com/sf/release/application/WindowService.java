@@ -18,6 +18,7 @@ import com.sf.release.infra.repo.po.WindowExceptionPO;
 import com.sf.release.infra.repo.po.WindowRulePO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -74,6 +75,11 @@ public class WindowService {
     /** Longest slot accepted without a warning. */
     static final Duration MAX_SPAN = Duration.ofHours(12);
 
+    /** Upper bound of a saved rule set: 7 weekdays x 4 slots is already more than a page shows. */
+    static final int MAX_RULES = 28;
+    /** Upper bound of a saved exception calendar; a year of weekly exceptions is 52 rows. */
+    static final int MAX_EXCEPTIONS = 100;
+
     private static final int MINUTES_PER_DAY = 24 * 60;
     private static final DateTimeFormatter HOUR_MINUTE = DateTimeFormatter.ofPattern("HH:mm");
     private static final String[] WEEKDAY_LABELS =
@@ -117,8 +123,11 @@ public class WindowService {
     /**
      * The window that applies to a subsystem, or {@code null} when the platform has none. A
      * subsystem without its own row falls back to the GLOBAL default, marked {@code inherited}.
+     *
+     * @throws BizException 40000 when {@code subsystemId} is negative (0 is the GLOBAL query)
      */
     public WindowView effectiveWindow(long subsystemId) {
+        requireValidSubsystemId(subsystemId);
         WindowHit hit = effective(subsystemId);
         return hit == null ? null : toView(hit);
     }
@@ -130,19 +139,23 @@ public class WindowService {
      *           "check current time" button — nothing is persisted here)
      */
     public WindowCheckView check(long subsystemId, Instant at) {
+        requireValidSubsystemId(subsystemId);
         Instant when = at == null ? Instant.now() : at;
         WindowHit hit = effective(subsystemId);
         if (hit == null) {
             return toView(WindowCheck.notConfigured(), null);
         }
         ReleaseWindow window = hit.window();
+        WindowCheck check;
         if (!window.enabled()) {
-            return toView(WindowCheck.constraintOff(), hit.id());
+            check = WindowCheck.constraintOff();
+        } else {
+            LocalDateTime local = window.local(when);
+            WindowSpan span = window.spanAt(local).orElse(null);
+            WindowSpan next = window.nextWindow(local, ReleaseWindow.MAX_SEARCH_DAYS).orElse(null);
+            check = new WindowCheck(span != null, span, next, true, true);
         }
-        LocalDateTime local = window.local(when);
-        WindowSpan span = window.spanAt(local).orElse(null);
-        WindowSpan next = window.nextWindow(local, ReleaseWindow.MAX_SEARCH_DAYS).orElse(null);
-        return toView(new WindowCheck(span != null, span, next, true, true), hit.id());
+        return toView(check, hit);
     }
 
     /**
@@ -174,15 +187,25 @@ public class WindowService {
         long windowId;
         if (stored == null) {
             ReleaseWindowPO header = ReleaseWindowPO.of(window, now, now);
-            windowMapper.insert(header);
-            windowId = header.getId();
+            try {
+                windowMapper.insert(header);
+                windowId = header.getId();
+            } catch (DuplicateKeyException ex) {
+                // A concurrent save created the header first. uk_window_scope kept it single, so
+                // this save must not fail: adopt the stored row and apply this save to it, exactly
+                // as if the other transaction had committed a moment earlier.
+                ReleaseWindowPO raced = windowMapper.selectByScope(scope.name(), subsystemId);
+                if (raced == null) {
+                    throw ex;
+                }
+                windowId = raced.getId();
+                updateHeader(windowId, enabled, zone, now);
+                log.info("release window header was created concurrently, reusing windowId={}",
+                    windowId);
+            }
         } else {
             windowId = stored.getId();
-            windowMapper.update(null, Wrappers.<ReleaseWindowPO>lambdaUpdate()
-                .eq(ReleaseWindowPO::getId, windowId)
-                .set(ReleaseWindowPO::getEnabled, enabled)
-                .set(ReleaseWindowPO::getTimezone, zone.getId())
-                .set(ReleaseWindowPO::getUpdatedAt, now));
+            updateHeader(windowId, enabled, zone, now);
         }
         // Replace the children: the sets are small, and a delete+insert keeps the stored window
         // exactly equal to what the operator submitted (no orphan rule from an earlier save).
@@ -201,6 +224,15 @@ public class WindowService {
             windowId, scope, subsystemId, enabled, rules.size(), exceptions.size(),
             warnings.size());
         return new SaveResult(view, warnings);
+    }
+
+    /** Applies a save to an existing header without touching {@code created_at}. */
+    private void updateHeader(long windowId, boolean enabled, ZoneId zone, Instant now) {
+        windowMapper.update(null, Wrappers.<ReleaseWindowPO>lambdaUpdate()
+            .eq(ReleaseWindowPO::getId, windowId)
+            .set(ReleaseWindowPO::getEnabled, enabled)
+            .set(ReleaseWindowPO::getTimezone, zone.getId())
+            .set(ReleaseWindowPO::getUpdatedAt, now));
     }
 
     // ------------------------------------------------------------------ effective window
@@ -259,6 +291,17 @@ public class WindowService {
         return subsystemId;
     }
 
+    /**
+     * A read for a negative subsystem id is a client bug, not "the global window": silently
+     * answering GLOBAL would let a caller believe a subsystem has no window of its own.
+     */
+    private static void requireValidSubsystemId(long subsystemId) {
+        if (subsystemId < 0) {
+            throw new BizException(BizError.PARAM_INVALID, "系统 ID 不能为负数",
+                Map.of("subsystemId", subsystemId));
+        }
+    }
+
     private ZoneId parseZone(String raw) {
         String value = trimToNull(raw);
         if (value == null) {
@@ -274,6 +317,10 @@ public class WindowService {
 
     private static List<WindowRule> parseRules(List<RuleInput> inputs) {
         List<RuleInput> rows = inputs == null ? List.of() : inputs;
+        if (rows.size() > MAX_RULES) {
+            throw new BizException(BizError.PARAM_INVALID,
+                "规则数量不能超过 " + MAX_RULES + " 条", Map.of("rules", rows.size()));
+        }
         List<WindowRule> rules = new ArrayList<>(rows.size());
         for (int index = 0; index < rows.size(); index++) {
             RuleInput input = rows.get(index);
@@ -291,6 +338,8 @@ public class WindowService {
                 throw new BizException(BizError.PARAM_INVALID, "规则起止时间不能为空",
                     Map.of("start", "第 " + position + " 条规则缺少起止时间"));
             }
+            requireMinutePrecision(input.start(), "start", position, "规则");
+            requireMinutePrecision(input.end(), "end", position, "规则");
             if (input.start().equals(input.end())) {
                 throw new BizException(BizError.PARAM_INVALID, "规则起止时间不能相同",
                     Map.of("start", "第 " + position + " 条规则 " + format(input.start())
@@ -300,6 +349,22 @@ public class WindowService {
         }
         rejectOverlaps(rules);
         return List.copyOf(rules);
+    }
+
+    /**
+     * Rejects a time that is not on a whole minute. The window walk is minute-stepped (it truncates
+     * to minutes), so a {@code 21:59:30} start would be evaluated as {@code 21:59} and disagree
+     * with the stored value by up to 59 seconds — better to refuse the input than to answer a
+     * different question than the one that was written down.
+     */
+    private static void requireMinutePrecision(LocalTime time, String field, int position,
+                                               String kind) {
+        if (time.getSecond() != 0 || time.getNano() != 0) {
+            throw new BizException(BizError.PARAM_INVALID,
+                "时间必须精确到分钟（秒必须为 0）",
+                Map.of(field, "第 " + position + " 条" + kind + "时间 " + time
+                    + " 带秒/纳秒"));
+        }
     }
 
     /** Two rules of the same weekday may not share a minute. Boundary contact is not an overlap. */
@@ -333,6 +398,10 @@ public class WindowService {
 
     private static List<WindowException> parseExceptions(List<ExceptionInput> inputs) {
         List<ExceptionInput> rows = inputs == null ? List.of() : inputs;
+        if (rows.size() > MAX_EXCEPTIONS) {
+            throw new BizException(BizError.PARAM_INVALID,
+                "例外数量不能超过 " + MAX_EXCEPTIONS + " 条", Map.of("exceptions", rows.size()));
+        }
         List<WindowException> exceptions = new ArrayList<>(rows.size());
         Set<LocalDate> dates = new HashSet<>();
         for (int index = 0; index < rows.size(); index++) {
@@ -363,6 +432,8 @@ public class WindowService {
                 throw new BizException(BizError.PARAM_INVALID, "例外时段需要同时填写起止时间",
                     Map.of("start", "第 " + position + " 条例外只填写了一个时间"));
             }
+            requireMinutePrecision(input.start(), "start", position, "例外");
+            requireMinutePrecision(input.end(), "end", position, "例外");
             if (input.start().equals(input.end())) {
                 throw new BizException(BizError.PARAM_INVALID, "例外起止时间不能相同",
                     Map.of("start", "第 " + position + " 条例外 " + format(input.start())
@@ -454,9 +525,13 @@ public class WindowService {
             hit.inherited());
     }
 
-    private static WindowCheckView toView(WindowCheck check, Long windowId) {
+    private static WindowCheckView toView(WindowCheck check, WindowHit hit) {
         return new WindowCheckView(check.inWindow(), spanView(check.span()),
-            spanView(check.next()), check.configured(), windowId, check.enabled());
+            spanView(check.next()), check.configured(), hit == null ? null : hit.id(),
+            check.enabled(),
+            hit == null ? null : hit.window().zoneId().getId(),
+            hit == null ? null : hit.window().scope().name(),
+            hit != null && hit.inherited());
     }
 
     private static WindowSpanView spanView(WindowSpan span) {

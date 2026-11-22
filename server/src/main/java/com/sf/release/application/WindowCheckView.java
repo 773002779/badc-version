@@ -10,9 +10,11 @@ package com.sf.release.application;
  * {@code enabled} is true, {@code span} is the span containing the evaluated instant (null when
  * outside) and {@code next} the following span (null when none opens within seven days).
  *
- * <p>{@code windowId} is null when nothing is configured; it is the id the admission snapshot
- * stores so the decision can be traced back to the window that produced it.
+ * <p>{@code windowId}, {@code timezone}, {@code scope} and {@code inherited} describe <em>which</em>
+ * window decided: the page can say "系统覆盖的窗口（Asia/Shanghai）" instead of implying the
+ * subsystem has rules of its own. All four are null/false when nothing is configured.
  */
 public record WindowCheckView(boolean inWindow, WindowSpanView span, WindowSpanView next,
-                              boolean configured, Long windowId, boolean enabled) {
+                              boolean configured, Long windowId, boolean enabled, String timezone,
+                              String scope, boolean inherited) {
 }

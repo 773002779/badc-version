@@ -35,8 +35,18 @@ public class WindowRulePO {
         return po;
     }
 
+    /**
+     * The domain rule.
+     *
+     * @throws IllegalStateException a required column is NULL (the table declares none of them
+     *                               nullable, so this is data corruption, not an empty value)
+     */
     public WindowRule toDomain() {
-        return new WindowRule(dayOfWeek == null ? 0 : dayOfWeek, startTime, endTime);
+        if (dayOfWeek == null || startTime == null || endTime == null) {
+            throw new IllegalStateException(
+                "window_rule " + id + " is incomplete: dayOfWeek/start/end are NOT NULL columns");
+        }
+        return new WindowRule(dayOfWeek, startTime, endTime);
     }
 
     public Long getId() {

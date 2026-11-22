@@ -46,12 +46,30 @@ public class ReleaseWindowPO {
         return po;
     }
 
-    /** The domain window assembled from this header plus its loaded child rows. */
+    /**
+     * The domain window assembled from this header plus its loaded child rows.
+     *
+     * <p>A row with a NULL scope, subsystem id or enabled flag cannot be interpreted: guessing
+     * (for example "enabled defaults to false") would fail <em>open</em>, because
+     * {@code enabled = false} means "always inside the window". Those states are data corruption,
+     * so they throw instead of producing a permissive window.
+     *
+     * @throws IllegalStateException the row is incomplete
+     */
     public ReleaseWindow toDomain(List<WindowRulePO> rules, List<WindowExceptionPO> exceptions) {
+        if (scope == null || scope.isBlank()) {
+            throw new IllegalStateException("release_window " + id + " has no scope");
+        }
+        if (subsystemId == null) {
+            throw new IllegalStateException("release_window " + id + " has no subsystem_id");
+        }
+        if (enabled == null) {
+            throw new IllegalStateException("release_window " + id + " has no enabled flag");
+        }
         return new ReleaseWindow(
-            scope == null || scope.isBlank() ? WindowScope.GLOBAL : WindowScope.valueOf(scope),
-            subsystemId == null ? ReleaseWindow.GLOBAL_SUBSYSTEM_ID : subsystemId,
-            enabled != null && enabled,
+            WindowScope.valueOf(scope),
+            subsystemId,
+            enabled,
             timezone == null || timezone.isBlank()
                 ? ReleaseWindow.DEFAULT_ZONE : ZoneId.of(timezone),
             rules == null ? List.of() : rules.stream().map(WindowRulePO::toDomain).toList(),

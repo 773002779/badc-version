@@ -44,14 +44,25 @@ public class ApprovalPO {
         return po;
     }
 
+    /**
+     * The domain step.
+     *
+     * @throws IllegalStateException a required column is NULL. Coercing (for example
+     *                               {@code OPS_LEAD}/{@code PENDING}/step 1) would invent an approval
+     *                               that nobody configured, so a corrupt row throws instead.
+     */
     public ApprovalStep toDomain() {
-        return new ApprovalStep(
-            stepNo == null ? 1 : stepNo,
-            role == null || role.isBlank() ? ApprovalRole.OPS_LEAD : ApprovalRole.valueOf(role),
-            status == null || status.isBlank() ? ApprovalStatus.PENDING : ApprovalStatus.valueOf(status),
-            decidedBy,
-            decidedAt,
-            comment);
+        if (stepNo == null) {
+            throw new IllegalStateException("approval " + id + " has no step_no");
+        }
+        if (role == null || role.isBlank()) {
+            throw new IllegalStateException("approval " + id + " has no role");
+        }
+        if (status == null || status.isBlank()) {
+            throw new IllegalStateException("approval " + id + " has no status");
+        }
+        return new ApprovalStep(stepNo, ApprovalRole.valueOf(role), ApprovalStatus.valueOf(status),
+            decidedBy, decidedAt, comment);
     }
 
     public Long getId() {

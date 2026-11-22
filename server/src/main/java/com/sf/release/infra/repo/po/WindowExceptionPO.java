@@ -36,7 +36,15 @@ public class WindowExceptionPO {
         return po;
     }
 
+    /**
+     * The domain exception. A missing mode falls back to {@code CLOSED}, which is the
+     * <em>fail-closed</em> direction (the date closes rather than silently opening); every other
+     * required column is NOT NULL in the table.
+     */
     public WindowException toDomain() {
+        if (theDate == null) {
+            throw new IllegalStateException("window_exception " + id + " has no the_date");
+        }
         return new WindowException(
             theDate,
             mode == null || mode.isBlank()

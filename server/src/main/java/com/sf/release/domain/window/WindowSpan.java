@@ -1,6 +1,5 @@
 package com.sf.release.domain.window;
 
-import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Objects;
 
@@ -19,15 +18,5 @@ public record WindowSpan(LocalDateTime start, LocalDateTime end) {
         if (end.isBefore(start)) {
             throw new IllegalArgumentException("end must not be before start: " + start + ".." + end);
         }
-    }
-
-    /** The length of the span; a zero-length span is possible only for a degenerate rule. */
-    public Duration length() {
-        return Duration.between(start, end);
-    }
-
-    /** True when {@code at} lies in {@code [start, end)}. */
-    public boolean contains(LocalDateTime at) {
-        return !at.isBefore(start) && at.isBefore(end);
     }
 }

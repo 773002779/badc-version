@@ -115,7 +115,9 @@ public final class WindowDtos {
 
     /**
      * The check answer. {@code configured}/{@code enabled} tell the page which of the two
-     * "allowed" cases applies; {@code windowId} is null when nothing is configured.
+     * "allowed" cases applies; {@code windowId}, {@code timezone}, {@code scope} and
+     * {@code inherited} say which window decided (all null/false when nothing is configured) —
+     * {@code inherited} means the subsystem fell back to the GLOBAL default.
      */
     public record WindowCheckResponse(
         boolean inWindow,
@@ -123,11 +125,15 @@ public final class WindowDtos {
         SpanResponse next,
         boolean configured,
         Long windowId,
-        boolean enabled) {
+        boolean enabled,
+        String timezone,
+        String scope,
+        boolean inherited) {
 
         public static WindowCheckResponse of(WindowCheckView view) {
             return new WindowCheckResponse(view.inWindow(), SpanResponse.of(view.span()),
-                SpanResponse.of(view.next()), view.configured(), view.windowId(), view.enabled());
+                SpanResponse.of(view.next()), view.configured(), view.windowId(), view.enabled(),
+                view.timezone(), view.scope(), view.inherited());
         }
     }
 }
