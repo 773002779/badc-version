@@ -201,4 +201,5 @@ Say '  2) 打开前端         : powershell -ExecutionPolicy Bypass -File script
 Say '  3) 自己调接口       : curl -H "X-User-Id: dev" http://127.0.0.1:$Port/subsystems'
 Say ''
 Say '说明：一期没有配置 CODING 连接（coding_conn）时，发布会在构建阶段以 ENGINE_UNAVAILABLE 失败；' 'DarkGray'
-Say '      这是预期结果。流水线会进入 VERIFY 跑门禁；生产部署尚未交付（P3），所以最终停在 PROD_DEPLOY（status=PAUSED）。' 'DarkGray'
+Say '      这是预期结果。连接在「设置 → CODING 对接」维护；本地可用 scripts\mock-coding.mjs 配一个假租户。' 'DarkGray'
+Say '      流水线会进入 VERIFY 跑门禁；生产部署尚未交付（P3），所以最终停在 PROD_DEPLOY（status=PAUSED）。' 'DarkGray'

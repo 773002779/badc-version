@@ -21,6 +21,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * CODING connection management: the tenant-wide connection plus optional per-subsystem
@@ -48,6 +49,7 @@ public class CodingConnAppService {
     private static final int TEAM_MAX_LENGTH = 64;
     private static final int PROJECT_MAX_LENGTH = 64;
     private static final int TOKEN_MAX_LENGTH = 4096;
+    private static final int PROBE_MESSAGE_MAX_LENGTH = 500;
     private static final int HINT_VISIBLE_CHARACTERS = 4;
     private static final int HINT_MIN_LENGTH = 6;
 
@@ -85,10 +87,24 @@ public class CodingConnAppService {
         String normalizedBaseUrl = requireBaseUrl(baseUrl);
         String normalizedTeam = requireText(team, TEAM_MAX_LENGTH, "team", "CODING 团队");
         String normalizedProject = requireText(project, PROJECT_MAX_LENGTH, "project", "CODING 项目");
-        String normalizedToken = requireText(token, TOKEN_MAX_LENGTH, "token", "CODING 凭证");
 
-        // Encrypt before touching the database so the plaintext never leaves this method.
-        String cipherText = credentialCipher.encrypt(normalizedToken);
+        // An empty token means "keep the stored credential". The page only ever knows the masked
+        // hint, so a routine edit (new project, new base URL) must not force the operator to
+        // paste the secret again; a rotation is the case where a token IS supplied. The first
+        // save still requires one.
+        CodingConnPO stored = selectStored(effectiveScope, effectiveSubsystemId);
+        String normalizedToken = optionalText(token, TOKEN_MAX_LENGTH, "token", "CODING 凭证");
+        String cipherText;
+        if (normalizedToken == null) {
+            if (stored == null || stored.getCredentialCipher() == null) {
+                throw new BizException(BizError.PARAM_INVALID, "CODING 凭证不能为空",
+                    Map.of("token", "不能为空"));
+            }
+            cipherText = stored.getCredentialCipher();
+        } else {
+            // Encrypt before touching the database so the plaintext never leaves this method.
+            cipherText = credentialCipher.encrypt(normalizedToken);
+        }
         Instant now = Instant.now();
 
         int rows = updateStoredConnection(effectiveScope, effectiveSubsystemId, normalizedBaseUrl,
@@ -122,9 +138,9 @@ public class CodingConnAppService {
     }
 
     /**
-     * Decrypts the stored credential and asks the injected probe to check the connection.
-     * A failed probe is propagated as data (its message is the operator-facing reason), not
-     * converted into an exception.
+     * Decrypts the stored credential and probes one stored connection by id. A failed probe is
+     * propagated as data (its message is the operator-facing reason), not converted into an
+     * exception. The outcome is written back to the row.
      */
     public CodingProbeView test(long id) {
         CodingConnPO po = connMapper.selectById(id);
@@ -132,15 +148,71 @@ public class CodingConnAppService {
             throw new BizException(BizError.PARAM_INVALID, "CODING 连接不存在",
                 Map.of("id", id));
         }
+        String token = credentialCipher.decrypt(po.getCredentialCipher());
+        ProbeResult result = requireProbe(id).probe(po.toDomain(), token);
+        Instant at = Instant.now();
+        recordProbe(id, result, at);
+        log.info("coding connection probe finished: id={}, status={}", id, result.status());
+        return new CodingProbeView(result.status().name(), result.message(),
+            result.buildJobs(), result.deployJobs(), at, true);
+    }
+
+    /**
+     * Tests the values currently on screen. Blank fields fall back to the stored GLOBAL
+     * connection, so editing only the base URL does not require retyping the team, project or
+     * token — and a wrong draft token never lands in the database.
+     *
+     * <p><strong>When the result is recorded.</strong> Only when the resolved values are exactly
+     * the saved connection ({@code testForm} with an untouched form). Testing a draft leaves
+     * {@code last_probe_*} and {@code updated_at} untouched, and the page says so. Comparing
+     * values is more honest than a "persist" flag the caller could set while testing something
+     * else.
+     */
+    public CodingProbeView testForm(String baseUrl, String team, String project, String token) {
+        CodingConnPO stored = selectStored(CodingScope.GLOBAL, CodingConn.GLOBAL_SUBSYSTEM_ID);
+        String effectiveBaseUrl = firstNonBlank(baseUrl, stored == null ? null : stored.getBaseUrl());
+        String effectiveTeam = firstNonBlank(team, stored == null ? null : stored.getTeam());
+        String effectiveProject = firstNonBlank(project, stored == null ? null : stored.getProject());
+        String effectiveToken = optionalText(token, TOKEN_MAX_LENGTH, "token", "CODING 凭证");
+        if (effectiveToken == null && stored != null) {
+            effectiveToken = credentialCipher.decrypt(stored.getCredentialCipher());
+        }
+        CodingConn draft = new CodingConn(
+            stored == null ? null : stored.getId(),
+            CodingScope.GLOBAL,
+            CodingConn.GLOBAL_SUBSYSTEM_ID,
+            requireBaseUrl(effectiveBaseUrl),
+            requireText(effectiveTeam, TEAM_MAX_LENGTH, "team", "CODING 团队"),
+            requireText(effectiveProject, PROJECT_MAX_LENGTH, "project", "CODING 项目"),
+            null, null, null);
+        ProbeResult result = requireProbe(null).probe(draft, effectiveToken);
+        Instant at = Instant.now();
+        boolean persisted = stored != null && matchesStored(stored, draft, effectiveToken);
+        if (persisted) {
+            recordProbe(stored.getId(), result, at);
+        }
+        log.info("coding connection form probe finished: status={}, persisted={}",
+            result.status(), persisted);
+        return new CodingProbeView(result.status().name(), result.message(),
+            result.buildJobs(), result.deployJobs(), at, persisted);
+    }
+
+    /**
+     * The tenant-wide connection, or {@code null} when this platform has none yet. The settings
+     * screen reads this on load and must not treat "not configured yet" as an error.
+     */
+    public CodingConnView globalOrNull() {
+        CodingConnPO po = selectStored(CodingScope.GLOBAL, CodingConn.GLOBAL_SUBSYSTEM_ID);
+        return po == null ? null : toView(po);
+    }
+
+    private CodingProbe requireProbe(Long id) {
         CodingProbe probe = probeProvider.getIfAvailable();
         if (probe == null) {
             throw new BizException(BizError.ENGINE_UNAVAILABLE, "CODING 探测引擎不可用",
-                Map.of("id", id));
+                id == null ? Map.of() : Map.of("id", id));
         }
-        String token = credentialCipher.decrypt(po.getCredentialCipher());
-        ProbeResult result = probe.probe(po.toDomain(), token);
-        log.info("coding connection probe finished: id={}, status={}", id, result.status());
-        return new CodingProbeView(result.status().name(), result.message());
+        return probe;
     }
 
     private CodingConnView loadStoredView(CodingScope scope, long subsystemId) {
@@ -168,6 +240,35 @@ public class CodingConnAppService {
         return connMapper.selectOne(Wrappers.<CodingConnPO>lambdaQuery()
             .eq(CodingConnPO::getScope, scope.name())
             .eq(CodingConnPO::getSubsystemId, subsystemId));
+    }
+
+    /** Writes the last probe outcome; only the recent one is kept. */
+    private void recordProbe(long id, ProbeResult result, Instant at) {
+        connMapper.update(null, Wrappers.<CodingConnPO>lambdaUpdate()
+            .eq(CodingConnPO::getId, id)
+            .set(CodingConnPO::getLastProbeAt, at)
+            .set(CodingConnPO::getLastProbeOk, result.isOk())
+            .set(CodingConnPO::getLastProbeMessage,
+                truncate(result.message(), PROBE_MESSAGE_MAX_LENGTH)));
+    }
+
+    /** True when the tested values are exactly the stored row (including the plaintext token). */
+    private boolean matchesStored(CodingConnPO stored, CodingConn draft, String token) {
+        if (stored == null) {
+            return false;
+        }
+        if (!Objects.equals(trimToNull(stored.getBaseUrl()), draft.baseUrl())
+                || !Objects.equals(trimToNull(stored.getTeam()), draft.team())
+                || !Objects.equals(trimToNull(stored.getProject()), draft.project())) {
+            return false;
+        }
+        try {
+            return Objects.equals(
+                credentialCipher.decrypt(stored.getCredentialCipher()), token);
+        } catch (RuntimeException ex) {
+            // A credential that cannot be decrypted is not the one that was just tested.
+            return false;
+        }
     }
 
     private static CodingScope parseScope(String raw) {
@@ -229,7 +330,10 @@ public class CodingConnAppService {
             po.getProject(),
             hint(token),
             po.getCreatedAt(),
-            po.getUpdatedAt());
+            po.getUpdatedAt(),
+            po.getLastProbeAt(),
+            po.getLastProbeOk(),
+            po.getLastProbeMessage());
     }
 
     /**
@@ -246,6 +350,31 @@ public class CodingConnAppService {
     private static BizException notFound(CodingScope scope, long subsystemId) {
         return new BizException(BizError.PARAM_INVALID, "CODING 连接不存在",
             Map.of("scope", scope.name(), "subsystemId", subsystemId));
+    }
+
+    /** Same as {@link #requireText} but a blank value yields {@code null} instead of failing. */
+    private static String optionalText(String raw, int maxLength, String field, String label) {
+        String value = trimToNull(raw);
+        if (value == null) {
+            return null;
+        }
+        if (value.length() > maxLength) {
+            throw new BizException(BizError.PARAM_INVALID,
+                label + "长度不能超过 " + maxLength, Map.of(field, "长度超限"));
+        }
+        return value;
+    }
+
+    private static String firstNonBlank(String preferred, String fallback) {
+        String value = trimToNull(preferred);
+        return value == null ? trimToNull(fallback) : value;
+    }
+
+    private static String truncate(String value, int maxLength) {
+        if (value == null || value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength);
     }
 
     private static String trimToNull(String value) {
@@ -266,14 +395,21 @@ public class CodingConnAppService {
         String project,
         String tokenHint,
         Instant createdAt,
-        Instant updatedAt) {
+        Instant updatedAt,
+        Instant lastProbeAt,
+        Boolean lastProbeOk,
+        String lastProbeMessage) {
     }
 
     /**
      * Probe outcome exposed to the web layer. The {@code infra.engine.ProbeResult} enum is
      * flattened to its name so no domain or infra type appears in an application API.
+     *
+     * <p>{@code persisted} says whether this result became the row's "last verified" state: the
+     * page can then be honest about a draft test instead of implying it was recorded.
      */
-    public record CodingProbeView(String status, String message) {
+    public record CodingProbeView(String status, String message, int buildJobs, int deployJobs,
+                                  Instant at, boolean persisted) {
 
         public boolean ok() {
             return "OK".equals(status);

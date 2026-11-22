@@ -250,3 +250,32 @@ export interface MeView {
   allUnits: boolean
   unitIds: number[]
 }
+
+// ------------------------------------------------------- CODING connection config
+
+/** The tenant-wide CODING connection; `configured:false` means "nothing saved yet". */
+export interface CodingConnView {
+  configured: boolean
+  id?: number | null
+  baseUrl?: string | null
+  team?: string | null
+  project?: string | null
+  /** `tok-***`; the credential itself never leaves the server. */
+  tokenHint?: string | null
+  updatedAt?: string | null
+  lastProbeAt?: string | null
+  lastProbeOk?: boolean | null
+  lastProbeMessage?: string | null
+}
+
+/** Result of "测试连接": the engine message plus the job counts it enumerated. */
+export interface CodingProbeView {
+  ok: boolean
+  status: string
+  message: string
+  buildJobs: number
+  deployJobs: number
+  at?: string | null
+  /** True when the tested values were the saved connection, so the result became "last verified". */
+  persisted: boolean
+}

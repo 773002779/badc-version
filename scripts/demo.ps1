@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     跑一遍一期完整链路：子系统 → 部署单元 → CODING 任务绑定 → 环境 DE → 任务 → 变更项 → 发布 → 查询。
@@ -146,7 +146,7 @@ Say ''
 if ($detail.status -eq 'FAILED' -and -not $detail.imageDigest) {
     Say '结果说明：构建阶段的引擎调用失败（没有配置 CODING 连接），实例按设计置 FAILED。' 'Yellow'
     Say '          链路本身是通的：任务→变更项→发布单→4 节点→查询 都成功了。' 'Yellow'
-    Say '          接上真实 CODING（coding_conn + 端点模板）后，同一条链路会继续构建、部署测试环境，' 'Yellow'
+    Say '          接上真实 CODING（设置页「CODING 对接」+ 端点模板）后，同一条链路会继续构建、部署测试环境，' 'Yellow'
     Say '          进入验证确认跑七项检查，并在生产部署前停住（P3）。' 'Yellow'
 } elseif ($detail.status -eq 'PAUSED') {
     Say '结果说明：构建、测试部署与门禁都已完成，流水线停在 PROD_DEPLOY 之前（PAUSED，生产部署为 P3）。' 'Yellow'

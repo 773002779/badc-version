@@ -53,6 +53,7 @@ class CodingJobQueryTest {
     @BeforeEach
     void resetFixtures() {
         TestUserContext.allUnits("t6-admin");
+        jdbc.update("DELETE FROM coding_conn");
         jdbc.update("DELETE FROM coding_task_binding");
         jdbc.update("DELETE FROM env_de");
         jdbc.update("DELETE FROM deploy_unit");
@@ -128,6 +129,39 @@ class CodingJobQueryTest {
             .isInstanceOf(BizException.class)
             .extracting("error").isEqualTo(BizError.FORBIDDEN);
         assertThat(engine.buildCalls).isZero();
+    }
+
+    @Test
+    void a_system_without_a_project_inherits_the_default_project_of_the_connection() {
+        givenGlobalConn("default-project");
+        long bareSubsystem = givenSubsystem("SCC-BARE", null);
+        long unitId = unitService.create(new CreateCmd(bareSubsystem, "bare-api", OWNER));
+        engine.buildJobs = List.of(new EngineJob("D-BUILD", "默认构建", "BUILD"));
+
+        List<CodingJobQueryService.CodingJobView> jobs = jobQueryService.list(unitId, "BUILD");
+
+        assertThat(jobs).extracting(CodingJobQueryService.CodingJobView::taskId)
+            .containsExactly("D-BUILD");
+        assertThat(engine.lastProject())
+            .as("an empty subsystem project falls back to the connection's default project")
+            .isEqualTo("default-project");
+    }
+
+    @Test
+    void a_system_project_wins_over_the_connection_default() {
+        givenGlobalConn("default-project");
+        long unitId = unitService.create(new CreateCmd(subsystemId, "quota-api", OWNER));
+
+        jobQueryService.list(unitId, "BUILD");
+
+        assertThat(engine.lastProject()).isEqualTo("quota-project");
+    }
+
+    private void givenGlobalConn(String project) {
+        jdbc.update("INSERT INTO coding_conn (scope, subsystem_id, base_url, team, project,"
+            + " credential_cipher, created_at, updated_at)"
+            + " VALUES ('GLOBAL', 0, 'https://coding.example.com', 'team-a', ?, 'AAAA',"
+            + " NOW(3), NOW(3))", project);
     }
 
     private long givenSubsystem(String name, String codingProject) {

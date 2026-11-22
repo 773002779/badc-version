@@ -10,6 +10,7 @@ import com.sf.release.infra.engine.EngineHttpClient;
 import com.sf.release.infra.engine.EngineProperties;
 import com.sf.release.infra.engine.EngineRegistry;
 import com.sf.release.infra.engine.GlobalCodingConnectionProvider;
+import com.sf.release.infra.engine.HttpCodingProbe;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -57,5 +58,15 @@ public class EngineConfig {
     @Bean
     public EngineRegistry engineRegistry(List<CicdEngine> engines) {
         return new EngineRegistry(engines);
+    }
+
+    /**
+     * Connectivity probe used by the settings screen. Registered here (not via component scan)
+     * so the whole engine wiring stays in one place; {@code CodingConnAppService} depends on the
+     * {@code CodingProbe} port, never on this class.
+     */
+    @Bean
+    public HttpCodingProbe httpCodingProbe(CodingEngine engine) {
+        return new HttpCodingProbe(engine);
     }
 }

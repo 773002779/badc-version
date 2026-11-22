@@ -234,6 +234,16 @@ public class CodingEngine implements CicdEngine {
      */
     @Override
     public List<EngineJob> listJobs(String project, JobKind kind) {
+        return listJobs(connectionSupplier.get(), project, kind);
+    }
+
+    /**
+     * Same query against an <strong>explicit</strong> connection. The connectivity probe uses
+     * this: it must be able to test a draft base URL and token that are not saved yet, so it
+     * cannot go through the process-wide supplier (and a probe must never change what the
+     * pipeline talks to).
+     */
+    public List<EngineJob> listJobs(Connection connection, String project, JobKind kind) {
         if (project == null || project.isBlank()) {
             throw EngineException.unavailable("CODING 项目不能为空，无法查询任务列表");
         }
@@ -254,7 +264,7 @@ public class CodingEngine implements CicdEngine {
         Map<String, String> vars = new LinkedHashMap<>();
         put(vars, "project", project.trim());
         put(vars, "jobType", kind.name());
-        EngineHttpClient.HttpResult result = execute(ACTION_JOB_LIST, vars);
+        EngineHttpClient.HttpResult result = execute(ACTION_JOB_LIST, vars, null, connection);
         JsonNode root = parse(result, ACTION_JOB_LIST);
         JsonNode list = node(root, listExpression, ACTION_JOB_LIST);
         if (list == null || !list.isArray()) {
@@ -385,13 +395,18 @@ public class CodingEngine implements CicdEngine {
         return execute(action, vars, null);
     }
 
-    /**
-     * Executes one action, optionally with a request-body template replacing the endpoint's
-     * configured body (the branch-head body of a build trigger with no known commit).
-     */
     private EngineHttpClient.HttpResult execute(String action, Map<String, String> vars,
                                                 String bodyOverride) {
-        Connection connection = connectionSupplier.get();
+        return execute(action, vars, bodyOverride, connectionSupplier.get());
+    }
+
+    /**
+     * Executes one action, optionally with a request-body template replacing the endpoint's
+     * configured body (the branch-head body of a build trigger with no known commit) and
+     * optionally with an explicit connection (the connectivity probe).
+     */
+    private EngineHttpClient.HttpResult execute(String action, Map<String, String> vars,
+                                                String bodyOverride, Connection connection) {
         if (connection == null) {
             throw EngineException.unavailable("CODING 连接未配置：" + action);
         }

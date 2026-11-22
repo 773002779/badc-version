@@ -441,7 +441,7 @@ async function submitDe() {
     </div>
 
     <p class="weak small footnote">
-      CODING 连接（base_url / 凭证）目前没有管理接口，需要在库表 <code class="mono">coding_conn</code> 中配置；
+      CODING 连接在「设置 → CODING 对接」维护；任务候选来自所属系统的 CODING 项目，未填时用连接的默认项目。
       端点模板在 <code class="mono">coding-endpoints.yml</code>，改配置即可，不需要改代码。
     </p>
 

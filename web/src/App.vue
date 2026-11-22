@@ -78,7 +78,7 @@ const initial = computed(() => (userId.value || '?').slice(0, 1).toUpperCase())
         <el-icon><Setting /></el-icon><span>设置</span>
       </router-link>
 
-      <div class="sidebar-foot">P2 · 门禁与验证确认</div>
+      <div class="sidebar-foot">P2 · 门禁与对接配置</div>
     </aside>
 
     <div class="main">

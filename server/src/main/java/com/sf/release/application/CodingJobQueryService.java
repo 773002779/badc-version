@@ -1,13 +1,18 @@
 package com.sf.release.application;
 
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.sf.release.application.UnitAppService.UnitView;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.domain.engine.CicdEngine;
 import com.sf.release.domain.engine.EngineJob;
 import com.sf.release.domain.engine.JobKind;
+import com.sf.release.domain.resource.CodingConn;
+import com.sf.release.domain.resource.CodingScope;
 import com.sf.release.domain.resource.TaskKind;
+import com.sf.release.infra.repo.CodingConnMapper;
 import com.sf.release.infra.repo.SubsystemMapper;
+import com.sf.release.infra.repo.po.CodingConnPO;
 import com.sf.release.infra.repo.po.SubsystemPO;
 import org.springframework.stereotype.Service;
 
@@ -20,8 +25,10 @@ import java.util.Map;
  * project's real tasks instead of a free-text id.
  *
  * <p><strong>Project.</strong> A unit belongs to a system, and the system owns the CODING
- * project; the project is therefore read from {@code subsystem.coding_project} and never from
- * the request. A system without a project fails with {@code PARAM_INVALID} naming the system,
+ * project; the project is read from {@code subsystem.coding_project} and never from the
+ * request. When the system leaves it blank the tenant-wide default project of the CODING
+ * connection is used, so a platform with one project does not have to repeat it on every
+ * system. With neither configured the call fails with {@code PARAM_INVALID} naming the system,
  * because an empty picker would look like "this project has no jobs".
  *
  * <p><strong>Scope.</strong> The unit is loaded through {@link UnitAppService#get}, which is
@@ -36,13 +43,16 @@ public class CodingJobQueryService {
 
     private final UnitAppService unitAppService;
     private final SubsystemMapper subsystemMapper;
+    private final CodingConnMapper connMapper;
     private final CicdEngine engine;
 
     public CodingJobQueryService(UnitAppService unitAppService,
                                  SubsystemMapper subsystemMapper,
+                                 CodingConnMapper connMapper,
                                  CicdEngine engine) {
         this.unitAppService = unitAppService;
         this.subsystemMapper = subsystemMapper;
+        this.connMapper = connMapper;
         this.engine = engine;
     }
 
@@ -68,12 +78,24 @@ public class CodingJobQueryService {
     private String codingProjectOf(long subsystemId) {
         SubsystemPO subsystem = subsystemMapper.selectById(subsystemId);
         String project = subsystem == null ? null : trimToNull(subsystem.getCodingProject());
-        if (project == null) {
-            throw new BizException(BizError.PARAM_INVALID,
-                "所属系统未配置 CODING 项目，无法查询任务列表",
-                Map.of("subsystemId", subsystemId));
+        if (project != null) {
+            return project;
         }
-        return project;
+        String fallback = defaultCodingProject();
+        if (fallback != null) {
+            return fallback;
+        }
+        throw new BizException(BizError.PARAM_INVALID,
+            "所属系统未配置 CODING 项目，且全局连接没有默认项目，无法查询任务列表",
+            Map.of("subsystemId", subsystemId));
+    }
+
+    /** Default project of the tenant-wide CODING connection, if one is configured. */
+    private String defaultCodingProject() {
+        CodingConnPO po = connMapper.selectOne(Wrappers.<CodingConnPO>lambdaQuery()
+            .eq(CodingConnPO::getScope, CodingScope.GLOBAL.name())
+            .eq(CodingConnPO::getSubsystemId, CodingConn.GLOBAL_SUBSYSTEM_ID));
+        return po == null ? null : trimToNull(po.getProject());
     }
 
     private static TaskKind parseTaskKind(String raw) {

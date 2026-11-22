@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -25,7 +26,27 @@ import java.util.concurrent.ConcurrentHashMap;
     matchIfMissing = true)
 public class InMemoryDistributedLock implements DistributedLock {
 
+    /**
+     * Every instance ever created in this JVM. A test context is cached across test classes while
+     * another context's Flyway clean can wipe the shared schema, which leaves leases that no
+     * database row backs any more. {@link #clearAllLeases()} lets the test schema reset drop them.
+     * The registry is empty in a running application because only one instance is created.
+     */
+    private static final Set<InMemoryDistributedLock> INSTANCES = ConcurrentHashMap.newKeySet();
+
     private final Map<String, Instant> leases = new ConcurrentHashMap<>();
+
+    public InMemoryDistributedLock() {
+        INSTANCES.add(this);
+    }
+
+    /**
+     * Drops every lease of every instance in this JVM. Test aid only: a lease is meaningless once
+     * the database it guards was wiped.
+     */
+    public static void clearAllLeases() {
+        INSTANCES.forEach(lock -> lock.leases.clear());
+    }
 
     @Override
     public boolean tryLock(String key, Duration ttl) {

@@ -28,6 +28,12 @@ public class CodingConnPO {
     private Instant createdAt;
     private Instant updatedAt;
 
+    // Operational metadata of the last stored-connection probe (V20); not part of the domain
+    // entity, which only models the connection itself.
+    private Instant lastProbeAt;
+    private Boolean lastProbeOk;
+    private String lastProbeMessage;
+
     public static CodingConnPO of(CodingConn conn) {
         CodingConnPO po = new CodingConnPO();
         po.id = conn.id();
@@ -121,5 +127,29 @@ public class CodingConnPO {
 
     public void setUpdatedAt(Instant updatedAt) {
         this.updatedAt = updatedAt;
+    }
+
+    public Instant getLastProbeAt() {
+        return lastProbeAt;
+    }
+
+    public void setLastProbeAt(Instant lastProbeAt) {
+        this.lastProbeAt = lastProbeAt;
+    }
+
+    public Boolean getLastProbeOk() {
+        return lastProbeOk;
+    }
+
+    public void setLastProbeOk(Boolean lastProbeOk) {
+        this.lastProbeOk = lastProbeOk;
+    }
+
+    public String getLastProbeMessage() {
+        return lastProbeMessage;
+    }
+
+    public void setLastProbeMessage(String lastProbeMessage) {
+        this.lastProbeMessage = lastProbeMessage;
     }
 }

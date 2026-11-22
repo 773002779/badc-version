@@ -2,7 +2,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { createUnit, getSubsystem, listUnits } from '../api'
+import { createUnit, getMe, getSubsystem, listUnits, updateSubsystem } from '../api'
 import type { SubsystemView, UnitView } from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
@@ -18,16 +18,25 @@ const subsystem = ref<SubsystemView | null>(null)
 const units = ref<UnitView[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
+const canManage = ref(false)
 const dialog = ref(false)
+const projectDialog = ref(false)
+const projectDraft = ref('')
+const savingProject = ref(false)
 const form = reactive({ name: '', ownerId: 'dev', type: 'UNIT', modulePath: '', frameworkTemplate: 'spring-boot' })
 
 async function load() {
   loading.value = true
   error.value = null
   try {
-    const [s, u] = await Promise.all([getSubsystem(id), listUnits({ pageNo: 1, pageSize: 100, subsystemId: id })])
+    const [s, u, me] = await Promise.all([
+      getSubsystem(id),
+      listUnits({ pageNo: 1, pageSize: 100, subsystemId: id }),
+      getMe()
+    ])
     subsystem.value = s
     units.value = u.records
+    canManage.value = me.perms.includes('setting:manage')
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : '加载失败'
   } finally {
@@ -36,6 +45,35 @@ async function load() {
 }
 
 onMounted(load)
+
+function editProject() {
+  projectDraft.value = subsystem.value?.codingProject ?? ''
+  projectDialog.value = true
+}
+
+async function saveProject() {
+  const s = subsystem.value
+  if (!s) return
+  savingProject.value = true
+  try {
+    await updateSubsystem(id, {
+      name: s.name,
+      ownerId: s.ownerId,
+      agentId: s.agentId ?? undefined,
+      status: s.status,
+      description: s.description ?? undefined,
+      gitUrl: s.gitUrl ?? undefined,
+      codingProject: projectDraft.value.trim()
+    })
+    projectDialog.value = false
+    ElMessage.success('CODING 项目已保存')
+    await load()
+  } catch (e) {
+    ElMessage.error(e instanceof ApiError ? e.message : '保存失败')
+  } finally {
+    savingProject.value = false
+  }
+}
 
 async function submit() {
   if (!form.name.trim()) {
@@ -78,7 +116,17 @@ async function submit() {
         <KeyValue label="状态">
             <StatusDot :status="subsystem?.status" />
           </KeyValue>
-        <KeyValue label="CODING 项目" :value="subsystem?.codingProject" mono />
+        <KeyValue label="CODING 项目">
+          <span class="row" style="gap: 8px">
+            <span class="mono">{{ subsystem?.codingProject || '—' }}</span>
+            <el-button v-if="canManage" link type="primary" size="small" @click="editProject">
+              编辑
+            </el-button>
+          </span>
+          <span class="weak small" style="display: block; margin-top: 2px">
+            未填时使用平台连接的默认项目
+          </span>
+        </KeyValue>
         <KeyValue label="Git 仓库" :value="subsystem?.gitUrl" mono />
         <KeyValue label="描述" :value="subsystem?.description" />
       </DataSection>
@@ -132,6 +180,17 @@ async function submit() {
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
         <el-button type="primary" @click="submit">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="projectDialog" title="CODING 项目" width="460px">
+      <p class="weak small" style="margin: 0 0 10px">
+        决定该系统的任务候选与构建归属。留空则继承「设置 → CODING 对接」里的默认项目。
+      </p>
+      <el-input v-model="projectDraft" placeholder="例如 SCC-QUOTA" maxlength="128" spellcheck="false" />
+      <template #footer>
+        <el-button @click="projectDialog = false">取消</el-button>
+        <el-button type="primary" :loading="savingProject" @click="saveProject">保存</el-button>
       </template>
     </el-dialog>
   </div>

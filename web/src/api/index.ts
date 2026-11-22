@@ -1,7 +1,9 @@
 import { api, qs } from './http'
 import type {
   BindingView,
+  CodingConnView,
   CodingJobView,
+  CodingProbeView,
   EnvDeView,
   ItemGate,
   ItemView,
@@ -29,6 +31,20 @@ export const createSubsystem = (body: {
   gitUrl?: string
   codingProject?: string
 }) => api<number>('/subsystems', { method: 'POST', body: JSON.stringify(body) })
+
+/** Whole-form replace (as the backend defines it): the subsystem's system id cannot change. */
+export const updateSubsystem = (
+  id: number,
+  body: {
+    name: string
+    ownerId: string
+    agentId?: string
+    status?: string
+    description?: string
+    gitUrl?: string
+    codingProject?: string
+  }
+) => api<void>(`/subsystems/${id}`, { method: 'PUT', body: JSON.stringify(body) })
 
 // --------------------------------------------------------------------- units
 export const listUnits = (
@@ -195,4 +211,26 @@ export const rejectWaiver = (itemId: number, waiverId: number, note: string) =>
   api<ItemGate>(`/api/v1/items/${itemId}/gate/waiver/${waiverId}/reject`, {
     method: 'POST',
     body: JSON.stringify({ note })
+  })
+
+// ---------------------------------------------------- CODING connection (settings)
+
+/** The tenant-wide connection; `configured:false` when nothing has been saved yet. */
+export const getCodingConn = () => api<CodingConnView>('/api/v1/coding/conn')
+
+/** Saves the connection; a blank token keeps the stored credential. */
+export const saveCodingConn = (body: {
+  baseUrl: string
+  team: string
+  project: string
+  token?: string
+}) => api<CodingConnView>('/api/v1/coding/conn', { method: 'PUT', body: JSON.stringify(body) })
+
+/** Tests a draft (unsaved) or the stored connection; never persists anything. */
+export const testCodingConn = (
+  body: { baseUrl?: string; team?: string; project?: string; token?: string } = {}
+) =>
+  api<CodingProbeView>('/api/v1/coding/conn/test', {
+    method: 'POST',
+    body: JSON.stringify(body)
   })

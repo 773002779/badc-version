@@ -20,6 +20,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
@@ -206,6 +207,95 @@ class CodingConnServiceTest {
     }
 
     @Test
+    void save_without_a_token_keeps_the_stored_credential() {
+        connService.save(GLOBAL_SCOPE, null, BASE_URL, "team-a", "project-a", "tok-123");
+        String before = storedCipher();
+
+        CodingConnView view = connService.save(
+            GLOBAL_SCOPE, null, BASE_URL + "/v2", "team-b", "project-b", "   ");
+
+        assertThat(storedCipher()).as("a blank token keeps the ciphertext byte for byte")
+            .isEqualTo(before);
+        assertThat(cipher.decrypt(storedCipher())).isEqualTo("tok-123");
+        assertThat(view.baseUrl()).isEqualTo(BASE_URL + "/v2");
+        assertThat(view.team()).isEqualTo("team-b");
+        assertThat(view.project()).isEqualTo("project-b");
+        assertThat(view.tokenHint()).isEqualTo("tok-***");
+    }
+
+    @Test
+    void global_or_null_is_null_until_the_first_save() {
+        assertThat(connService.globalOrNull()).isNull();
+
+        connService.save(GLOBAL_SCOPE, null, BASE_URL, "team-a", "project-a", "tok-123");
+
+        assertThat(connService.globalOrNull().baseUrl()).isEqualTo(BASE_URL);
+    }
+
+    @Test
+    void test_records_the_probe_outcome_on_the_row() {
+        long id = connService.save(
+            GLOBAL_SCOPE, null, BASE_URL, "team-a", "project-a", "tok-123").id();
+        fakeProbe.respondWith(ProbeResult.ok("项目可达；构建任务 3 个，部署任务 2 个", 3, 2));
+
+        CodingProbeView result = connService.test(id);
+
+        assertThat(result.ok()).isTrue();
+        assertThat(result.buildJobs()).isEqualTo(3);
+        assertThat(result.deployJobs()).isEqualTo(2);
+        assertThat(result.at()).isNotNull();
+        assertThat(result.persisted()).isTrue();
+
+        CodingConnView view = connService.get(GLOBAL_SCOPE, null);
+        assertThat(view.lastProbeOk()).isTrue();
+        assertThat(view.lastProbeMessage()).isEqualTo("项目可达；构建任务 3 个，部署任务 2 个");
+        assertThat(view.lastProbeAt()).isNotNull();
+    }
+
+    @Test
+    void draft_probe_falls_back_to_stored_fields_and_persists_nothing() {
+        connService.save(GLOBAL_SCOPE, null, BASE_URL, "team-a", "project-a", "tok-123");
+        fakeProbe.respondWith(ProbeResult.ok("ok", 1, 0));
+
+        CodingProbeView result = connService.testForm(null, "  ", "project-b", "  ");
+
+        assertThat(result.ok()).isTrue();
+        assertThat(result.persisted())
+            .as("the draft differs from the saved project, so nothing is recorded")
+            .isFalse();
+        assertThat(fakeProbe.lastConn().baseUrl()).isEqualTo(BASE_URL);
+        assertThat(fakeProbe.lastConn().team()).isEqualTo("team-a");
+        assertThat(fakeProbe.lastConn().project()).isEqualTo("project-b");
+        assertThat(fakeProbe.lastToken())
+            .as("a blank draft token falls back to the stored credential")
+            .isEqualTo("tok-123");
+        assertThat(connService.get(GLOBAL_SCOPE, null).lastProbeAt())
+            .as("a draft test never writes the row")
+            .isNull();
+        assertThat(rowCount()).isEqualTo(1);
+    }
+
+    @Test
+    void testing_the_saved_values_records_the_outcome() {
+        connService.save(GLOBAL_SCOPE, null, BASE_URL, "team-a", "project-a", "tok-123");
+        fakeProbe.respondWith(ProbeResult.ok("ok", 2, 2));
+
+        CodingProbeView result = connService.testForm(null, null, null, null);
+
+        assertThat(result.persisted()).isTrue();
+        assertThat(connService.get(GLOBAL_SCOPE, null).lastProbeOk()).isTrue();
+        assertThat(connService.get(GLOBAL_SCOPE, null).lastProbeMessage()).isEqualTo("ok");
+    }
+
+    @Test
+    void draft_probe_without_any_configuration_is_param_invalid() {
+        assertThatThrownBy(() -> connService.testForm(null, null, null, null))
+            .isInstanceOf(BizException.class)
+            .extracting("error").isEqualTo(BizError.PARAM_INVALID);
+        assertThat(fakeProbe.lastConn()).isNull();
+    }
+
+    @Test
     void invalid_scope_string_is_param_invalid() {
         assertThatThrownBy(() -> connService.save(
             "TENANT", null, BASE_URL, "team-a", "project-a", "tok-123"))
@@ -309,6 +399,7 @@ class CodingConnServiceTest {
     static class FakeProbeConfiguration {
 
         @Bean
+        @Primary
         FakeCodingProbe fakeCodingProbe() {
             return new FakeCodingProbe();
         }
