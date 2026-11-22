@@ -56,9 +56,9 @@ FREEZE_HIT / PROD_OK / PROD_FAIL` 九条边早已存在，但驱动它们的东�
 
 - 表：`release_window(scope, subsystem_id, enabled, timezone)` + `window_rule(day_of_week,
   start_time, end_time)` + `window_exception(the_date, mode OPEN|CLOSED, start_time, end_time)`。
-- **未配置**（或 `enabled=false` 且没有任何规则）视为**不在窗口内**：不允许「没配窗口」变成
-  「永远免审批」。`enabled=false` 是关掉约束，语义定为「始终在窗口内」，页面对此明示；
-  这两者容易被混为一谈，所以单独在页面上写清楚。
+- **未配置**（没有任何窗口行）视为**不在窗口内**：不允许「没配窗口」变成「永远免审批」。
+- **`enabled=false` 是关掉约束**，语义定为「始终在窗口内」（即使没有规则），页面对此明示：
+  「已关闭窗口限制 ⇒ 提交即免审」。两者容易混为一谈，页面上分开写。
 - 判定：例外优先（CLOSED 整天关；OPEN 且带时段则只开该段；OPEN 不带时段＝整天开）；
   否则按星期规则。跨零点 `22:00–02:00` 覆盖当天 22:00–23:59 与**次日** 00:00–02:00；
   判断 `01:00` 这类时间时同时看「当天规则」和「前一天跨零点的尾巴」，不做日期归属拆分。
