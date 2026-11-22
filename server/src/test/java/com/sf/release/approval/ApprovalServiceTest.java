@@ -9,19 +9,28 @@ import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.approval.ApprovalStatus;
 import com.sf.release.domain.approval.ApprovalStep;
 import com.sf.release.infra.repo.ApprovalMapper;
+import com.sf.release.infra.repo.ReleaseOrderMapper;
 import com.sf.release.infra.repo.po.ApprovalPO;
+import com.sf.release.infra.repo.po.ReleaseOrderPO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -33,8 +42,8 @@ import static org.mockito.Mockito.when;
  * The 分级审批 service against the real test schema: chain construction, idempotency, append and
  * drop, sequential signatures and the rejection that cancels the rest.
  *
- * <p>The approval table has no foreign key to {@code release_order} (the chain is written inside
- * the admission transaction), so the test uses a fixed order id and seeds only {@code approval}.
+ * <p>{@code ensureChain} locks the {@code release_order} row before reading the chain, so every
+ * test seeds the order it works on. The approval table itself has no foreign key to the order.
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -43,12 +52,23 @@ class ApprovalServiceTest {
     private static final long ORDER = 9101L;
     private static final String ACTOR = "t21-lead";
 
+    /**
+     * How long the helper transaction holds its uncommitted row. A timing assumption: it gives the
+     * test thread time to reach the unique-key check and block on the row. See the race test.
+     */
+    private static final long LOCK_HOLD_MS = 300;
+
     @Autowired ApprovalService approvals;
     @Autowired JdbcTemplate jdbc;
+    @Autowired DataSource dataSource;
 
     @BeforeEach
     void cleanChain() {
         jdbc.update("DELETE FROM approval");
+        jdbc.update("DELETE FROM release_order WHERE id = ?", ORDER);
+        jdbc.update("INSERT INTO release_order (id, publish_no, item_id, status, row_version,"
+                + " created_at) VALUES (?, ?, ?, 'SUBMITTED', 0, NOW(3))",
+            ORDER, "PO-T21-9101", 1L);
     }
 
     // ------------------------------------------------------------------ ensureChain
@@ -224,20 +244,90 @@ class ApprovalServiceTest {
     @Test
     void a_racing_append_is_absorbed_and_leaves_one_chain() {
         ApprovalMapper mapper = mock(ApprovalMapper.class);
+        ReleaseOrderMapper orderMapper = mock(ReleaseOrderMapper.class);
         List<ApprovalPO> rows = new ArrayList<>();
+        when(orderMapper.selectByIdForUpdate(ORDER)).thenReturn(givenLockedOrder());
         when(mapper.selectByOrder(ORDER)).thenAnswer(invocation -> List.copyOf(rows));
+        when(mapper.selectByOrderForUpdate(ORDER)).thenAnswer(invocation -> List.copyOf(rows));
         when(mapper.insert(any(ApprovalPO.class))).thenAnswer(invocation -> {
             // The other transaction's insert wins, then our insert hits uk_approval_step.
             rows.add(invocation.getArgument(0));
             throw new DuplicateKeyException("simulated concurrent append");
         });
 
-        List<ApprovalStep> chain = new ApprovalService(mapper)
+        List<ApprovalStep> chain = new ApprovalService(orderMapper, mapper)
             .ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD));
 
         assertThat(chain).hasSize(1);
         assertThat(chain.get(0).role()).isEqualTo(ApprovalRole.OPS_LEAD);
         assertThat(chain.get(0).status()).isEqualTo(ApprovalStatus.PENDING);
+    }
+
+    @Test
+    void a_collision_on_one_role_does_not_skip_the_remaining_roles() {
+        ApprovalMapper mapper = mock(ApprovalMapper.class);
+        ReleaseOrderMapper orderMapper = mock(ReleaseOrderMapper.class);
+        List<ApprovalPO> rows = new ArrayList<>();
+        when(orderMapper.selectByIdForUpdate(ORDER)).thenReturn(givenLockedOrder());
+        when(mapper.selectByOrder(ORDER)).thenAnswer(invocation -> List.copyOf(rows));
+        when(mapper.selectByOrderForUpdate(ORDER)).thenAnswer(invocation -> List.copyOf(rows));
+        when(mapper.insert(any(ApprovalPO.class))).thenAnswer(invocation -> {
+            ApprovalPO added = invocation.getArgument(0);
+            rows.add(added);
+            if (added.getStepNo() == 1) {
+                throw new DuplicateKeyException("simulated concurrent append");
+            }
+            return 1;
+        });
+
+        List<ApprovalStep> chain = new ApprovalService(orderMapper, mapper)
+            .ensureChain(ORDER, List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+
+        assertThat(chain).extracting(ApprovalStep::stepNo).containsExactly(1, 2);
+        assertThat(chain).extracting(ApprovalStep::role)
+            .containsExactly(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER);
+    }
+
+    @Test
+    @Timeout(10)
+    void a_step_committed_by_another_transaction_is_not_duplicated() throws Exception {
+        // A second connection inserts step 1 and holds it uncommitted. This is the state in which
+        // a plain re-read inside our transaction still sees the old snapshot (REPEATABLE READ), so
+        // the unique key rejects our insert and only a LOCKING re-read can recover.
+        CountDownLatch inserted = new CountDownLatch(1);
+        AtomicReference<Throwable> holderFailure = new AtomicReference<>();
+        Thread holder = new Thread(() -> {
+            try (Connection connection = dataSource.getConnection()) {
+                connection.setAutoCommit(false);
+                try (PreparedStatement statement = connection.prepareStatement(
+                    "INSERT INTO approval (order_id, step_no, role, status, created_at)"
+                        + " VALUES (?, 1, 'OPS_LEAD', 'PENDING', NOW(3))")) {
+                    statement.setLong(1, ORDER);
+                    statement.executeUpdate();
+                }
+                inserted.countDown();
+                Thread.sleep(LOCK_HOLD_MS);
+                connection.commit();
+            } catch (Throwable failure) {
+                holderFailure.set(failure);
+                inserted.countDown();
+            }
+        }, "approval-race-holder");
+        holder.start();
+        try {
+            assertThat(inserted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            List<ApprovalStep> chain = approvals.ensureChain(ORDER,
+                List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+
+            assertThat(chain).extracting(ApprovalStep::stepNo).containsExactly(1, 2);
+            assertThat(chain).extracting(ApprovalStep::role)
+                .containsExactly(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER);
+            assertThat(count()).isEqualTo(2);
+        } finally {
+            holder.join(5_000);
+        }
+        assertThat(holderFailure.get()).isNull();
     }
 
     @Test
@@ -331,6 +421,13 @@ class ApprovalServiceTest {
         return jdbc.queryForObject(
             "SELECT created_at FROM approval WHERE order_id = ? AND step_no = ?",
             Timestamp.class, ORDER, stepNo);
+    }
+
+    /** The order row the mocked mapper returns for the locking read; only the id is used. */
+    private static ReleaseOrderPO givenLockedOrder() {
+        ReleaseOrderPO order = new ReleaseOrderPO();
+        order.setId(ORDER);
+        return order;
     }
 
     private static void assertBizError(org.assertj.core.api.ThrowableAssert.ThrowingCallable call,

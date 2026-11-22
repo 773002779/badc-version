@@ -18,4 +18,18 @@ public interface ReleaseWindowMapper extends BaseMapper<ReleaseWindowPO> {
     @Select("SELECT * FROM release_window WHERE scope = #{scope} AND subsystem_id = #{subsystemId}")
     ReleaseWindowPO selectByScope(@Param("scope") String scope,
                                   @Param("subsystemId") long subsystemId);
+
+    /**
+     * The same row as a <em>current read</em> that locks it.
+     *
+     * <p>Only the duplicate-key recovery path of a save uses this. Under MySQL's default
+     * {@code REPEATABLE READ}, a plain re-read inside the same transaction still sees the snapshot
+     * taken at its first consistent read — i.e. it would NOT see the row another transaction just
+     * committed, leaving the save to rethrow the unique-key error. A locking read is a current
+     * read: it waits for the winner's transaction and then sees its committed row.
+     */
+    @Select("SELECT * FROM release_window WHERE scope = #{scope}"
+        + " AND subsystem_id = #{subsystemId} FOR UPDATE")
+    ReleaseWindowPO selectByScopeForUpdate(@Param("scope") String scope,
+                                           @Param("subsystemId") long subsystemId);
 }

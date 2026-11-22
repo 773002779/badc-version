@@ -194,7 +194,11 @@ public class WindowService {
                 // A concurrent save created the header first. uk_window_scope kept it single, so
                 // this save must not fail: adopt the stored row and apply this save to it, exactly
                 // as if the other transaction had committed a moment earlier.
-                ReleaseWindowPO raced = windowMapper.selectByScope(scope.name(), subsystemId);
+                //
+                // The re-read must be a LOCKING read: under MySQL's default REPEATABLE READ a plain
+                // re-read inside this transaction still sees the snapshot taken at its first
+                // consistent read, i.e. it would not see the winner's row at all.
+                ReleaseWindowPO raced = windowMapper.selectByScopeForUpdate(scope.name(), subsystemId);
                 if (raced == null) {
                     throw ex;
                 }

@@ -7,6 +7,7 @@ import com.sf.release.domain.approval.ApprovalChain;
 import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.approval.ApprovalStep;
 import com.sf.release.infra.repo.ApprovalMapper;
+import com.sf.release.infra.repo.ReleaseOrderMapper;
 import com.sf.release.infra.repo.po.ApprovalPO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,11 +16,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * The 分级审批 use cases of one 发布单 (tech design 4.4): keep the chain in sync with the current
@@ -31,6 +31,11 @@ import java.util.Set;
  * one drops only the <em>unsigned</em> {@code DEPT_MANAGER} again — the signed ones stay as
  * evidence (design 4.2). After a rejection the next {@code ensureChain} appends a new generation of
  * steps at the end instead of resurrecting the rejected rows.
+ *
+ * <p><strong>Two submits of one order never interleave.</strong> {@code ensureChain} locks the
+ * order row before reading the chain, so a second concurrent caller reads the chain only after the
+ * first committed it. See the method javadoc for why a plain re-read cannot do that under MySQL's
+ * {@code REPEATABLE READ}.
  *
  * <p><strong>Sequential signatures.</strong> {@link #decide} refuses to decide anything but the
  * lowest pending step, requires a reason to reject, and lets {@link ApprovalChain} flip the later
@@ -52,9 +57,14 @@ public class ApprovalService {
     /** {@code approval.decided_by} is a user id column of 32 characters. */
     private static final int ACTOR_MAX_LENGTH = 32;
 
+    /** Bounded retries when a concurrent writer keeps winning the step number (never in practice). */
+    private static final int MAX_APPEND_ATTEMPTS = 3;
+
+    private final ReleaseOrderMapper releaseOrderMapper;
     private final ApprovalMapper approvalMapper;
 
-    public ApprovalService(ApprovalMapper approvalMapper) {
+    public ApprovalService(ReleaseOrderMapper releaseOrderMapper, ApprovalMapper approvalMapper) {
+        this.releaseOrderMapper = releaseOrderMapper;
         this.approvalMapper = approvalMapper;
     }
 
@@ -73,40 +83,60 @@ public class ApprovalService {
      * {@code DEPT_MANAGER}) is appended in the order it is passed — an already present role keeps
      * its original position.
      *
+     * <p><strong>Concurrency.</strong> The first statement is a locking read of the order row
+     * ({@code ReleaseOrderMapper.selectByIdForUpdate}), which serializes two concurrent submits of
+     * the same order: the second caller waits at the lock and then reads the chain as a
+     * <em>fresh</em> snapshot, so it sees what the first one committed. A plain read alone would not
+     * help — MySQL's default {@code REPEATABLE READ} keeps the transaction's first snapshot. If the
+     * unique key still rejects an append (a writer bypassing that lock), the method re-reads the
+     * chain with a locking read and continues with the remaining roles instead of returning early.
+     *
      * <p>Idempotent: calling it twice with the same roles changes nothing the second time, and
-     * calling it with fewer roles never removes a step (that is {@link #dropPending}'s job). If a
-     * concurrent transaction appended the same step first, {@code uk_approval_step} rejects the
-     * duplicate insert; that collision is not an error — the method re-reads and returns the stored
-     * chain, so two racers end with exactly one chain.
+     * calling it with fewer roles never removes a step (that is {@link #dropPending}'s job).
      *
      * @return the chain after the append, in signature order
+     * @throws IllegalStateException the order row does not exist (the chain always belongs to an
+     *                               existing order; fail loudly instead of locking nothing)
      */
     @Transactional
     public List<ApprovalStep> ensureChain(long orderId, List<ApprovalRole> roles) {
-        List<ApprovalPO> stored = approvalMapper.selectByOrder(orderId);
-        ApprovalChain chain = chainOf(stored);
+        List<ApprovalRole> required = new ArrayList<>();
         for (ApprovalRole role : roles == null ? List.<ApprovalRole>of() : roles) {
-            chain = chain.appendIfMissing(requireRole(role));
+            required.add(requireRole(role));
         }
-        Set<Integer> existing = new HashSet<>();
-        for (ApprovalPO po : stored) {
-            existing.add(po.getStepNo());
+        // FIRST statement of the transaction: serialize concurrent chain builders of this order.
+        // A locking read is a current read, so the plain chain read below starts its snapshot after
+        // the competing transaction committed (a plain read on its own would not).
+        if (releaseOrderMapper.selectByIdForUpdate(orderId) == null) {
+            throw new IllegalStateException(
+                "approval chain requires an existing release_order: " + orderId);
         }
+        ApprovalChain chain = chainOf(approvalMapper.selectByOrder(orderId));
         Instant now = Instant.now();
         int appended = 0;
-        for (ApprovalStep step : chain.steps()) {
-            if (existing.contains(step.stepNo())) {
-                continue;
+        for (ApprovalRole role : required) {
+            int attempts = 0;
+            while (!chain.hasActive(role) && attempts < MAX_APPEND_ATTEMPTS) {
+                attempts++;
+                ApprovalChain extended = chain.appendIfMissing(role);
+                ApprovalStep step = extended.steps().get(extended.steps().size() - 1);
+                try {
+                    approvalMapper.insert(ApprovalPO.of(orderId, step, now));
+                    chain = extended;
+                    appended++;
+                } catch (DuplicateKeyException ex) {
+                    // uk_approval_step kept the chain single. Refresh with a locking read (a plain
+                    // re-read would still see the pre-collision snapshot) and try the role again,
+                    // then continue with the remaining roles rather than returning early.
+                    chain = chainOf(approvalMapper.selectByOrderForUpdate(orderId));
+                    log.info("approval chain append raced: orderId={}, role={}, attempt={}",
+                        orderId, role, attempts);
+                }
             }
-            try {
-                approvalMapper.insert(ApprovalPO.of(orderId, step, now));
-                appended++;
-            } catch (DuplicateKeyException ex) {
-                // Another transaction appended the same step number first. The unique key kept the
-                // chain single, so return what is actually stored instead of surfacing a 500.
-                log.info("approval chain append raced: orderId={}, stepNo={}; returning stored"
-                    + " chain", orderId, step.stepNo());
-                return chainOf(approvalMapper.selectByOrder(orderId)).steps();
+            if (!chain.hasActive(role)) {
+                throw new BizException(BizError.STATE_NOT_ALLOWED,
+                    "审批链并发更新失败，请重试",
+                    Map.of("orderId", orderId, "role", role.name()));
             }
         }
         if (appended > 0) {

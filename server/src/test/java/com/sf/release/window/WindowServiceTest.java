@@ -17,12 +17,16 @@ import com.sf.release.infra.repo.po.ReleaseWindowPO;
 import com.sf.release.infra.repo.po.WindowRulePO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -31,6 +35,9 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -65,6 +72,13 @@ class WindowServiceTest {
 
     @Autowired WindowService windows;
     @Autowired JdbcTemplate jdbc;
+    @Autowired DataSource dataSource;
+
+    /**
+     * How long the helper transaction holds its uncommitted row. A timing assumption: it gives the
+     * test thread time to reach the unique-key check and block on the row. See the race test.
+     */
+    private static final long LOCK_HOLD_MS = 300;
 
     @BeforeEach
     void cleanFixtures() {
@@ -415,11 +429,23 @@ class WindowServiceTest {
 
     @Test
     void more_rules_than_the_page_can_show_are_rejected() {
-        List<RuleInput> rules = new ArrayList<>();
-        for (int i = 0; i < 29; i++) {
-            rules.add(new RuleInput(MON, NINE, TEN));
-        }
+        // 7 weekdays x 4 one-hour slots are all valid and non-overlapping; the 29th is the one the
+        // cap must refuse. (Repeating one slot 29 times would be refused by the overlap rule, which
+        // would make the assertion pass for the wrong reason.)
+        List<RuleInput> rules = weekdaySlots(4);
+        rules.add(new RuleInput(MON, LocalTime.of(8, 0), LocalTime.of(9, 0)));
+        assertThat(rules).hasSize(29);
+
         assertParamInvalid(() -> saveGlobal(true, rules, List.of()), "rules");
+    }
+
+    @Test
+    void twenty_eight_non_overlapping_rules_are_accepted() {
+        List<RuleInput> rules = weekdaySlots(4);
+
+        saveGlobal(true, rules, List.of());
+
+        assertThat(windows.effectiveWindow(0L).rules()).hasSize(28);
     }
 
     @Test
@@ -443,7 +469,8 @@ class WindowServiceTest {
         raced.setSubsystemId(0L);
         raced.setEnabled(true);
         raced.setTimezone("Asia/Shanghai");
-        when(windowMapper.selectByScope("GLOBAL", 0L)).thenReturn(null, raced);
+        when(windowMapper.selectByScope("GLOBAL", 0L)).thenReturn(null);
+        when(windowMapper.selectByScopeForUpdate("GLOBAL", 0L)).thenReturn(raced);
         when(windowMapper.insert(any(ReleaseWindowPO.class)))
             .thenThrow(new DuplicateKeyException("simulated concurrent save"));
 
@@ -457,6 +484,51 @@ class WindowServiceTest {
             .isEqualTo(77L);
         assertThat(result.window().rules()).hasSize(1);
         verify(ruleMapper).insert(any(WindowRulePO.class));
+    }
+
+    @Test
+    @Timeout(10)
+    void a_header_committed_by_another_transaction_is_adopted() throws Exception {
+        // A second connection inserts the GLOBAL header and holds it uncommitted. Our insert
+        // blocks on the unique key, then fails after the holder commits; only a LOCKING re-read
+        // can see the committed row (a plain one still sees the pre-collision snapshot).
+        CountDownLatch inserted = new CountDownLatch(1);
+        AtomicReference<Throwable> holderFailure = new AtomicReference<>();
+        Thread holder = new Thread(() -> {
+            try (Connection connection = dataSource.getConnection()) {
+                connection.setAutoCommit(false);
+                try (PreparedStatement statement = connection.prepareStatement(
+                    "INSERT INTO release_window (scope, subsystem_id, enabled, timezone,"
+                        + " created_at, updated_at)"
+                        + " VALUES ('GLOBAL', 0, 1, 'UTC', NOW(3), NOW(3))")) {
+                    statement.executeUpdate();
+                }
+                inserted.countDown();
+                Thread.sleep(LOCK_HOLD_MS);
+                connection.commit();
+            } catch (Throwable failure) {
+                holderFailure.set(failure);
+                inserted.countDown();
+            }
+        }, "window-race-holder");
+        holder.start();
+        try {
+            assertThat(inserted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            SaveResult result = saveGlobal(true,
+                List.of(new RuleInput(MON, NINE, EIGHTEEN)), List.of());
+
+            assertThat(result.window().id())
+                .as("the save adopts the committed header instead of failing")
+                .isNotNull();
+            assertThat(result.window().scope()).isEqualTo("GLOBAL");
+            assertThat(result.window().rules()).hasSize(1);
+            assertThat(count("SELECT COUNT(*) FROM release_window")).isOne();
+            assertThat(count("SELECT COUNT(*) FROM window_rule")).isOne();
+        } finally {
+            holder.join(5_000);
+        }
+        assertThat(holderFailure.get()).isNull();
     }
 
     // ------------------------------------------------------------------ fixtures
@@ -480,6 +552,22 @@ class WindowServiceTest {
 
     private static Instant instant(LocalDate date, int hour, int minute) {
         return date.atTime(hour, minute).atZone(SHANGHAI).toInstant();
+    }
+
+    /**
+     * Non-overlapping one-hour slots for every weekday: 7 days x {@code slotsPerDay}, at
+     * 00:00-01:00, 02:00-03:00 and so on. Used to test the rule-count cap with input that the
+     * overlap rule would accept.
+     */
+    private static List<RuleInput> weekdaySlots(int slotsPerDay) {
+        List<RuleInput> rules = new ArrayList<>();
+        for (int day = 1; day <= 7; day++) {
+            for (int slot = 0; slot < slotsPerDay; slot++) {
+                LocalTime start = LocalTime.of(slot * 2, 0);
+                rules.add(new RuleInput(day, start, start.plusHours(1)));
+            }
+        }
+        return rules;
     }
 
     private static void assertParamInvalid(org.assertj.core.api.ThrowableAssert.ThrowingCallable call,
