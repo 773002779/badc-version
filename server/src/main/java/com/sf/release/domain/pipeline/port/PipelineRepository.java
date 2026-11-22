@@ -145,6 +145,15 @@ public interface PipelineRepository {
     DeployContext deployContextOf(long instanceId);
 
     /**
+     * The deploy coordinates of an instance's {@code PROD_DEPLOY} node: the deployment unit, the
+     * publish number of its release order, the unit's enabled {@code PROD_DEPLOY} binding (the
+     * deploy plan) and the production-family DEs it is configured for ({@code PROD}/{@code DR}/
+     * {@code BLUE}, ordered by batch then id so a batch is a stable set). Unresolvable parts are
+     * {@code 0}/blank/an empty list instead of failing the pipeline.
+     */
+    DeployContext prodDeployContextOf(long instanceId);
+
+    /**
      * Durably claims the once-only {@code TestEnvReadyEvent} publication of an instance: the
      * first caller sets {@code pipeline_instance.test_ready_at} and wins, every later caller —
      * another thread, another application instance, a retry — loses. The compare-and-set is the

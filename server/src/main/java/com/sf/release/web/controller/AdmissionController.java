@@ -1,6 +1,8 @@
 package com.sf.release.web.controller;
 
 import com.sf.release.application.AdmissionView;
+import com.sf.release.application.ExecuteProdService;
+import com.sf.release.application.ReleaseApprovalService;
 import com.sf.release.application.SubmitProdService;
 import com.sf.release.common.ApiResponse;
 import com.sf.release.common.security.DataScope;
@@ -8,6 +10,9 @@ import com.sf.release.common.security.Permissions;
 import com.sf.release.common.security.RequirePerm;
 import com.sf.release.web.dto.AdmissionDtos;
 import com.sf.release.web.dto.AdmissionDtos.AdmissionResponse;
+import com.sf.release.web.dto.AdmissionDtos.ApproveRequest;
+import com.sf.release.web.dto.AdmissionDtos.ExecuteResponse;
+import com.sf.release.web.dto.AdmissionDtos.RejectRequest;
 import com.sf.release.web.dto.AdmissionDtos.SubmitProdRequest;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -23,10 +28,14 @@ import org.springframework.web.bind.annotation.RestController;
  *   <li>{@code POST /api/v1/releases/{publishNo}/submit-prod} — submit ({@code
  *       control:submit-prod});</li>
  *   <li>{@code GET  /api/v1/releases/{publishNo}/admission} — the latest snapshot, the chain of that
- *       snapshot and the current statuses; any logged-in user inside the unit's data scope
- *       ({@code @DataScope}, the service enforces the scope);</li>
+ *       snapshot, the current statuses and the pre-execution review preview; any logged-in user
+ *       inside the unit's data scope ({@code @DataScope}, the service enforces the scope);</li>
  *   <li>{@code POST /api/v1/releases/{publishNo}/resubmit} — resubmit after a rejection
- *       ({@code control:submit-prod}), new snapshot, old chain untouched.</li>
+ *       ({@code control:submit-prod}), new snapshot, old chain untouched;</li>
+ *   <li>{@code POST /api/v1/releases/{publishNo}/approve} and {@code .../reject} — the graded
+ *       approval ({@code control:approve}, plus the step's role and the self-approval rule);</li>
+ *   <li>{@code POST /api/v1/releases/{publishNo}/execute} — execute production or resume a
+ *       batch-boundary pause ({@code control:execute-prod}, pre-execution review).</li>
  * </ul>
  *
  * <p>Every refusal carries the failed admission steps with their reasons and the next action
@@ -47,9 +56,15 @@ import org.springframework.web.bind.annotation.RestController;
 public class AdmissionController {
 
     private final SubmitProdService submitProdService;
+    private final ReleaseApprovalService releaseApprovalService;
+    private final ExecuteProdService executeProdService;
 
-    public AdmissionController(SubmitProdService submitProdService) {
+    public AdmissionController(SubmitProdService submitProdService,
+                               ReleaseApprovalService releaseApprovalService,
+                               ExecuteProdService executeProdService) {
         this.submitProdService = submitProdService;
+        this.releaseApprovalService = releaseApprovalService;
+        this.executeProdService = executeProdService;
     }
 
     @RequirePerm(Permissions.CONTROL_SUBMIT_PROD)
@@ -93,5 +108,46 @@ public class AdmissionController {
         AdmissionView view = submitProdService.resubmit(publishNo, body.plannedReleaseTime(),
             body.oaTicketNo());
         return ApiResponse.ok(AdmissionDtos.of(view));
+    }
+
+    /**
+     * Approves the lowest pending step of the latest snapshot's chain ({@code control:approve}, and
+     * the step's role plus "not the submitter" are enforced by
+     * {@link ReleaseApprovalService}). The body's {@code comment} is optional and stored on the
+     * step; the answer is the refreshed admission view.
+     */
+    @RequirePerm(Permissions.CONTROL_APPROVE)
+    @PostMapping("/{publishNo}/approve")
+    public ApiResponse<AdmissionResponse> approve(@PathVariable String publishNo,
+                                                  @RequestBody(required = false)
+                                                  ApproveRequest request) {
+        AdmissionView view = releaseApprovalService.approve(publishNo,
+            request == null ? null : request.comment());
+        return ApiResponse.ok(AdmissionDtos.of(view));
+    }
+
+    /**
+     * Rejects the lowest pending step ({@code control:approve}); the {@code reason} is mandatory and
+     * the later steps become {@code CANCELED} (design 4.4).
+     */
+    @RequirePerm(Permissions.CONTROL_APPROVE)
+    @PostMapping("/{publishNo}/reject")
+    public ApiResponse<AdmissionResponse> reject(@PathVariable String publishNo,
+                                                 @RequestBody(required = false)
+                                                 RejectRequest request) {
+        AdmissionView view = releaseApprovalService.reject(publishNo,
+            request == null ? null : request.reason());
+        return ApiResponse.ok(AdmissionDtos.of(view));
+    }
+
+    /**
+     * 执行生产 / 恢复生产执行 ({@code control:execute-prod}): the pre-execution review, {@code READY →
+     * PROD_DEPLOYING} (first execution only) and the resume of the paused instance. The service also
+     * enforces the permission and the unit scope.
+     */
+    @RequirePerm(Permissions.CONTROL_EXECUTE_PROD)
+    @PostMapping("/{publishNo}/execute")
+    public ApiResponse<ExecuteResponse> execute(@PathVariable String publishNo) {
+        return ApiResponse.ok(AdmissionDtos.of(executeProdService.execute(publishNo)));
     }
 }

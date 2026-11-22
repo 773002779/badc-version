@@ -8,6 +8,7 @@ import com.sf.release.common.BizException;
 import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.approval.ApprovalStatus;
 import com.sf.release.domain.approval.ApprovalStep;
+import com.sf.release.infra.repo.AdmissionSnapshotMapper;
 import com.sf.release.infra.repo.ApprovalMapper;
 import com.sf.release.infra.repo.ReleaseOrderMapper;
 import com.sf.release.infra.repo.po.ApprovalPO;
@@ -70,10 +71,15 @@ class ApprovalServiceTest {
     @BeforeEach
     void cleanChain() {
         jdbc.update("DELETE FROM approval");
+        jdbc.update("DELETE FROM admission_snapshot WHERE order_id = ?", ORDER);
         jdbc.update("DELETE FROM release_order WHERE id = ?", ORDER);
         jdbc.update("INSERT INTO release_order (id, publish_no, item_id, status, row_version,"
                 + " created_at) VALUES (?, ?, ?, 'SUBMITTED', 0, NOW(3))",
             ORDER, "PO-T21-9101", 1L);
+        // decide() resolves the order through the snapshot (the chain is snapshot-scoped, V22), so
+        // every generation the tests decide on has a snapshot row.
+        givenSnapshot(SNAPSHOT);
+        givenSnapshot(NEXT_SNAPSHOT);
     }
 
     // ------------------------------------------------------------------ ensureChain
@@ -319,7 +325,8 @@ class ApprovalServiceTest {
             throw new DuplicateKeyException("simulated concurrent append");
         });
 
-        List<ApprovalStep> chain = new ApprovalService(orderMapper, mapper)
+        List<ApprovalStep> chain = new ApprovalService(orderMapper, mapper,
+            mock(AdmissionSnapshotMapper.class))
             .ensureChain(ORDER, SNAPSHOT, List.of(ApprovalRole.OPS_LEAD));
 
         assertThat(chain).hasSize(1);
@@ -345,7 +352,8 @@ class ApprovalServiceTest {
             return 1;
         });
 
-        List<ApprovalStep> chain = new ApprovalService(orderMapper, mapper)
+        List<ApprovalStep> chain = new ApprovalService(orderMapper, mapper,
+            mock(AdmissionSnapshotMapper.class))
             .ensureChain(ORDER, SNAPSHOT,
                 List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
 
@@ -468,6 +476,17 @@ class ApprovalServiceTest {
     private long count() {
         Long value = jdbc.queryForObject("SELECT COUNT(*) FROM approval", Long.class);
         return value == null ? 0L : value;
+    }
+
+    /** One admission snapshot the approval chain can belong to (id explicit, so tests can name it). */
+    private void givenSnapshot(long snapshotId) {
+        jdbc.update("INSERT INTO admission_snapshot (id, order_id, item_id, submitted_by,"
+                + " planned_release_time, in_window, window_id, frozen, freeze_ids, max_severity,"
+                + " check_conclusion, waiver_ids, test_conclusion, test_pass_by, oa_ticket_no,"
+                + " image_digest, chain_json, created_at)"
+                + " VALUES (?, ?, 1, 't21-dev', NOW(3), 0, NULL, 0, '[]', 'S3', 'PASS', '[]',"
+                + " 'TEST_PASS', NULL, 'OA-T21-1', 'sha256:t21', '[]', NOW(3))",
+            snapshotId, ORDER);
     }
 
     private Timestamp stepCreatedAt(int stepNo) {

@@ -316,6 +316,23 @@ public class MybatisPipelineRepository implements PipelineRepository {
 
     @Override
     public DeployContext deployContextOf(long instanceId) {
+        return resolveDeployContext(instanceId, TaskKind.TEST_DEPLOY,
+            List.of(EnvKind.TEST.name()));
+    }
+
+    /**
+     * The production counterpart of {@link #deployContextOf(long)}: the unit's enabled
+     * {@code PROD_DEPLOY} binding and its production-family DEs ({@code PROD}, {@code DR},
+     * {@code BLUE}), ordered by batch then id so the handler's per-batch fan-out is deterministic.
+     */
+    @Override
+    public DeployContext prodDeployContextOf(long instanceId) {
+        return resolveDeployContext(instanceId, TaskKind.PROD_DEPLOY,
+            List.of(EnvKind.PROD.name(), EnvKind.DR.name(), EnvKind.BLUE.name()));
+    }
+
+    private DeployContext resolveDeployContext(long instanceId, TaskKind kind,
+                                               List<String> envKinds) {
         PipelineInstancePO instance = instanceMapper.selectById(instanceId);
         if (instance == null || instance.getOrderId() == null || instance.getOrderId() <= 0) {
             return new DeployContext(0L, null, null, List.of());
@@ -333,13 +350,13 @@ public class MybatisPipelineRepository implements PipelineRepository {
         CodingTaskBindingPO binding = unitId <= 0 ? null : bindingMapper.selectOne(
             Wrappers.<CodingTaskBindingPO>lambdaQuery()
                 .eq(CodingTaskBindingPO::getUnitId, unitId)
-                .eq(CodingTaskBindingPO::getTaskKind, TaskKind.TEST_DEPLOY.name())
+                .eq(CodingTaskBindingPO::getTaskKind, kind.name())
                 .eq(CodingTaskBindingPO::getEnabled, true));
         String planId = binding == null ? null : trimToNull(binding.getTaskId());
         List<DeployTarget> targets = unitId <= 0 ? List.of() : envDeMapper.selectList(
                 Wrappers.<EnvDePO>lambdaQuery()
                     .eq(EnvDePO::getUnitId, unitId)
-                    .eq(EnvDePO::getEnvKind, EnvKind.TEST.name())
+                    .in(EnvDePO::getEnvKind, envKinds)
                     .orderByAsc(EnvDePO::getDeployBatchNo)
                     .orderByAsc(EnvDePO::getId))
             .stream()

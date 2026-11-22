@@ -59,8 +59,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *
  * <p><strong>What P2 changed.</strong> P1 stopped {@code PAUSED} before {@code VERIFY} because the
  * node had no handler. Now {@code VERIFY} runs: it triggers the checks, waits for their results, and
- * completes when both gates are satisfied. The pause moved one node later — {@code PROD_DEPLOY} is
- * still P3 — and it now carries a reason an operator can act on.
+ * completes when both gates are satisfied.
+ *
+ * <p><strong>What P3 changes here.</strong> {@code PROD_DEPLOY} now has a handler, so the pipeline
+ * enters the node when {@code VERIFY} completes. It must <em>not</em> deploy yet: the 变更项 is still
+ * {@code GATE_PENDING}, and the handler's batch boundary pauses the instance with a reason until the
+ * release is submitted, approved and executed through {@code POST .../execute}. The generic
+ * {@code /resume} endpoint deliberately refuses that pause (production is not a gate recovery), so
+ * this class keeps pinning the boundary, one node and one permission further out.
  *
  * <p><strong>The engine is a stub, the wiring is real.</strong> A {@code @Primary} bean replaces the
  * CODING adapter so the test can decide what each check reports, while the registry, orchestrator,
@@ -162,8 +168,9 @@ class P2BoundaryEndToEndTest {
     @Test
     void the_p2_pipeline_checks_passes_the_test_and_reaches_production_admission() throws Exception {
         assertThat(handlers.nodeTypes())
-            .as("P2 adds the verify handler: the build/deploy handlers are unchanged")
-            .containsExactlyInAnyOrder(NodeType.BUILD, NodeType.TEST_DEPLOY, NodeType.VERIFY);
+            .as("P2 adds the verify handler; P3 adds the production deploy handler")
+            .containsExactlyInAnyOrder(NodeType.BUILD, NodeType.TEST_DEPLOY, NodeType.VERIFY,
+                NodeType.PROD_DEPLOY);
 
         runToChecksRunning();
 
@@ -216,17 +223,22 @@ class P2BoundaryEndToEndTest {
         assertThat(gateStatus()).isEqualTo("CHECK_PASS");
         assertThat(nodeStatus(NodeType.VERIFY)).isEqualTo("SUCCESS");
         assertThat(instanceStatus())
-            .as("the next node (production) has no handler yet, so the instance pauses there")
+            .as("P3 ships the production handler, so the pipeline enters PROD_DEPLOY and pauses"
+                + " there until the release is approved and executed")
             .isEqualTo("PAUSED");
         assertThat(currentNode()).isEqualTo("PROD_DEPLOY");
-        assertThat(statusReason()).contains("PROD_DEPLOY").contains("NodeHandler");
+        assertThat(nodeStatus(NodeType.PROD_DEPLOY)).isEqualTo("RUNNING");
+        assertThat(statusReason()).contains("PROD_DEPLOY").contains("执行生产");
+        assertThat(engine.deployCalls)
+            .as("no production deploy may be triggered before the release is executed")
+            .hasSize(2);
 
-        // A resume is offered, but this pause is the P3 boundary: the node has no handler, so
-        // resuming would pause again immediately and is refused with an explanation.
+        // The generic gate resume is not the production path: executing has its own permission
+        // (control:execute-prod) and its own review, so this endpoint refuses with a pointer.
         mvc.perform(post(RESUME, publishNo).header(USER_HEADER, DEV))
             .andExpect(jsonPath("$.code").value(40001))
             .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString(
-                "尚未交付")));
+                "执行生产")));
 
         // The verification panel answers "why can/can't this go to production".
         mvc.perform(get(GATE, itemId).header(USER_HEADER, DEV))

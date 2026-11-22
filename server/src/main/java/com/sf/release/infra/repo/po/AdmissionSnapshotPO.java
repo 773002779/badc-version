@@ -16,8 +16,10 @@ import java.time.Instant;
  * trustworthy for audit and for the executor (design 4.6: the executor compares the snapshot, it
  * does not re-evaluate the window).
  *
- * <p>The insert model belongs to the next task of the round (准入判定 writes it); this PO only
- * mirrors the table and the read the pages need.
+ * <p>{@code submitted_by} (V23) records who submitted the generation: a resubmission is a new
+ * snapshot by (possibly) another submitter, and the approval flow refuses self-approval from the
+ * value stored here. Snapshots written before V23 have none, so the rule cannot be checked for them
+ * — the column is not backfilled with a guess.
  */
 @TableName("admission_snapshot")
 public class AdmissionSnapshotPO {
@@ -27,6 +29,14 @@ public class AdmissionSnapshotPO {
 
     private Long orderId;
     private Long itemId;
+
+    /**
+     * The user id that submitted (or resubmitted) the release (V23). It is the evidence the approval
+     * flow uses to refuse self-approval (design 4.4: 禁止自审). A snapshot written before V23 has no
+     * submitter, so the rule cannot be checked for it.
+     */
+    private String submittedBy;
+
     private Instant plannedReleaseTime;
     private Boolean inWindow;
     private Long windowId;
@@ -64,6 +74,14 @@ public class AdmissionSnapshotPO {
 
     public void setItemId(Long itemId) {
         this.itemId = itemId;
+    }
+
+    public String getSubmittedBy() {
+        return submittedBy;
+    }
+
+    public void setSubmittedBy(String submittedBy) {
+        this.submittedBy = submittedBy;
     }
 
     public Instant getPlannedReleaseTime() {

@@ -9,6 +9,7 @@ import com.sf.release.domain.pipeline.NodeHandler;
 import com.sf.release.domain.pipeline.NodeHandlerRegistry;
 import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.handler.BuildNodeHandler;
+import com.sf.release.domain.pipeline.handler.ProdDeployNodeHandler;
 import com.sf.release.domain.pipeline.handler.TestDeployNodeHandler;
 import com.sf.release.domain.pipeline.port.DistributedLock;
 import com.sf.release.infra.engine.CodingEngine;
@@ -27,9 +28,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Wiring carried over from Tasks 10-13: the CODING adapter, its registry, both node handlers,
- * the orchestrator and the item listener are Spring beans, the app boots with no Redis and no
- * CODING tenant, and the adapter performs no network I/O at startup (only JSONPath validation).
+ * Wiring carried over from Tasks 10-13 and completed by P3: the CODING adapter, its registry, every
+ * node handler (build, test deploy, verify, production deploy), the orchestrator and the item
+ * listener are Spring beans, the app boots with no Redis and no CODING tenant, and the adapter
+ * performs no network I/O at startup (only JSONPath validation).
  */
 @SpringBootTest(properties = "release.wiring-probe=fresh-context")
 @ActiveProfiles("test")
@@ -56,19 +58,23 @@ class WiringTest {
     }
 
     @Test
-    void both_node_handlers_are_beans_and_registered_at_startup() {
+    void all_node_handlers_are_beans_and_registered_at_startup() {
         // This test class has its own context (the wiring-probe property above), so the
         // registry singleton it sees has not been replaced by another test class's fakes.
         assertThat(context.getBeansOfType(NodeHandler.class).values())
             .anyMatch(BuildNodeHandler.class::isInstance)
-            .anyMatch(TestDeployNodeHandler.class::isInstance);
+            .anyMatch(TestDeployNodeHandler.class::isInstance)
+            .anyMatch(ProdDeployNodeHandler.class::isInstance);
 
         assertThat(handlers.handler(NodeType.BUILD)).isInstanceOf(BuildNodeHandler.class);
         assertThat(handlers.handler(NodeType.TEST_DEPLOY)).isInstanceOf(TestDeployNodeHandler.class);
         assertThat(handlers.handler(NodeType.VERIFY))
-            .as("P2 adds the verify handler; production stays P3")
+            .as("P2 adds the verify handler")
             .isInstanceOf(VerifyNodeHandler.class);
-        assertThat(handlers.handler(NodeType.PROD_DEPLOY)).isNull();
+        assertThat(handlers.handler(NodeType.PROD_DEPLOY))
+            .as("P3 adds the production deploy handler: every node now has one")
+            .isInstanceOf(ProdDeployNodeHandler.class);
+        assertThat(handlers.nodeTypes()).containsExactlyInAnyOrder(NodeType.values());
     }
 
     @Test

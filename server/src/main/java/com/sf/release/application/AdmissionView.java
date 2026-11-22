@@ -25,10 +25,10 @@ import java.util.Map;
  * step sentences, and re-evaluating it would recompute a window that design 4.6 says must not be
  * recomputed.
  *
- * <p>{@code review} is deliberately {@code null}: the pre-execution review (design 4.6: freeze,
- * waiver expiry, image digest) belongs to the execution task of the round. The field is present so
- * the page can already render the section and so adding it later does not change the response
- * shape.
+ * <p>{@code review} is the pre-execution review preview (design 4.6: freeze in force, waiver
+ * validity, image digest) computed by {@link ReviewService} for the <em>stored</em> snapshot; it is
+ * {@code null} until the release has a snapshot. It is a preview, not a promise: the execute use
+ * case re-runs the same review right before touching the pipeline.
  */
 public record AdmissionView(
     String publishNo,
@@ -57,6 +57,7 @@ public record AdmissionView(
         long id,
         long orderId,
         long itemId,
+        String submittedBy,
         Instant plannedReleaseTime,
         boolean inWindow,
         Long windowId,
@@ -88,6 +89,7 @@ public record AdmissionView(
             po.getId() == null ? 0L : po.getId(),
             po.getOrderId() == null ? 0L : po.getOrderId(),
             po.getItemId() == null ? 0L : po.getItemId(),
+            po.getSubmittedBy(),
             po.getPlannedReleaseTime(),
             Boolean.TRUE.equals(po.getInWindow()),
             po.getWindowId(),

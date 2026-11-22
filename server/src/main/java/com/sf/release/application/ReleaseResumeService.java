@@ -36,8 +36,12 @@ import java.util.Objects;
  * <p><strong>What it does not do.</strong> It never rolls anything back and never re-runs a
  * succeeded node: the instance is flipped back to {@code RUNNING} with its status reason cleared and
  * the very next advance enters the node it was blocked on. In P2 the only pause a normal release
- * can reach is "the next node has no handler yet" ({@code PROD_DEPLOY}, P3), and that case is
- * rejected by condition 2 with an explicit message instead of a silent no-op.
+ * could reach was "the next node has no handler yet" ({@code PROD_DEPLOY}, P3).
+ *
+ * <p><strong>Production is not a gate pause.</strong> A pause at {@code PROD_DEPLOY} is the
+ * production execution boundary (approval, pre-execution review, batch boundary). Resuming it here
+ * would skip {@code control:execute-prod} and the review, so it is refused with an explicit pointer
+ * to {@code POST /releases/{publishNo}/execute} ({@link ExecuteProdService}) instead.
  */
 @Service
 public class ReleaseResumeService {
@@ -99,6 +103,15 @@ public class ReleaseResumeService {
             throw new BizException(BizError.STATE_NOT_ALLOWED,
                 "节点 " + blocked + " 的处理器尚未交付，恢复没有意义",
                 Map.of("publishNo", no, "node", blocked == null ? "" : blocked.name()));
+        }
+        if (blocked == NodeType.PROD_DEPLOY) {
+            // Production resume is not a gate recovery: it needs control:execute-prod and the
+            // pre-execution review (freeze / waiver / digest), which this generic endpoint does not
+            // do. Refusing here keeps the release control from being bypassed by the P2 button.
+            throw new BizException(BizError.STATE_NOT_ALLOWED,
+                "生产部署（PROD_DEPLOY）必须使用「执行生产」接口恢复（需 control:execute-prod 与执行前复核），"
+                    + "本接口只恢复门禁类暂停",
+                Map.of("publishNo", no, "node", blocked.name()));
         }
         if (!gateService.verifySatisfied(instance)) {
             String reason = gateService.verifyBlockedReason(instance);

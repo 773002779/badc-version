@@ -3,6 +3,7 @@ package com.sf.release.web.dto;
 import com.sf.release.application.AdmissionStepView;
 import com.sf.release.application.AdmissionView;
 import com.sf.release.application.ApprovalStepView;
+import com.sf.release.application.ExecuteProdService;
 
 import java.time.Instant;
 import java.util.List;
@@ -23,12 +24,27 @@ import java.util.List;
  * <p>{@code snapshot} is {@code null} when the 发布单 was never submitted (the page shows "尚未提交
  * 生产") and on {@code admission-check} (nothing is written). A refusal keeps
  * {@code reasons}/{@code failedSteps}/{@code nextAction} for compatibility and adds the same steps
- * as {@code data.steps}. {@code review} is deliberately {@code null} until the execution task adds
- * the pre-execution review (design 4.6).
+ * as {@code data.steps}. {@code review} is the pre-execution review of the stored snapshot
+ * ({@link com.sf.release.application.ReviewService}), filled by the admission read
+ * ({@code GET .../admission}) and {@code null} on the submit/resubmit/admission-check answers.
  */
 public final class AdmissionDtos {
 
     private AdmissionDtos() {
+    }
+
+    /**
+     * {@code POST /api/v1/releases/{publishNo}/approve} (design 4.4). The comment is optional: an
+     * approval without a note is still an approval, while a rejection requires one.
+     */
+    public record ApproveRequest(String comment) {
+    }
+
+    /**
+     * {@code POST /api/v1/releases/{publishNo}/reject} (design 4.4). The reason is mandatory and is
+     * stored on the rejected step as its {@code comment}.
+     */
+    public record RejectRequest(String reason) {
     }
 
     /**
@@ -67,6 +83,7 @@ public final class AdmissionDtos {
         long id,
         long orderId,
         long itemId,
+        String submittedBy,
         Instant plannedReleaseTime,
         boolean inWindow,
         Long windowId,
@@ -98,6 +115,20 @@ public final class AdmissionDtos {
         Object review) {
     }
 
+    /** The execute endpoint's answer (design 4.8): the status after the call, the node and batches. */
+    public record ExecuteResponse(
+        String publishNo,
+        String status,
+        String node,
+        int batchCount,
+        Object review) {
+    }
+
+    public static ExecuteResponse of(ExecuteProdService.ExecuteResult result) {
+        return new ExecuteResponse(result.publishNo(), result.status(), result.node(),
+            result.batchCount(), result.review());
+    }
+
     public static AdmissionResponse of(AdmissionView view) {
         return new AdmissionResponse(
             view.publishNo(),
@@ -121,6 +152,7 @@ public final class AdmissionDtos {
             snapshot.id(),
             snapshot.orderId(),
             snapshot.itemId(),
+            snapshot.submittedBy(),
             snapshot.plannedReleaseTime(),
             snapshot.inWindow(),
             snapshot.windowId(),

@@ -6,8 +6,10 @@ import com.sf.release.common.BizException;
 import com.sf.release.domain.approval.ApprovalChain;
 import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.approval.ApprovalStep;
+import com.sf.release.infra.repo.AdmissionSnapshotMapper;
 import com.sf.release.infra.repo.ApprovalMapper;
 import com.sf.release.infra.repo.ReleaseOrderMapper;
+import com.sf.release.infra.repo.po.AdmissionSnapshotPO;
 import com.sf.release.infra.repo.po.ApprovalPO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,8 +50,8 @@ import java.util.Map;
  * <p><strong>Sequential signatures.</strong> {@link #decide} refuses to decide anything but the
  * lowest pending step, requires a reason to reject, and lets {@link ApprovalChain} flip the later
  * pending steps to {@code CANCELED} when a step is rejected. Self-approval and the signature role
- * are <em>not</em> checked here: the caller knows the submitter and the caller (the approval
- * endpoints, Task 3), so those checks belong to the flow that owns the 发布单.
+ * are <em>not</em> checked here: the flow that owns the 发布单 has the request identity and the
+ * snapshot's submitter, so those checks live in {@link ReleaseApprovalService}.
  *
  * <p>The returned {@link DecideResult} tells the caller what the chain now is — {@code complete}
  * maps to the {@code APPROVE_ALL} item event, {@code rejected} to {@code REJECT} — without making
@@ -70,10 +72,13 @@ public class ApprovalService {
 
     private final ReleaseOrderMapper releaseOrderMapper;
     private final ApprovalMapper approvalMapper;
+    private final AdmissionSnapshotMapper snapshotMapper;
 
-    public ApprovalService(ReleaseOrderMapper releaseOrderMapper, ApprovalMapper approvalMapper) {
+    public ApprovalService(ReleaseOrderMapper releaseOrderMapper, ApprovalMapper approvalMapper,
+                           AdmissionSnapshotMapper snapshotMapper) {
         this.releaseOrderMapper = releaseOrderMapper;
         this.approvalMapper = approvalMapper;
+        this.snapshotMapper = snapshotMapper;
     }
 
     /**
@@ -205,12 +210,21 @@ public class ApprovalService {
     /**
      * Decides one approval step of one snapshot's chain.
      *
+     * <p><strong>Two signatures of one order never interleave.</strong> The order row is locked
+     * (current read) before the chain is read, and the chain itself is read with a locking read, so
+     * a decision always starts from the committed chain: the second concurrent signer waits at the
+     * order lock and then sees the first one's decision (a plain first read would keep the
+     * transaction's {@code REPEATABLE READ} snapshot and could decide the same step twice).
+     *
+     * <p>The signature <em>role</em> and the prohibition of self-approval (40008) are enforced by
+     * the caller ({@link ReleaseApprovalService}), which has the request identity and the snapshot's
+     * submitter; this method owns the transition mechanics and the sequential-signature rule.
+     *
      * @param approved {@code true} to approve, {@code false} to reject (a reason is then required)
-     * @param actor    the user id that signs; the caller has already checked the role and that the
-     *                 actor is not the submitter (40008)
-     * @throws BizException 40000 when the step does not exist, the actor is blank or a rejection
-     *                      carries no reason; 40001 when the step is not the lowest pending one or
-     *                      was already decided
+     * @param actor    the user id that signs
+     * @throws BizException 40000 when the snapshot does not exist, the step does not exist, the actor
+     *                      is blank or a rejection carries no reason; 40001 when the step is not the
+     *                      lowest pending one or was already decided
      */
     @Transactional
     public DecideResult decide(long snapshotId, int stepNo, boolean approved, String actor,
@@ -226,7 +240,22 @@ public class ApprovalService {
                 "审批人长度不能超过 " + ACTOR_MAX_LENGTH,
                 Map.of("actor", "长度超限：" + signer.length()));
         }
-        List<ApprovalPO> stored = approvalMapper.selectBySnapshot(snapshotId);
+        // snapshot → orderId → lock: the order row is locked before the chain is read, so every
+        // signature of this order is serialized here. The snapshot row is immutable, so reading it
+        // first cannot go stale in a way that matters.
+        AdmissionSnapshotPO snapshot = snapshotMapper.selectById(snapshotId);
+        if (snapshot == null || snapshot.getOrderId() == null || snapshot.getOrderId() <= 0) {
+            throw new BizException(BizError.PARAM_INVALID, "准入快照不存在",
+                Map.of("snapshotId", snapshotId));
+        }
+        long orderId = snapshot.getOrderId();
+        if (releaseOrderMapper.selectByIdForUpdate(orderId) == null) {
+            throw new IllegalStateException(
+                "approval decision requires an existing release_order: " + orderId);
+        }
+        // A locking read is a current read: it sees the committed chain even after the plain read
+        // above established the transaction's REPEATABLE READ snapshot.
+        List<ApprovalPO> stored = approvalMapper.selectBySnapshotForUpdate(snapshotId);
         ApprovalChain chain = chainOf(stored);
         ApprovalStep target = chain.step(stepNo).orElseThrow(() -> new BizException(
             BizError.PARAM_INVALID, "审批步骤不存在", Map.of("stepNo", stepNo)));

@@ -6,6 +6,7 @@ import com.sf.release.application.ApprovalService;
 import com.sf.release.application.ApprovalStepView;
 import com.sf.release.application.FreezeService;
 import com.sf.release.application.ItemTransitions;
+import com.sf.release.application.ReviewService;
 import com.sf.release.application.SubmitProdService;
 import com.sf.release.application.WindowService;
 import com.sf.release.common.BizError;
@@ -416,7 +417,12 @@ class AdmissionServiceTest {
         assertThat(view.itemStatus()).isEqualTo("READY");
         assertThat(view.orderStatus()).isEqualTo("READY");
         assertThat(view.chain()).isEmpty();
-        assertThat(view.review()).as("the pre-execution review belongs to the execution task").isNull();
+        assertThat(view.review())
+            .as("P3 fills the pre-execution review preview of the stored snapshot")
+            .isInstanceOf(ReviewService.ReviewView.class);
+        ReviewService.ReviewView review = (ReviewService.ReviewView) view.review();
+        assertThat(review.blocked()).isFalse();
+        assertThat(review.digestMatched()).isTrue();
         assertThat(view.admitted())
             .as("the stored snapshot holds the outcome, not the six step sentences")
             .isNull();

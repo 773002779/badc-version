@@ -49,8 +49,9 @@ import java.util.Map;
  * 4.3: "重跑复用，不重填").
  *
  * <p><strong>Reading.</strong> {@link #admission(String)} returns the latest snapshot, the chain of
- * that snapshot and the current item/order status. The pre-execution review section is {@code null}
- * — it belongs to the execution task of the round.
+ * that snapshot, the current item/order status and the pre-execution review preview of the stored
+ * snapshot (P3: {@link ReviewService}). The review is a preview only; {@link ExecuteProdService}
+ * re-runs it right before executing.
  */
 @Service
 public class SubmitProdService {
@@ -68,19 +69,22 @@ public class SubmitProdService {
     private final AdmissionService admissionService;
     private final ApprovalService approvalService;
     private final ItemTransitions transitions;
+    private final ReviewService reviewService;
 
     public SubmitProdService(ReleaseOrderMapper orderMapper,
                              ReleaseItemMapper itemMapper,
                              AdmissionSnapshotMapper snapshotMapper,
                              AdmissionService admissionService,
                              ApprovalService approvalService,
-                             ItemTransitions transitions) {
+                             ItemTransitions transitions,
+                             ReviewService reviewService) {
         this.orderMapper = orderMapper;
         this.itemMapper = itemMapper;
         this.snapshotMapper = snapshotMapper;
         this.admissionService = admissionService;
         this.approvalService = approvalService;
         this.transitions = transitions;
+        this.reviewService = reviewService;
     }
 
     /**
@@ -107,7 +111,7 @@ public class SubmitProdService {
         AdmissionPlan plan = admissionService.plan(order.getId(), plannedReleaseTime, oaTicketNo);
         requireAdmitted(plan);
         writeOrder(order, plan);
-        long snapshotId = writeSnapshot(order.getId(), item.getId(), plan);
+        long snapshotId = writeSnapshot(order.getId(), item.getId(), plan, user.userId());
         applySubmit(item.getId(), plan.decision().requiredRoles());
         approvalService.ensureChain(order.getId(), snapshotId, plan.decision().requiredRoles());
         String finalStatus = finalStatusOf(plan);
@@ -149,7 +153,7 @@ public class SubmitProdService {
         requireAdmitted(plan);
         applyTransition(item.getId(), ItemEvent.RESUBMIT);
         writeOrder(order, plan);
-        long snapshotId = writeSnapshot(order.getId(), item.getId(), plan);
+        long snapshotId = writeSnapshot(order.getId(), item.getId(), plan, user.userId());
         approvalService.ensureChain(order.getId(), snapshotId, plan.decision().requiredRoles());
         applyAfterSubmit(item.getId(), plan.decision().requiredRoles());
         String finalStatus = finalStatusOf(plan);
@@ -163,12 +167,14 @@ public class SubmitProdService {
     }
 
     /**
-     * The admission view of one 发布单: the latest snapshot, the chain of that snapshot, and the
-     * current item/order status.
+     * The admission view of one 发布单: the latest snapshot, the chain of that snapshot, the current
+     * item/order status and the pre-execution review preview of the stored snapshot.
      *
      * <p>{@code admitted}/{@code steps} are {@code null}/empty here: the snapshot stores the outcome,
      * not the six step sentences, and re-evaluating it would recompute the window the design says
-     * must not be recomputed (4.6). Use {@link #check} for a fresh judgement.
+     * must not be recomputed (4.6). Use {@link #check} for a fresh judgement. The {@code review}
+     * section is filled (design 4.8: 快照、审批链、复核预览); the submit/resubmit/check answers keep it
+     * {@code null} because those are admission answers, not execution ones.
      *
      * @throws BizException 40000 unknown publish number; 40009 no data scope on the owning unit
      */
@@ -186,7 +192,9 @@ public class SubmitProdService {
         List<ApprovalStepView> chain = approvalService.stepViews(snapshot.getId());
         return new AdmissionView(order.getPublishNo(), order.getId(), item.getId(),
             item.getStatus(), order.getStatus(), AdmissionView.snapshotOf(snapshot), chain,
-            nextActionOf(chain, item.getStatus()), null, List.of(), null);
+            nextActionOf(chain, item.getStatus()),
+            null, List.of(),
+            reviewService.reviewOf(order, item, snapshot));
     }
 
     /**
@@ -256,13 +264,15 @@ public class SubmitProdService {
 
     /**
      * Inserts the immutable admission snapshot (design 4.5) and returns its id, which is also the
-     * chain's key.
+     * chain's key. {@code submittedBy} is the caller of the submit/resubmit use case: it is the
+     * evidence the approval flow uses to refuse self-approval (design 4.4, V23).
      */
-    private long writeSnapshot(long orderId, long itemId, AdmissionPlan plan) {
+    private long writeSnapshot(long orderId, long itemId, AdmissionPlan plan, String submittedBy) {
         Instant now = Instant.now();
         AdmissionSnapshotPO po = new AdmissionSnapshotPO();
         po.setOrderId(orderId);
         po.setItemId(itemId);
+        po.setSubmittedBy(trimToNull(submittedBy));
         po.setPlannedReleaseTime(plan.plannedAt());
         po.setInWindow(plan.inWindow());
         po.setWindowId(plan.windowId());

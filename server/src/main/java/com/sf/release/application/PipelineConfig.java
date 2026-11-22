@@ -7,11 +7,13 @@ import com.sf.release.domain.pipeline.NodeTaskCompletionService;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.RerunPlanner;
 import com.sf.release.domain.pipeline.handler.BuildNodeHandler;
+import com.sf.release.domain.pipeline.handler.ProdDeployNodeHandler;
 import com.sf.release.domain.pipeline.handler.TestDeployNodeHandler;
 import com.sf.release.domain.pipeline.port.GitCommitProbe;
 import com.sf.release.domain.pipeline.port.PipelineEventBus;
 import com.sf.release.domain.pipeline.port.PipelineLock;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
+import com.sf.release.domain.pipeline.port.ProductionBoundaryProbe;
 import com.sf.release.domain.pipeline.port.TransactionRunner;
 import com.sf.release.domain.pipeline.port.UnitLease;
 import org.springframework.beans.factory.ObjectProvider;
@@ -45,6 +47,21 @@ public class PipelineConfig {
                                                        PipelineEventBus eventBus) {
         return new TestDeployNodeHandler(engine, repository, transactionRunner, completionService,
             eventBus);
+    }
+
+    /**
+     * The {@code PROD_DEPLOY} handler (P3): serial batches, parallel DEs. Its batch-boundary guard is
+     * the application-layer {@link ProductionBoundaryProbe} (freeze in force / final gate block /
+     * release not executing yet); the domain handler itself stays framework-free.
+     */
+    @Bean
+    public ProdDeployNodeHandler prodDeployNodeHandler(CicdEngine engine,
+                                                       PipelineRepository repository,
+                                                       TransactionRunner transactionRunner,
+                                                       NodeTaskCompletionService completionService,
+                                                       ProductionBoundaryProbe productionBoundaryProbe) {
+        return new ProdDeployNodeHandler(engine, repository, transactionRunner, completionService,
+            productionBoundaryProbe);
     }
 
     @Bean
