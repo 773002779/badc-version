@@ -176,7 +176,7 @@ class FreezeServiceTest {
     // ------------------------------------------------------------------ in-flight handling
 
     @Test
-    void create_pulls_a_ready_item_back_and_adds_the_second_signature() {
+    void create_pulls_a_ready_item_back_and_adds_both_signatures() {
         long itemId = givenItem(taskA, unitA, "READY");
         long orderId = givenOrder(itemId, "PO-FZ-READY");
         long snapshotId = givenSnapshot(orderId, itemId, true);
@@ -187,9 +187,11 @@ class FreezeServiceTest {
         assertThat(itemStatus(itemId)).isEqualTo("PENDING_APPROVAL");
         assertThat(orderStatus(orderId)).isEqualTo("PENDING_APPROVAL");
         List<ApprovalStepView> chain = approvals.stepViews(snapshotId);
-        assertThat(chain).hasSize(1);
-        assertThat(chain.get(0).role()).isEqualTo("DEPT_MANAGER");
-        assertThat(chain.get(0).status()).isEqualTo("PENDING");
+        assertThat(chain).extracting(ApprovalStepView::role)
+            .as("design 4.4: a freeze is signed by OPS_LEAD first and DEPT_MANAGER second, even"
+                + " inside the window")
+            .containsExactly("OPS_LEAD", "DEPT_MANAGER");
+        assertThat(chain).extracting(ApprovalStepView::status).containsOnly("PENDING");
     }
 
     @Test
@@ -204,7 +206,7 @@ class FreezeServiceTest {
         assertThat(itemStatus(itemId)).isEqualTo("PENDING_APPROVAL");
         assertThat(orderStatus(orderId)).isEqualTo("PENDING_APPROVAL");
         assertThat(approvals.stepViews(snapshotId)).extracting(ApprovalStepView::role)
-            .containsExactly("DEPT_MANAGER");
+            .containsExactly("OPS_LEAD", "DEPT_MANAGER");
     }
 
     @Test
@@ -223,7 +225,7 @@ class FreezeServiceTest {
         assertThat(approvals.stepViews(snapshotA)).isEmpty();
         assertThat(itemStatus(itemB)).isEqualTo("PENDING_APPROVAL");
         assertThat(approvals.stepViews(snapshotB)).extracting(ApprovalStepView::role)
-            .containsExactly("DEPT_MANAGER");
+            .containsExactly("OPS_LEAD", "DEPT_MANAGER");
     }
 
     @Test
@@ -242,7 +244,7 @@ class FreezeServiceTest {
         assertThat(itemStatus(itemId)).isEqualTo("PENDING_APPROVAL");
         assertThat(orderStatus(orderId)).isEqualTo("PENDING_APPROVAL");
         assertThat(approvals.stepViews(snapshotId)).extracting(ApprovalStepView::role)
-            .containsExactly("DEPT_MANAGER");
+            .containsExactly("OPS_LEAD", "DEPT_MANAGER");
     }
 
     @Test
@@ -358,7 +360,7 @@ class FreezeServiceTest {
     }
 
     @Test
-    void another_active_freeze_keeps_the_second_signature() {
+    void another_active_freeze_keeps_both_signatures() {
         long itemId = givenItem(taskA, unitA, "PENDING_APPROVAL");
         long orderId = givenOrderWithStatus(itemId, "PO-FZ-TWO", "PENDING_APPROVAL");
         long snapshotId = givenSnapshot(orderId, itemId, true);
@@ -371,8 +373,9 @@ class FreezeServiceTest {
         freezes.release(first, ACTOR, "只解除第一个");
 
         assertThat(approvals.stepViews(snapshotId)).extracting(ApprovalStepView::role)
-            .as("the subsystem freeze is still in force, so DEPT_MANAGER stays")
-            .containsExactly("DEPT_MANAGER");
+            .as("the subsystem freeze still governs: both signatures stay, including the"
+                + " OPS_LEAD step the window alone would not ask for")
+            .containsExactly("OPS_LEAD", "DEPT_MANAGER");
         assertThat(itemStatus(itemId)).isEqualTo("PENDING_APPROVAL");
     }
 
@@ -446,14 +449,15 @@ class FreezeServiceTest {
         long itemId = givenItem(taskA, unitA, "PENDING_APPROVAL");
         long orderId = givenOrderWithStatus(itemId, "PO-FZ-EXPIRED", "PENDING_APPROVAL");
         long snapshotId = givenSnapshot(orderId, itemId, true);
-        givenApproval(orderId, snapshotId, 1, "DEPT_MANAGER", "PENDING");
+        givenApproval(orderId, snapshotId, 1, "OPS_LEAD", "PENDING");
+        givenApproval(orderId, snapshotId, 2, "DEPT_MANAGER", "PENDING");
         long freezeId = givenFreeze("ACTIVE", now.minusSeconds(7200), now.minusSeconds(3600));
 
         assertThat(freezes.expireDue(now)).isEqualTo(1);
 
         assertThat(freezeStatus(freezeId)).isEqualTo("EXPIRED");
         assertThat(approvals.stepViews(snapshotId))
-            .as("the expired freeze no longer needs the second signature")
+            .as("nothing governs the in-window release any more: both signatures are dropped")
             .isEmpty();
         assertThat(itemStatus(itemId)).isEqualTo("READY");
         assertThat(orderStatus(orderId)).isEqualTo("READY");
@@ -462,7 +466,8 @@ class FreezeServiceTest {
     @Test
     void an_expiring_unrelated_freeze_keeps_the_signature_a_declared_freeze_still_requires() {
         // Regression: the raise uses `governing`, so the drop must use it too. A future freeze that
-        // governs the planned time keeps DEPT_MANAGER even when a different, in-force freeze expires.
+        // governs the planned time keeps both signatures even when a different, in-force freeze
+        // expires.
         Instant now = Instant.now();
         long itemId = givenItem(taskA, unitA, "PENDING_APPROVAL");
         long orderId = givenOrderPlannedWithStatus(itemId, "PO-FZ-KEEP", "PENDING_APPROVAL",
@@ -471,7 +476,7 @@ class FreezeServiceTest {
         long future = freezes.create("GLOBAL", null, "下周大促", null, now.plusSeconds(3600),
             now.plusSeconds(3 * 3600), ACTOR).id();
         assertThat(approvals.stepViews(snapshotId)).extracting(ApprovalStepView::role)
-            .containsExactly("DEPT_MANAGER");
+            .containsExactly("OPS_LEAD", "DEPT_MANAGER");
         long unrelated = givenFreeze("ACTIVE", now.minusSeconds(7200), now.minusSeconds(3600));
 
         assertThat(freezes.expireDue(now)).isEqualTo(1);
@@ -480,7 +485,7 @@ class FreezeServiceTest {
         assertThat(freezeStatus(future)).isEqualTo("ACTIVE");
         assertThat(approvals.stepViews(snapshotId)).extracting(ApprovalStepView::role)
             .as("the declared freeze still governs the planned time")
-            .containsExactly("DEPT_MANAGER");
+            .containsExactly("OPS_LEAD", "DEPT_MANAGER");
         assertThat(itemStatus(itemId)).isEqualTo("PENDING_APPROVAL");
     }
 

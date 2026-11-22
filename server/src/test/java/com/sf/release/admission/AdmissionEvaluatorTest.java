@@ -54,7 +54,7 @@ class AdmissionEvaluatorTest {
     }
 
     @Test
-    void a_freeze_adds_the_department_manager_on_top() {
+    void a_freeze_outside_the_window_also_needs_both_signatures() {
         AdmissionDecision decision = AdmissionEvaluator.evaluate(
             facts(GateConclusion.PASS, TestStatus.TEST_PASS, OA, NOW.plusSeconds(3600), false, true));
 
@@ -66,11 +66,14 @@ class AdmissionEvaluatorTest {
     }
 
     @Test
-    void an_in_window_frozen_release_needs_only_the_department_manager() {
+    void an_in_window_frozen_release_needs_both_signatures() {
         AdmissionDecision decision = AdmissionEvaluator.evaluate(
             facts(GateConclusion.PASS, TestStatus.TEST_PASS, OA, NOW.plusSeconds(3600), true, true));
 
-        assertThat(decision.requiredRoles()).containsExactly(ApprovalRole.DEPT_MANAGER);
+        assertThat(decision.requiredRoles()).containsExactly(ApprovalRole.OPS_LEAD,
+            ApprovalRole.DEPT_MANAGER);
+        assertThat(freezeStep(decision).nextAction())
+            .contains("OPS_LEAD").contains("DEPT_MANAGER");
     }
 
     @Test
@@ -193,6 +196,13 @@ class AdmissionEvaluatorTest {
     private static AdmissionStep windowStep(AdmissionDecision decision) {
         return decision.steps().stream()
             .filter(step -> step.key() == AdmissionStep.Key.WINDOW)
+            .findFirst()
+            .orElseThrow();
+    }
+
+    private static AdmissionStep freezeStep(AdmissionDecision decision) {
+        return decision.steps().stream()
+            .filter(step -> step.key() == AdmissionStep.Key.FREEZE)
             .findFirst()
             .orElseThrow();
     }

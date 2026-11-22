@@ -201,7 +201,7 @@ class AdmissionServiceTest {
     }
 
     @Test
-    void an_in_window_frozen_release_needs_only_the_department_manager() {
+    void an_in_window_frozen_release_needs_both_signatures() {
         givenWindowConstraintOff();
         freezes.create("GLOBAL", null, "大促封板", null, null,
             Instant.now().plusSeconds(3600), "ad-manager");
@@ -209,7 +209,9 @@ class AdmissionServiceTest {
         AdmissionView view = submitProdService.submit(PUBLISH_NO, planned(), OA);
 
         assertThat(view.itemStatus()).isEqualTo("PENDING_APPROVAL");
-        assertThat(view.chain()).extracting(ApprovalStepView::role).containsExactly("DEPT_MANAGER");
+        assertThat(view.chain()).extracting(ApprovalStepView::role)
+            .containsExactly("OPS_LEAD", "DEPT_MANAGER");
+        assertThat(view.steps().get(4).reason()).contains("封板生效中");
     }
 
     // ------------------------------------------------------------------ refusals

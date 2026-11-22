@@ -67,19 +67,21 @@ import java.util.Set;
  * <p><strong>Declaring.</strong> {@link #create} writes the event with status {@code ACTIVE}
  * immediately (a scheduled freeze is recorded and visible at once) and, in the same transaction,
  * raises the requirement of every release already in the production flow that the new freeze
- * <em>governs</em>: the chain of its latest admission snapshot gets a {@code DEPT_MANAGER} step and
- * a {@code READY} or {@code SUBMITTED} 变更项 is pulled back into {@code PENDING_APPROVAL}.
+ * <em>governs</em>: the chain of its latest admission snapshot gets the two signatures of design
+ * 4.4 ({@code OPS_LEAD} first, {@code DEPT_MANAGER} second — inside the window or not) and a
+ * {@code READY} or {@code SUBMITTED} 变更项 is pulled back into {@code PENDING_APPROVAL}.
  *
  * <p><strong>Lifting and expiry recompute, they do not guess.</strong> The chain of each affected
- * snapshot is recomputed from what the snapshot recorded: inside the window the release needs no
- * signature ({@code OPS_LEAD} and {@code DEPT_MANAGER} pending steps are dropped), outside it needs
- * {@code OPS_LEAD} (only the pending {@code DEPT_MANAGER} is dropped). Decided steps are never
- * deleted — the approval already given stays as evidence. Whether the second signature is still
- * required is decided by the <em>same</em> governing predicate that raised it, evaluated per order
- * at its own planned time: an unrelated freeze expiring must not drop a step that another,
- * still-governing freeze requires. If the chain then needs nothing more, {@code APPROVE_ALL} moves
- * the 变更项 to {@code READY}. {@link #expireDue(Instant)} closes all overdue freezes first and then
- * applies exactly that recompute once, so their pending second signatures can go away.
+ * snapshot is recomputed from what the snapshot recorded: when no freeze governs the release any
+ * more, inside the window it needs no signature ({@code OPS_LEAD} and {@code DEPT_MANAGER} pending
+ * steps are dropped) and outside it needs {@code OPS_LEAD} (only the pending {@code DEPT_MANAGER}
+ * is dropped). Decided steps are never deleted — the approval already given stays as evidence.
+ * Whether the freeze signatures are still required is decided by the <em>same</em> governing
+ * predicate that raised them, evaluated per order at its own planned time: an unrelated freeze
+ * expiring must not drop a step that another, still-governing freeze requires. If the chain then
+ * needs nothing more, {@code APPROVE_ALL} moves the 变更项 to {@code READY}.
+ * {@link #expireDue(Instant)} closes all overdue freezes first and then applies exactly that
+ * recompute once, so their pending signatures can go away.
  *
  * <p><strong>The release reason has no column.</strong> {@code freeze_event} records
  * {@code released_by}/{@code released_at} only (design 4.2), so the mandatory release reason is
@@ -331,8 +333,12 @@ public class FreezeService {
 
     /**
      * Raises the requirement of every release already in the production flow that the new freeze
-     * <em>governs</em> (design 4.2): "保证审批链里有一个 DEPT_MANAGER 步骤，并把 READY 拉回
-     * PENDING_APPROVAL".
+     * <em>governs</em> (design 4.2 and 4.4): the chain is extended to the freeze's two signatures,
+     * {@code OPS_LEAD} and then {@code DEPT_MANAGER} (appended in that order, so the step numbers
+     * keep the signature order), and a {@code READY}/{@code SUBMITTED} item is pulled back into
+     * {@code PENDING_APPROVAL}. The window does not matter here: a freeze inside the window needs
+     * both signatures too, which is why the submit path asks
+     * {@code AdmissionEvaluator} the same question.
      *
      * @return the number of 变更项 pulled back into approval
      */
@@ -357,8 +363,8 @@ public class FreezeService {
                     + " snapshot (freezeId={})", row.getOrderId(), row.getItemId(), freeze.id());
                 continue;
             }
-            approvalService.appendIfMissing(row.getOrderId(), snapshot.getId(),
-                ApprovalRole.DEPT_MANAGER);
+            approvalService.ensureChain(row.getOrderId(), snapshot.getId(),
+                List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
             ItemEvent event = freezeEventFor(row.getItemStatus());
             if (event == null) {
                 continue;
@@ -392,9 +398,9 @@ public class FreezeService {
      * recomputed: a {@code READY} one no longer needs a signature, and a {@code SUBMITTED} one has
      * no snapshot yet.
      *
-     * <p><strong>Symmetry with the raise.</strong> The second signature is dropped only when no
+     * <p><strong>Symmetry with the raise.</strong> The freeze signatures are dropped only when no
      * freeze <em>governs</em> the order any more, evaluated at that order's own planned time with the
-     * same predicate that raised it ({@link #governing(long, Instant, Instant)}). An unrelated freeze
+     * same predicate that raised them ({@link #governing(long, Instant, Instant)}). An unrelated freeze
      * expiring therefore cannot drop a step that another freeze, declared for the order's planned
      * time, still requires.
      *
@@ -418,13 +424,14 @@ public class FreezeService {
                 continue;
             }
             boolean inWindow = Boolean.TRUE.equals(snapshot.getInWindow());
-            if (inWindow) {
-                approvalService.dropPending(row.getOrderId(), snapshot.getId(),
-                    ApprovalRole.OPS_LEAD);
-            }
             // Another freeze may still govern this release (possibly one declared for later and
-            // matching the planned time): then the second signature stays.
+            // matching the planned time): then both freeze signatures stay, including the
+            // OPS_LEAD step that the window alone would not have asked for.
             if (!stillGoverned(row, now, governed)) {
+                if (inWindow) {
+                    approvalService.dropPending(row.getOrderId(), snapshot.getId(),
+                        ApprovalRole.OPS_LEAD);
+                }
                 approvalService.dropPending(row.getOrderId(), snapshot.getId(),
                     ApprovalRole.DEPT_MANAGER);
             }

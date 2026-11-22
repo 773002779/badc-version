@@ -23,8 +23,9 @@ import java.util.regex.Pattern;
  *       the test gate).</li>
  *   <li><strong>OA 工单号</strong> — required and matching {@link #OA_TICKET} (design 4.3).</li>
  *   <li><strong>发布窗口</strong> — inside needs nothing; outside adds {@code OPS_LEAD}.</li>
- *   <li><strong>封板</strong> — a freeze that <em>governs</em> the release adds {@code DEPT_MANAGER}
- *       on top. Governing is {@code ACTIVE}, not ended, and starting no later than
+ *   <li><strong>封板</strong> — a freeze that <em>governs</em> the release requires the two
+ *       signatures of design 4.4, {@code OPS_LEAD} and {@code DEPT_MANAGER} — inside the window
+ *       too. Governing is {@code ACTIVE}, not ended, and starting no later than
  *       {@code max(now, plannedAt)} (see {@code FreezeEvent.governsAt}); the facts are resolved by
  *       the application layer with that one predicate, so a freeze declared for the planned week
  *       already raises the requirement at submission (fail-closed).</li>
@@ -63,18 +64,21 @@ public final class AdmissionEvaluator {
     }
 
     /**
-     * The chain the snapshot requires: {@code OPS_LEAD} when the planned time is outside the
-     * window, {@code DEPT_MANAGER} when a freeze is in force at submission, in that signature
-     * order. An unknown planned time cannot be inside a window, so no {@code OPS_LEAD} is added
-     * until the operator fills it in.
+     * The chain the snapshot requires, in signature order: a freeze needs the <strong>two</strong>
+     * signatures of design 4.4 (运维组长 + 部门经理, in-window or not), an out-of-window plan needs
+     * the {@code OPS_LEAD} alone, and an in-window plan outside a freeze needs none. An unknown
+     * planned time cannot be inside a window, so no {@code OPS_LEAD} is added until the operator
+     * fills it in.
      */
     private static List<ApprovalRole> requiredRoles(AdmissionFacts facts) {
         List<ApprovalRole> roles = new ArrayList<>(2);
+        if (facts.frozen()) {
+            roles.add(ApprovalRole.OPS_LEAD);
+            roles.add(ApprovalRole.DEPT_MANAGER);
+            return List.copyOf(roles);
+        }
         if (facts.plannedAt() != null && !facts.inWindow()) {
             roles.add(ApprovalRole.OPS_LEAD);
-        }
-        if (facts.frozen()) {
-            roles.add(ApprovalRole.DEPT_MANAGER);
         }
         return List.copyOf(roles);
     }
@@ -133,7 +137,10 @@ public final class AdmissionEvaluator {
         }
         if (facts.inWindow()) {
             return new AdmissionStep(AdmissionStep.Key.WINDOW, true,
-                "计划时间在发布窗口内，无需运维组长审批", null);
+                facts.frozen()
+                    ? "计划时间在发布窗口内，但封板生效中仍需审批"
+                    : "计划时间在发布窗口内，无需运维组长审批",
+                facts.frozen() ? "封板要求运维组长与部门经理双签" : null);
         }
         return new AdmissionStep(AdmissionStep.Key.WINDOW, true,
             "计划时间不在发布窗口内，需要运维组长（OPS_LEAD）审批", "提交后由 OPS_LEAD 审批");
@@ -142,7 +149,8 @@ public final class AdmissionEvaluator {
     private static AdmissionStep freezeStep(AdmissionFacts facts) {
         if (facts.frozen()) {
             return new AdmissionStep(AdmissionStep.Key.FREEZE, true,
-                "封板生效中，需要部门经理（DEPT_MANAGER）二次审批", "提交后由 DEPT_MANAGER 审批");
+                "封板生效中，需要运维组长（OPS_LEAD）与部门经理（DEPT_MANAGER）双签",
+                "提交后依次由 OPS_LEAD、DEPT_MANAGER 审批");
         }
         return new AdmissionStep(AdmissionStep.Key.FREEZE, true, "当前没有生效封板", null);
     }
