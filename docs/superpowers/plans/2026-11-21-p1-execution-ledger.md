@@ -295,3 +295,16 @@ Deviations / residuals carried forward:
 - R5（PAUSED 无恢复入口）在接口层关闭；「有告警」仍待 P3 的通知能力。
 - R7（重放的 NOT_ALLOWED 事件消耗 attempts）未动；R8（taskTypesOf 缺 AUTO_TEST）仍开着；I8（Idempotency-Key）仍留给 P3。
 - 检查明细的环境级检查目前只针对第一个 TEST DE（行模型是一检查一行的聚合），多 DE 逐环境检查属 P3。
+
+CODING 对接配置 ROUND (2026-11-22)
+Scope: 用户选 A（设置页全局连接 + 测试连接 + 系统项目行内编辑），短设计见 docs/superpowers/specs/2026-11-22-coding-integration-config-design.md。落地 V20 + CodingController + HttpCodingProbe + 设置页/系统详情。
+Ruling R26: 只做 scope=GLOBAL 的连接配置。coding_conn 表与 CodingConn 领域早已支持 SUBSYSTEM 覆盖，但引擎只解析 GLOBAL 一行（GlobalCodingConnectionProvider），页面不暴露，避免「配了不生效」。每系统连接要改引擎的连接解析，随 P3 一起做。
+Ruling R27: 「连接测试」= job.list（先 BUILD 再 DEPLOY）一次调用同时证明地址可达、凭证有效、项目可达，并返回构建/部署任务数。失败原样返回引擎消息（引擎已脱敏），不把「地址 / 凭证 / 项目」硬拆成三行去猜——引擎只给一句话（HTTP 401、连接超时、响应不是数组），拆行等于编造。
+Ruling R28: 只有被测值恰好等于已保存连接时才写 last_probe_*（V20：时间 / 成败 / 消息）；草稿测试不写，响应带 persisted 让页面说明「草稿测试：结果不写入配置」。让调用方传 persist 标志会允许「测 A 记 B」。
+Ruling R29: 保存时 token 留空 = 保留原凭证（页面只有 tok-***），首次配置必须填；凭证仍是 AES-GCM 落库，明文不进日志/响应。
+Ruling R30: 连接的 project 是「默认项目」；subsystem.coding_project 优先，为空时继承；两处都空时任务查询 40000 并点名系统。此前两处各存一个 project，只让系统那处生效会让人填了没反应。
+Ruling R31: 凭证轮换不做「双凭证并存 24h / DEPRECATED」（技术方案 §6.2 草案）；失效告警与双凭证一起留 P3。当前轮换 = 填新值覆盖。
+Ruling R32: P1 计划的 POST /units/{id}/coding-bindings/test（单元级：任务存在 + 所属项目一致）没有实现；本轮只做平台级连接测试，单元级绑定校验记为后续。技术方案 §12.2.2 已按实际落地路径更新。
+Ruling R33: 测试基础设施修正：Flyway clean 会清库，但缓存的测试上下文仍持有 InMemoryDistributedLock 的租约；deploy_unit 的 AUTO_INCREMENT 重置后 id 复用，publish 误报 40006（DB 行已被清、内存 key 还在，UnitLockService 拒绝抢占）。FlywayTestConfig 在 clean 后调用 InMemoryDistributedLock.clearAllLeases()：租约守护的库已不存在，清掉是正确语义，不是掩盖问题。
+Follow-up: scripts/mock-coding.mjs 是本地假租户（只实现 job.list），配 --release.engine.allow-insecure-http=true 使用；生产禁用。
+Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有该字段）；设置页原来的「暂无管理接口」两处文案已删除。
