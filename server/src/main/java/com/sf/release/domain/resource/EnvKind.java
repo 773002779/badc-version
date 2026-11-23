@@ -9,5 +9,16 @@ public enum EnvKind {
     DAILY,
     PROD,
     DR,
-    BLUE
+    BLUE;
+
+    /** Chinese label for the page; the enum name is the API/persisted value. */
+    public String label() {
+        return switch (this) {
+            case TEST -> "测试";
+            case DAILY -> "日常";
+            case PROD -> "生产";
+            case DR -> "容灾";
+            case BLUE -> "蓝绿";
+        };
+    }
 }

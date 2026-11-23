@@ -333,8 +333,13 @@ public class PublishAppService {
             .toList();
     }
 
-    /** Inserts the instance, binds the unit lock to it and pre-generates every node and task. */
-    private long persistInstance(PipelineInstance instance, long unitId, long itemId) {
+    /**
+     * Inserts the instance, binds the unit lock to it and pre-generates every node and task.
+     *
+     * <p>Package-visible so {@link RollbackService} reuses the same persist/bind step instead of
+     * duplicating the lock-lost path of a publish.
+     */
+    long persistInstance(PipelineInstance instance, long unitId, long itemId) {
         PipelineInstancePO instancePo = PipelineInstancePO.of(instance);
         instanceMapper.insert(instancePo);
         long instanceId = instancePo.getId();

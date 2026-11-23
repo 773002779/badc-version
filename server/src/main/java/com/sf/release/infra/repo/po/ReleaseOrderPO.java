@@ -24,6 +24,14 @@ public class ReleaseOrderPO {
     private Integer rowVersion;
     private Instant createdAt;
 
+    /**
+     * The operator of the last production execution of this order (V25). It is not part of the
+     * {@link ReleaseOrder} domain aggregate: it is operational attribution written by the execute
+     * use case, read by the rollback version list as the "publisher" column. Historical rows keep
+     * it {@code null}.
+     */
+    private String executedBy;
+
     public static ReleaseOrderPO of(ReleaseOrder order) {
         ReleaseOrderPO po = new ReleaseOrderPO();
         po.id = order.id();
@@ -36,6 +44,9 @@ public class ReleaseOrderPO {
         po.status = order.status();
         po.rowVersion = order.rowVersion();
         po.createdAt = order.createdAt();
+        // The domain record has no operator field: an insert never carries one, the execute use
+        // case writes it explicitly on the row.
+        po.executedBy = null;
         return po;
     }
 
@@ -122,5 +133,13 @@ public class ReleaseOrderPO {
 
     public void setCreatedAt(Instant createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public String getExecutedBy() {
+        return executedBy;
+    }
+
+    public void setExecutedBy(String executedBy) {
+        this.executedBy = executedBy;
     }
 }

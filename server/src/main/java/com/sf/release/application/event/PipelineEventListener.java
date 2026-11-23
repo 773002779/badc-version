@@ -5,11 +5,14 @@ import com.sf.release.application.ItemTransitions;
 import com.sf.release.domain.pipeline.InstanceStatus;
 import com.sf.release.domain.pipeline.NodeStatus;
 import com.sf.release.domain.pipeline.NodeType;
+import com.sf.release.domain.pipeline.TriggerType;
 import com.sf.release.domain.pipeline.event.InstanceFinishedEvent;
 import com.sf.release.domain.pipeline.event.NodeCompletedEvent;
 import com.sf.release.domain.pipeline.event.NodeTaskCompletedEvent;
 import com.sf.release.domain.task.ItemEvent;
+import com.sf.release.infra.repo.PipelineInstanceMapper;
 import com.sf.release.infra.repo.ReleaseOrderMapper;
+import com.sf.release.infra.repo.po.PipelineInstancePO;
 import com.sf.release.infra.repo.po.ReleaseOrderPO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,6 +28,12 @@ import org.springframework.stereotype.Component;
  *   <li>{@code TEST_DEPLOY SUCCESS/FAILED} → {@code TEST_DEPLOY_OK}/{@code TEST_DEPLOY_FAIL};</li>
  *   <li>{@code PROD_DEPLOY SUCCESS/FAILED} → {@code PROD_OK}/{@code PROD_FAIL}.</li>
  * </ul>
+ *
+ * <p><strong>Rollback instances are excluded.</strong> A {@link TriggerType#ROLLBACK} instance
+ * deploys an already released image to stop an incident; its completion is not a new production
+ * result for the 变更项. {@code RollbackCompletionService} owns that convergence (record
+ * SUCCESS/FAILED and, only when the source item is still {@code DONE}, {@code ROLLED_BACK}), so this
+ * listener returns before mapping any item event for such an instance.
  *
  * <p>{@code VERIFY} has no item transition: the gate evaluator owns the {@code GATE_*} events
  * (Task 15+), so a check result must not move the main state here. An instance without a
@@ -50,13 +59,16 @@ public class PipelineEventListener {
     private static final Logger log = LoggerFactory.getLogger(PipelineEventListener.class);
 
     private final ReleaseOrderMapper orderMapper;
+    private final PipelineInstanceMapper instanceMapper;
     private final ItemTransitions transitions;
     private final ItemFailureAppService failureService;
 
     public PipelineEventListener(ReleaseOrderMapper orderMapper,
+                                 PipelineInstanceMapper instanceMapper,
                                  ItemTransitions transitions,
                                  ItemFailureAppService failureService) {
         this.orderMapper = orderMapper;
+        this.instanceMapper = instanceMapper;
         this.transitions = transitions;
         this.failureService = failureService;
     }
@@ -79,6 +91,16 @@ public class PipelineEventListener {
         if (itemEvent == null) {
             log.debug("node {} result does not change an item state (instanceId={})",
                 event.nodeType(), event.instanceId());
+            return;
+        }
+        if (isRollbackInstance(event.instanceId())) {
+            // A rollback instance deploys an already released image; its PROD_DEPLOY result is
+            // handled by RollbackCompletionService (record SUCCESS/FAILED, item ROLLED_BACK only
+            // when the source item is still DONE). Mapping it to PROD_OK here would move the
+            // source item to DONE from a non-DONE state and then be rolled back by the
+            // completion, which is not what the rollback means.
+            log.debug("node {} result of a rollback instance does not change an item state"
+                + " (instanceId={})", event.nodeType(), event.instanceId());
             return;
         }
         long itemId = 0L;
@@ -148,6 +170,12 @@ public class PipelineEventListener {
             case PROD_DEPLOY -> success ? ItemEvent.PROD_OK : ItemEvent.PROD_FAIL;
             case VERIFY -> null;
         };
+    }
+
+    private boolean isRollbackInstance(long instanceId) {
+        PipelineInstancePO instance = instanceMapper.selectById(instanceId);
+        return instance != null
+            && TriggerType.ROLLBACK.name().equals(instance.getTriggerType());
     }
 
     private static String messageOf(RuntimeException ex) {

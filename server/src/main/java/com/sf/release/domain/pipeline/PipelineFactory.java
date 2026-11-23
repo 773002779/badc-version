@@ -112,6 +112,58 @@ public final class PipelineFactory {
     }
 
     /**
+     * Pre-generates a production rollback instance (rollback design section 3, P4-A R2). A
+     * rollback is a stop-loss action: it does not build or test anything, so the instance has
+     * exactly one {@code PROD_DEPLOY} node (seq 0) carrying one {@code DEPLOY} task per
+     * production-family DE, at the <em>target</em> image.
+     *
+     * <p><strong>Reversed batches.</strong> Each task's batch number becomes
+     * {@code maxBatch + 1 - originalBatch}. The production handler always triggers the lowest
+     * unfinished batch first, so the highest original batch runs first: C14's forward order
+     * (primary production, primary DR, blue-green production, blue-green DR) is rolled back in
+     * reverse. A production DE without a batch number (0) keeps every task in the one reversed
+     * batch {@code maxBatch + 1}; with a single batch that degrades to batch 1.
+     *
+     * <p>The instance starts {@code PENDING} at {@code PROD_DEPLOY} with the target digest, so the
+     * caller can commit it in one transaction and start it afterwards. The source commit is not
+     * copied: the rollback deploys an existing image, and the target image's commit is not part of
+     * the version list.
+     */
+    public static PipelineInstance createRollback(ReleaseOrder order, ReleaseItem item,
+                                                  List<EnvDe> envDes, String targetDigest,
+                                                  Instant now) {
+        Objects.requireNonNull(order, "order must not be null");
+        Objects.requireNonNull(item, "item must not be null");
+        if (item.type() != UnitType.UNIT) {
+            throw new IllegalArgumentException(
+                "the rollback pipeline requires a UNIT item, got " + item.type());
+        }
+        String digest = targetDigest == null ? null : targetDigest.trim();
+        if (digest == null || digest.isEmpty()) {
+            throw new IllegalArgumentException("the rollback pipeline requires a target image digest");
+        }
+        Instant when = now == null ? Instant.now() : now;
+        List<EnvDe> prodDes = (envDes == null ? List.<EnvDe>of() : envDes).stream()
+            .filter(PipelineFactory::isProductionFamily)
+            // Trigger order is the highest original batch first, then the DE id.
+            .sorted(Comparator.comparingInt(EnvDe::deployBatchNo).reversed()
+                .thenComparing(de -> de.id() == null ? 0L : de.id()))
+            .toList();
+        int maxBatch = prodDes.stream().mapToInt(EnvDe::deployBatchNo).max().orElse(0);
+        List<NodeTask> tasks = new ArrayList<>(prodDes.size());
+        for (EnvDe de : prodDes) {
+            int reversed = maxBatch + 1 - de.deployBatchNo();
+            tasks.add(NodeTask.pending(NodeType.PROD_DEPLOY, TaskType.DEPLOY, reversed,
+                targetId(de)));
+        }
+        List<PipelineNode> nodes = List.of(
+            PipelineNode.pending(NodeType.PROD_DEPLOY, 0, tasks));
+        return new PipelineInstance(null, order.id(), newPipelineNo(when), ExecType.ONLINE,
+            TriggerType.ROLLBACK, NodeType.PROD_DEPLOY, InstanceStatus.PENDING, digest, null,
+            null, null, when, null, nodes);
+    }
+
+    /**
      * Pre-generates a rerun instance for {@code order} (tech design §5.3). The graph is the same
      * online graph; the instance starts at {@code fromNode} and the nodes before it are marked
      * {@code SKIPPED} together with their tasks, because a rerun from a failed node reuses the

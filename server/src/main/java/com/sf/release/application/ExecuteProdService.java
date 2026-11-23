@@ -245,7 +245,7 @@ public class ExecuteProdService {
         }
 
         transactionRunner.inTransaction(() -> {
-            syncOrderStatus(order.getId(), ORDER_EXECUTING);
+            syncOrderStatus(order.getId(), ORDER_EXECUTING, user.userId());
             if (status == ItemStatus.READY) {
                 applyTransition(item.getId(), ItemEvent.EXECUTE, no);
             } else if (status == ItemStatus.TESTING) {
@@ -329,28 +329,49 @@ public class ExecuteProdService {
     }
 
     /**
-     * Mirrors the item's state on the order row with the {@code row_version} CAS. The row is read
-     * with a locking read first, so the version used is the committed one (another writer cannot
-     * slip between the read and the update without blocking on the same row).
+     * Mirrors the item's state on the order row with the {@code row_version} CAS and records the
+     * operator ({@code executed_by}, V25) in the same update. The row is read with a locking read
+     * first, so the version used is the committed one (another writer cannot slip between the read
+     * and the update without blocking on the same row).
+     *
+     * <p>{@code executed_by} is written on every successful execute/resume/rerun call: the rollback
+     * version list shows it as the "publisher" of the image that call put (or continued to put) on
+     * production. A write that would change neither the status nor the operator is skipped, so a
+     * no-op resume does not burn a row version.
      */
-    private void syncOrderStatus(long orderId, String status) {
+    private void syncOrderStatus(long orderId, String status, String executedBy) {
         ReleaseOrderPO current = orderMapper.selectByIdForUpdate(orderId);
         if (current == null) {
             throw new IllegalStateException("release_order disappeared during execution: " + orderId);
         }
-        if (status.equals(current.getStatus())) {
+        boolean sameStatus = status.equals(current.getStatus());
+        boolean sameOperator = executedBy == null
+            || Objects.equals(executedBy, current.getExecutedBy());
+        if (sameStatus && sameOperator) {
             return;
         }
         int version = current.getRowVersion() == null ? 0 : current.getRowVersion();
-        int rows = orderMapper.update(null, Wrappers.<ReleaseOrderPO>lambdaUpdate()
+        var update = Wrappers.<ReleaseOrderPO>lambdaUpdate()
             .eq(ReleaseOrderPO::getId, orderId)
             .eq(ReleaseOrderPO::getRowVersion, version)
             .set(ReleaseOrderPO::getStatus, status)
-            .set(ReleaseOrderPO::getRowVersion, version + 1));
+            .set(ReleaseOrderPO::getRowVersion, version + 1);
+        if (executedBy != null) {
+            update.set(ReleaseOrderPO::getExecutedBy, executedBy);
+        }
+        int rows = orderMapper.update(null, update);
         if (rows != 1) {
             throw new BizException(BizError.STATE_NOT_ALLOWED,
                 "发布单状态已变化，执行未生效，请刷新后重试", Map.of("orderId", orderId));
         }
+    }
+
+    /**
+     * Mirrors a status change that is not a production execution (for example the freeze pull-back
+     * into approval): the recorded operator of the last execution is left untouched.
+     */
+    private void syncOrderStatus(long orderId, String status) {
+        syncOrderStatus(orderId, status, null);
     }
 
     // ------------------------------------------------------------------ pipeline driving

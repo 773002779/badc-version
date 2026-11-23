@@ -145,6 +145,17 @@ class ExecuteProdServiceTest {
             .andExpect(jsonPath("$.data.statusReason").doesNotExist());
     }
 
+    @Test
+    void executing_records_the_operator_on_the_order_for_the_rollback_version_list()
+            throws Exception {
+        executeOk();
+
+        assertThat(jdbc.queryForObject(
+            "SELECT executed_by FROM release_order WHERE id = ?", String.class, orderId))
+            .as("the rollback version list shows the operator of the last production execution")
+            .isEqualTo(OPS);
+    }
+
     // ------------------------------------------------------------------ resume
 
     @Test

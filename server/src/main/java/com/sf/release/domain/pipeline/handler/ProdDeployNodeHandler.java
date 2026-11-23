@@ -15,6 +15,7 @@ import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineNode;
 import com.sf.release.domain.pipeline.TaskType;
+import com.sf.release.domain.pipeline.TriggerType;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.pipeline.port.ProductionBoundaryProbe;
 import com.sf.release.domain.pipeline.port.TransactionRunner;
@@ -50,6 +51,11 @@ import java.util.TreeMap;
  * that sentence as {@code status_reason} instead of triggering anything. The pause does not fail the
  * node: an operator resumes through {@code POST /releases/{publishNo}/execute} once the block is
  * gone, and the handler picks the next batch up on re-entry.
+ *
+ * <p><strong>A rollback skips that probe.</strong> A {@code ROLLBACK} instance deploys an image that
+ * is already running in production to stop an incident; its source 变更项 is {@code DONE} and may
+ * never become {@code PROD_DEPLOYING}, and a freeze must warn (the execute response does) instead of
+ * blocking the stop-loss. Only the batch/claim/chain mechanics above apply to it.
  *
  * <p><strong>Idempotent re-entry by claim.</strong> {@link #start(PipelineInstance)} re-reads the
  * committed aggregate and triggers only the batch's still-{@code PENDING} tasks; each one is claimed
@@ -132,7 +138,12 @@ public final class ProdDeployNodeHandler implements NodeHandler {
                 + " batchNo={}", current.id(), batch.batchNo());
             return;
         }
-        String blocked = boundary.blockedReason(current.id());
+        String blocked = current.triggerType() == TriggerType.ROLLBACK
+            // A rollback is the stop-loss path of an already released image: the freeze/gate/
+            // release-state boundary probe belongs to a forward release and must not pause it.
+            // Only the state-machine guards above (a non-running instance, a failed batch) apply.
+            ? null
+            : boundary.blockedReason(current.id());
         if (blocked != null) {
             if (repository.pauseInstance(current.id(), NodeType.PROD_DEPLOY, blocked,
                     Instant.now())) {
