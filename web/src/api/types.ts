@@ -133,6 +133,8 @@ export interface ReleaseDetail {
   order?: { oaTicketNo?: string | null; plannedReleaseTime?: string | null } | null
   nodes: ReleaseNode[]
   itemId?: number | null
+  /** The deployment unit owning the item; the rollback drawer needs it. */
+  unitId?: number | null
 }
 
 export interface ReleaseRecord {

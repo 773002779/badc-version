@@ -99,7 +99,8 @@ public class ReleaseQueryService {
             head.getImageDigest(),
             new OrderView(head.getOaTicketNo(), head.getPlannedReleaseTime()),
             nodes,
-            head.getItemId());
+            head.getItemId(),
+            head.getUnitId());
     }
 
     /**
@@ -222,7 +223,8 @@ public class ReleaseQueryService {
         String imageDigest,
         OrderView order,
         List<NodeView> nodes,
-        Long itemId) {
+        Long itemId,
+        Long unitId) {
 
         public ReleaseDetail {
             nodes = nodes == null ? List.of() : List.copyOf(nodes);

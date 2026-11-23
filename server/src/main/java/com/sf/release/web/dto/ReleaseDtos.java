@@ -56,7 +56,8 @@ public final class ReleaseDtos {
             view.imageDigest(),
             orderOf(view.order()),
             view.nodes().stream().map(ReleaseDtos::nodeOf).toList(),
-            view.itemId());
+            view.itemId(),
+            view.unitId());
     }
 
     /** Maps the instance history of one 发布单, preserving the newest-first order. */
@@ -136,7 +137,8 @@ public final class ReleaseDtos {
         String imageDigest,
         ReleaseOrderView order,
         List<ReleaseNodeView> nodes,
-        Long itemId) {
+        Long itemId,
+        Long unitId) {
     }
 
     /** Admission fields of the 发布单. */
