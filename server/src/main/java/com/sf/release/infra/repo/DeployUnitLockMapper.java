@@ -42,9 +42,12 @@ public interface DeployUnitLockMapper extends BaseMapper<DeployUnitLockPO> {
      * reclaim the unit while the release still owns it.
      *
      * <p>A terminal instance is not returned: its lease is supposed to end (the orchestrator releases
-     * it), and renewing it would block the unit forever.
+     * it), and renewing it would block the unit forever. The caller stops renewing a {@code PAUSED}
+     * instance once its {@code paused_at} is older than the configured bound — an abandoned pause
+     * (a rejected release nobody resubmits) must not hold a unit for ever either.
      */
-    @Select("SELECT l.unit_id AS unitId, l.instance_id AS instanceId"
+    @Select("SELECT l.unit_id AS unitId, l.instance_id AS instanceId, pi.status AS status,"
+        + " pi.paused_at AS pausedAt"
         + " FROM deploy_unit_lock l"
         + " JOIN pipeline_instance pi ON pi.id = l.instance_id"
         + " WHERE pi.status IN ('RUNNING', 'PAUSED')"

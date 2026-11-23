@@ -45,6 +45,22 @@ public interface NodeTaskMapper extends BaseMapper<NodeTaskPO> {
                                         @Param("limit") int limit);
 
     /**
+     * The {@code RUNNING} tasks whose trigger never reached the engine (independent review I4): the
+     * row was claimed ({@code attempt} bumped, {@code RUNNING}) but the process died before
+     * {@code markTaskWaitingExternal} wrote the external id, and its claim grace has passed. Such a
+     * row is invisible to {@link #selectStaleWaiting} (no external id) and to the stuck-node scan
+     * (not {@code PENDING}), so without this query the instance would stay {@code RUNNING} for ever.
+     *
+     * <p>The claim writes {@code deadline_at = claim grace}; a task still waiting to be triggered
+     * keeps that deadline, a successfully triggered one has its real deployment deadline instead.
+     */
+    @Select("SELECT * FROM node_task WHERE status = 'RUNNING' AND external_id IS NULL"
+        + " AND deadline_at IS NOT NULL AND deadline_at < #{now}"
+        + " ORDER BY id LIMIT #{limit}")
+    List<NodeTaskPO> selectOrphanedClaims(@Param("now") Instant now,
+                                          @Param("limit") int limit);
+
+    /**
      * The most recent task row carrying {@code externalId} <em>of one engine job family</em>.
      * The column is indexed but not unique (a retried task keeps the old row), so the callback
      * resolves the latest row and the completion service's CAS makes a late callback a no-op.

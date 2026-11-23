@@ -176,7 +176,8 @@ class ExecuteProdServiceTest {
                 .header(USER_HEADER, OPS))
             .andExpect(jsonPath("$.code").value(40002))
             .andExpect(jsonPath("$.data.reasons[0]").value(containsString("封板")))
-            .andExpect(jsonPath("$.data.review.frozen").value(true));
+            .andExpect(jsonPath("$.data.review.frozen").value(true))
+            .andExpect(jsonPath("$.data.signaturesAlreadyGiven").value(false));
 
         assertThatItem("PENDING_APPROVAL");
         assertThatOrder("PENDING_APPROVAL");
@@ -206,8 +207,9 @@ class ExecuteProdServiceTest {
         mvc.perform(post("/api/v1/releases/{publishNo}/execute", PUBLISH_NO)
                 .header(USER_HEADER, OPS))
             .andExpect(jsonPath("$.code").value(40002))
-            .andExpect(jsonPath("$.data.review.frozen").value(true));
-
+            .andExpect(jsonPath("$.data.review.frozen").value(true))
+            .andExpect(jsonPath("$.data.signaturesAlreadyGiven")
+                .value(true));
         assertThatItem("READY");
         assertThatOrder("READY");
         assertThat(instanceStatus()).isEqualTo("PAUSED");

@@ -16,12 +16,13 @@ import java.util.List;
  *
  * <ul>
  *   <li><strong>in force</strong> ({@code selectActive*}): {@code status = ACTIVE AND start_at <= at
- *       AND end_at > at} — the display question "is production frozen right now";</li>
+ *       AND end_at > at} — the display question "is production frozen right now", also used by the
+ *       pre-execution review and the batch-boundary probe;</li>
  *   <li><strong>governing</strong> ({@code selectGoverning*}): {@code status = ACTIVE AND end_at >
  *       now AND start_at <= threshold} with {@code threshold = max(now, plannedAt)} — the decision
- *       question of admission, in-flight handling and the pre-execution review. A freeze declared
- *       for next week governs a release planned for next week today (fail-closed). With no planned
- *       time the threshold is {@code now}, which is exactly the in-force range.</li>
+ *       question of admission, in-flight handling and the unfreeze recompute. A freeze declared for
+ *       next week governs a release planned for next week today (fail-closed). With no planned time
+ *       the threshold is {@code now}, which is exactly the in-force range.</li>
  * </ul>
  */
 @Mapper

@@ -218,12 +218,21 @@ public class ExecuteProdService {
             // "封板生效，需重新审批"). A freeze the admission already recorded was signed at admission
             // time, so a second execute attempt must not demote the item again -- that is what left
             // a READY item stuck in PENDING_APPROVAL with nothing left to approve.
+            boolean demoted = false;
             if (status == ItemStatus.READY && review.frozen()
                     && introducesNewFreeze(snapshot, review)) {
-                pullBackForFreeze(order, item, snapshot, no);
+                demoted = pullBackForFreeze(order, item, snapshot, no);
+            }
+            Map<String, Object> payload = reviewPayload(no, item, review);
+            if (review.frozen()) {
+                // The page needs to explain a refusal nobody can act on with an approval: the
+                // latest chain already carries the freeze's signatures (collected by an earlier
+                // freeze or at admission), so the release waits for the freeze to be lifted, not
+                // for a missing signature.
+                payload.put("signaturesAlreadyGiven", !demoted);
             }
             throw new BizException(BizError.GATE_BLOCKED, String.join("；", review.reasons()),
-                reviewPayload(no, item, review));
+                payload);
         }
 
         // The unit lease must still be ours before anything is written: the orchestrator renews it
@@ -278,10 +287,14 @@ public class ExecuteProdService {
      * record but whose steps were collected — nothing is added and the item is left {@code READY}:
      * the freeze still blocks execution (40002), and the release becomes executable as soon as it is
      * lifted. Demoting it then would leave a {@code PENDING_APPROVAL} item with no pending step,
-     * which neither approve nor execute could leave (the dead-end of review round 1).
+     * which neither approve nor execute could leave (the dead-end of review round 1). The caller
+     * puts {@code signaturesAlreadyGiven} in the refusal payload so the page can say why nobody
+     * has to sign.
+     *
+     * @return {@code true} when the item was pulled back into approval by this call
      */
-    private void pullBackForFreeze(ReleaseOrderPO order, ReleaseItemPO item,
-                                   AdmissionSnapshotPO snapshot, String publishNo) {
+    private boolean pullBackForFreeze(ReleaseOrderPO order, ReleaseItemPO item,
+                                      AdmissionSnapshotPO snapshot, String publishNo) {
         boolean demoted = Boolean.TRUE.equals(transactionRunner.inTransaction(() -> {
             List<ApprovalStep> chain = approvalService.ensureChain(order.getId(), snapshot.getId(),
                 List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
@@ -301,6 +314,7 @@ public class ExecuteProdService {
             log.info("production execution blocked by a freeze already covered by an approval:"
                     + " item stays READY: publishNo={}, itemId={}", publishNo, item.getId());
         }
+        return demoted;
     }
 
     /** Applies one main-state event, turning "the state changed under us" into a 40001. */

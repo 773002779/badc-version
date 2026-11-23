@@ -248,6 +248,44 @@ class ReconcileJobTest {
     }
 
     @Test
+    void a_claim_that_never_reached_the_engine_is_timed_out_after_its_grace(CapturedOutput output) {
+        // Independent review I4: the trigger claims the task (RUNNING, attempt+1, grace deadline)
+        // before calling the engine; a crash before markTaskWaitingExternal leaves a RUNNING row
+        // with no external id that neither the polling query nor the stuck-node scan can see.
+        long taskId = taskIds(NodeType.BUILD).get(0);
+        jdbc.update("UPDATE node_task SET status = 'RUNNING', attempt = attempt + 1,"
+                + " external_id = NULL, updated_at = ?, deadline_at = ? WHERE id = ?",
+            Timestamp.from(Instant.now().minus(Duration.ofMinutes(5))),
+            Timestamp.from(Instant.now().minus(Duration.ofMinutes(1))), taskId);
+
+        job.run();
+
+        assertThat(taskStatus(taskId))
+            .as("the lost trigger becomes a terminal failure, not a forever-RUNNING row")
+            .isEqualTo("TIMEOUT");
+        assertThat(instanceStatus()).isEqualTo("FAILED");
+        assertThat(output.getAll())
+            .contains("no external id")
+            .contains("TIMEOUT");
+    }
+
+    @Test
+    void a_fresh_claim_inside_the_grace_is_left_alone() {
+        long taskId = taskIds(NodeType.BUILD).get(0);
+        jdbc.update("UPDATE node_task SET status = 'RUNNING', attempt = attempt + 1,"
+                + " external_id = NULL, updated_at = ?, deadline_at = ? WHERE id = ?",
+            Timestamp.from(Instant.now()),
+            Timestamp.from(Instant.now().plus(Duration.ofMinutes(10))), taskId);
+
+        job.run();
+
+        assertThat(taskStatus(taskId))
+            .as("an engine trigger may still be in flight; the grace must not kill it")
+            .isEqualTo("RUNNING");
+        assertThat(instanceStatus()).isEqualTo("RUNNING");
+    }
+
+    @Test
     void an_unknown_result_resets_failures_and_refreshes_the_poll_time() {
         long taskId = waitingBuildTask(Duration.ofMinutes(5), Duration.ofHours(1));
         engine.failure = EngineException.unavailable("engine unreachable");

@@ -80,12 +80,24 @@ public class JobConfig {
      * approval/freeze/batch reasons must keep its four-hour unit lease, otherwise another publish
      * could take the unit while the release still owns it. Its own switch, like the other jobs: the
      * test profile turns it off and the tests call {@link UnitLeaseRenewJob#renewLeases()} explicitly.
+     *
+     * <p>{@code release.unit-lease.max-paused-hours} bounds how long an abandoned pause keeps its
+     * lease renewed (independent review I3): a rejection nobody resubmits must not lock the unit
+     * forever, and this phase has no close/force-release endpoint. Seven days covers an approval and
+     * a long freeze; after that the four-hour lease is allowed to expire and the unit is reclaimable.
      */
     @Bean
     @ConditionalOnProperty(name = "release.unit-lease.renew-enabled", havingValue = "true",
         matchIfMissing = true)
-    public UnitLeaseRenewJob unitLeaseRenewJob(DeployUnitLockMapper lockMapper,
-                                               UnitLease unitLease) {
-        return new UnitLeaseRenewJob(lockMapper, unitLease);
+    public UnitLeaseRenewJob unitLeaseRenewJob(
+        DeployUnitLockMapper lockMapper,
+        UnitLease unitLease,
+        @Value("${release.unit-lease.max-paused-hours:168}") long maxPausedHours) {
+        if (maxPausedHours <= 0) {
+            throw new IllegalArgumentException(
+                "release.unit-lease.max-paused-hours must be positive: " + maxPausedHours);
+        }
+        return new UnitLeaseRenewJob(lockMapper, unitLease,
+            java.time.Duration.ofHours(maxPausedHours));
     }
 }

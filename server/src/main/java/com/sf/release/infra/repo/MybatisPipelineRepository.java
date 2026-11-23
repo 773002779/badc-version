@@ -52,6 +52,14 @@ public class MybatisPipelineRepository implements PipelineRepository {
     private static final int MAX_COMMIT_SHA_LENGTH = 64;
     private static final int MAX_STATUS_REASON_LENGTH = 255;
 
+    /**
+     * How long a claimed task may stay {@code RUNNING} without an external id before the reconcile
+     * pass treats the trigger as lost (independent review I4). Comfortably longer than an engine
+     * trigger call, so a slow engine is not mistaken for a crash, yet short enough that a crash
+     * does not leave the instance {@code RUNNING} for hours.
+     */
+    public static final Duration CLAIM_GRACE = Duration.ofMinutes(15);
+
     private final PipelineInstanceMapper instanceMapper;
     private final PipelineNodeMapper nodeMapper;
     private final NodeTaskMapper taskMapper;
@@ -207,7 +215,12 @@ public class MybatisPipelineRepository implements PipelineRepository {
 
     @Override
     public boolean claimTaskStart(long taskId) {
-        return nodeMapper.claimTaskStart(taskId, Instant.now()) == 1;
+        Instant now = Instant.now();
+        // The claim grace (I4): a crash between the claim and markTaskWaitingExternal leaves a
+        // RUNNING task with no external id; this deadline is what lets the reconcile pass time it
+        // out instead of leaving the instance RUNNING forever. It is comfortably longer than any
+        // engine trigger call, so a slow trigger is not mistaken for a lost one.
+        return nodeMapper.claimTaskStart(taskId, now, now.plus(CLAIM_GRACE)) == 1;
     }
 
     @Override
@@ -276,7 +289,8 @@ public class MybatisPipelineRepository implements PipelineRepository {
             .set(PipelineInstancePO::getStatus, InstanceStatus.PAUSED.name())
             .set(PipelineInstancePO::getCurrentNode, blockedNode.name())
             .set(PipelineInstancePO::getStatusReason, truncate(reason, MAX_STATUS_REASON_LENGTH))
-            .set(PipelineInstancePO::getEndAt, now)) == 1;
+            .set(PipelineInstancePO::getEndAt, now)
+            .set(PipelineInstancePO::getPausedAt, now)) == 1;
     }
 
     @Override
@@ -286,7 +300,8 @@ public class MybatisPipelineRepository implements PipelineRepository {
             .eq(PipelineInstancePO::getStatus, InstanceStatus.PAUSED.name())
             .set(PipelineInstancePO::getStatus, InstanceStatus.RUNNING.name())
             .set(PipelineInstancePO::getStatusReason, null)
-            .set(PipelineInstancePO::getEndAt, null)) == 1;
+            .set(PipelineInstancePO::getEndAt, null)
+            .set(PipelineInstancePO::getPausedAt, null)) == 1;
     }
 
     @Override

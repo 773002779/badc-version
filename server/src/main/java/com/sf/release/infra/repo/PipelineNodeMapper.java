@@ -27,11 +27,19 @@ public interface PipelineNodeMapper extends BaseMapper<PipelineNodePO> {
      * <p>The {@code attempt} counter is bumped for the row-liveness marker; the command keeps the
      * attempt number the task was generated with (a retry is a new row, design §5.4).
      *
+     * <p>{@code deadline_at} is set to the claim grace as well (independent review I4): the claim
+     * runs before the engine call, so a crash between the two leaves a {@code RUNNING} task with no
+     * external id that no reconcile query would ever see. With a deadline on the row, the reconcile
+     * pass can time it out and fail the pipeline instead of leaving the instance {@code RUNNING}
+     * forever. {@code markTaskWaitingExternal} overwrites it with the real deployment deadline.
+     *
      * @return 1 when this caller claimed the task, 0 when it was not {@code PENDING} any more
      */
-    @Update("UPDATE node_task SET status = 'RUNNING', attempt = attempt + 1, started_at = #{now}"
+    @Update("UPDATE node_task SET status = 'RUNNING', attempt = attempt + 1, started_at = #{now},"
+        + " updated_at = #{now}, deadline_at = #{deadlineAt}"
         + " WHERE id = #{taskId} AND status = 'PENDING'")
-    int claimTaskStart(@Param("taskId") long taskId, @Param("now") Instant now);
+    int claimTaskStart(@Param("taskId") long taskId, @Param("now") Instant now,
+                       @Param("deadlineAt") Instant deadlineAt);
 
     /**
      * Completes a node only when every counted task is {@code SUCCESS} (or {@code SKIPPED}) at

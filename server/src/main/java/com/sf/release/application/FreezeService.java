@@ -7,6 +7,7 @@ import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
 import com.sf.release.domain.approval.ApprovalChain;
 import com.sf.release.domain.approval.ApprovalRole;
+import com.sf.release.domain.approval.ApprovalStep;
 import com.sf.release.domain.freeze.FreezeEvent;
 import com.sf.release.domain.freeze.FreezeScope;
 import com.sf.release.domain.freeze.FreezeStatus;
@@ -69,7 +70,11 @@ import java.util.Set;
  * raises the requirement of every release already in the production flow that the new freeze
  * <em>governs</em>: the chain of its latest admission snapshot gets the two signatures of design
  * 4.4 ({@code OPS_LEAD} first, {@code DEPT_MANAGER} second — inside the window or not) and a
- * {@code READY} or {@code SUBMITTED} 变更项 is pulled back into {@code PENDING_APPROVAL}.
+ * {@code READY} or {@code SUBMITTED} 变更项 is pulled back into {@code PENDING_APPROVAL} <em>when the
+ * raise left a pending step</em>. A release whose earlier freeze already collected both signatures
+ * gains no step and stays {@code READY}: the new freeze still blocks execution at the pre-execution
+ * review, and the release is executable again once the freeze is lifted, without demanding a
+ * redundant signature nobody's chain would show.
  *
  * <p><strong>Lifting and expiry recompute, they do not guess.</strong> The chain of each affected
  * snapshot is recomputed from what the snapshot recorded: when no freeze governs the release any
@@ -336,8 +341,8 @@ public class FreezeService {
      * <em>governs</em> (design 4.2 and 4.4): the chain is extended to the freeze's two signatures,
      * {@code OPS_LEAD} and then {@code DEPT_MANAGER} (appended in that order, so the step numbers
      * keep the signature order), and a {@code READY}/{@code SUBMITTED} item is pulled back into
-     * {@code PENDING_APPROVAL}. The window does not matter here: a freeze inside the window needs
-     * both signatures too, which is why the submit path asks
+     * {@code PENDING_APPROVAL} when that raise left a pending step. The window does not matter
+     * here: a freeze inside the window needs both signatures too, which is why the submit path asks
      * {@code AdmissionEvaluator} the same question.
      *
      * @return the number of 变更项 pulled back into approval
@@ -363,10 +368,21 @@ public class FreezeService {
                     + " snapshot (freezeId={})", row.getOrderId(), row.getItemId(), freeze.id());
                 continue;
             }
-            approvalService.ensureChain(row.getOrderId(), snapshot.getId(),
+            List<ApprovalStep> chain = approvalService.ensureChain(row.getOrderId(), snapshot.getId(),
                 List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
             ItemEvent event = freezeEventFor(row.getItemStatus());
             if (event == null) {
+                continue;
+            }
+            // H1 (review round 1) on the declaration path too: a chain that already carries both
+            // signatures (evidence of an earlier freeze) gains nothing, so demoting the item would
+            // leave PENDING_APPROVAL with no step anybody could sign. The freeze still blocks
+            // execution through the pre-execution review, and the release is executable again once
+            // the freeze is lifted -- without asking for a redundant third signature.
+            if (chain.stream().noneMatch(ApprovalStep::pending)) {
+                log.info("freeze does not pull item {} back: both freeze signatures are already"
+                    + " given on snapshot {} (freezeId={})", row.getItemId(), snapshot.getId(),
+                    freeze.id());
                 continue;
             }
             ItemTransitions.Outcome outcome = transitions.apply(row.getItemId(), event);

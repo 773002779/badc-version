@@ -44,6 +44,14 @@ public class PipelineInstancePO {
      */
     private Instant testReadyAt;
 
+    /**
+     * When the instance entered {@code PAUSED} (V24), cleared on resume. The unit-lease renewer
+     * uses it to stop extending an abandoned pause: without it a rejected or forgotten release
+     * would hold its deployment unit forever. Not part of the aggregate either — it is lease
+     * bookkeeping for an operation on the row.
+     */
+    private Instant pausedAt;
+
     private Instant createdAt;
 
     public static PipelineInstancePO of(PipelineInstance instance) {
@@ -193,6 +201,14 @@ public class PipelineInstancePO {
 
     public void setTestReadyAt(Instant testReadyAt) {
         this.testReadyAt = testReadyAt;
+    }
+
+    public Instant getPausedAt() {
+        return pausedAt;
+    }
+
+    public void setPausedAt(Instant pausedAt) {
+        this.pausedAt = pausedAt;
     }
 
     public Instant getCreatedAt() {

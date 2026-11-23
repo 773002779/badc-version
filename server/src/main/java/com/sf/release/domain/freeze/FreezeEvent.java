@@ -58,8 +58,9 @@ public record FreezeEvent(
 
     /**
      * True while this freeze is <em>in force</em> at {@code at} (status and half-open range). This
-     * is the display question "is production frozen right now"; the admission/review question is
-     * {@link #governsAt(Instant, Instant)}.
+     * is the display question "is production frozen right now", and it is also what the
+     * pre-execution review and the batch-boundary probe ask (design 4.6). The admission and
+     * in-flight question is the fail-closed {@link #governsAt(Instant, Instant)}.
      */
     public boolean inForceAt(Instant at) {
         return status == FreezeStatus.ACTIVE && at != null
@@ -71,12 +72,14 @@ public record FreezeEvent(
      * not ended, and it starts no later than the later of {@code now} and the release's planned
      * time.
      *
-     * <p>That is the single predicate of the admission step, the in-flight handling and the
-     * pre-execution review (design 4.2/4.5): a freeze declared for next week already governs a
-     * release planned for next week, even though it is not in force yet — the decision to hand the
-     * release over is taken now, so the requirement is raised now (fail-closed). A freeze that
-     * starts after the release is planned does not govern it: that release will be gone before the
-     * freeze begins.
+     * <p>That is the single predicate of the admission step, the in-flight handling and the unfreeze
+     * recompute (design 4.2/4.5): a freeze declared for next week already governs a release planned
+     * for next week, even though it is not in force yet — the decision to hand the release over is
+     * taken now, so the requirement is raised now (fail-closed). A freeze that starts after the
+     * release is planned does not govern it: that release will be gone before the freeze begins.
+     * The pre-execution review deliberately asks {@link #inForceAt(Instant)} instead, so a freeze
+     * that already raised its signatures at admission cannot block a release planned before it
+     * starts.
      *
      * <p>{@code plannedAt == null} means "no plan known" and degenerates to
      * {@link #inForceAt(Instant)} at {@code now}, which is what the banner (no planned time) needs.

@@ -112,6 +112,38 @@ class UnitLeaseRenewJobTest {
         assertThat(expireAt(unit)).isEqualTo(near);
     }
 
+    @Test
+    void stops_renewing_a_pause_older_than_the_bound() {
+        // Independent review I3: without a bound an abandoned pause (a rejected release nobody
+        // resubmits) renews its unit lease every minute and locks the unit forever.
+        long unit = givenUnit("lease-abandoned");
+        long instance = givenInstance(unit, "PL-LEASE-ABANDONED", "PAUSED");
+        givenPausedAt(instance, Instant.now().minus(UnitLeaseRenewJob.DEFAULT_MAX_PAUSED)
+            .minusSeconds(3600));
+        Instant near = Instant.now().plusSeconds(60).truncatedTo(ChronoUnit.MILLIS);
+        givenLockRow(unit, instance, near);
+
+        job.renewLeases();
+
+        assertThat(expireAt(unit))
+            .as("an abandoned pause must not hold the unit for ever; the lease is left to expire")
+            .isEqualTo(near);
+    }
+
+    @Test
+    void renews_a_pause_inside_the_bound() {
+        long unit = givenUnit("lease-long-pause");
+        long instance = givenInstance(unit, "PL-LEASE-LONG-PAUSE", "PAUSED");
+        givenPausedAt(instance, Instant.now().minus(2, ChronoUnit.DAYS));
+        givenLockRow(unit, instance, Instant.now().plusSeconds(60));
+
+        job.renewLeases();
+
+        assertThat(expireAt(unit))
+            .as("a two-day approval/freeze wait is still inside the seven-day bound")
+            .isAfter(Instant.now().plusSeconds(3 * 3600));
+    }
+
     // ------------------------------------------------------------------ fixtures
 
     private long givenUnit(String name) {
@@ -146,6 +178,11 @@ class UnitLeaseRenewJobTest {
     private void givenLockRow(long unitId, long instanceId, Instant expireAt) {
         jdbc.update("INSERT INTO deploy_unit_lock (unit_id, instance_id, acquired_at, expire_at)"
             + " VALUES (?, ?, NOW(3), ?)", unitId, instanceId, Timestamp.from(expireAt));
+    }
+
+    private void givenPausedAt(long instanceId, Instant pausedAt) {
+        jdbc.update("UPDATE pipeline_instance SET paused_at = ? WHERE id = ?",
+            Timestamp.from(pausedAt), instanceId);
     }
 
     private Instant expireAt(long unitId) {

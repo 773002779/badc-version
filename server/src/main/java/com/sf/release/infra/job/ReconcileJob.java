@@ -59,6 +59,14 @@ import java.util.Set;
  * {@code TIMEOUT} with a WARN, cancel the engine job best-effort and let the orchestrator run
  * its normal failure path. {@code UNKNOWN} is never terminal: it changes nothing and is logged.
  *
+ * <p><strong>Orphaned claims.</strong> A task is claimed ({@code RUNNING}, {@code attempt+1}) before
+ * the engine call so the trigger is exactly-once; a crash between the two leaves a {@code RUNNING}
+ * task with no external id, which neither the polling query nor the stuck-node report can see
+ * (independent review I4). The claim writes a grace deadline, so this round also fails such rows as
+ * {@code TIMEOUT} once that deadline passes: the pipeline fails normally (node/instance
+ * {@code FAILED}, item repair) and the operator can rerun instead of finding a forever-RUNNING
+ * instance.
+ *
  * <p><strong>Advance repair.</strong> RUNNING instances whose current node has every latest
  * non-CHECK task {@code SUCCESS}/{@code SKIPPED} are handed to
  * {@link PipelineOrchestrator#advance(long)} again. This repairs a callback that committed while
@@ -198,13 +206,14 @@ public class ReconcileJob {
         Round round = new Round(Instant.now());
         try {
             int polled = reconcileWaitingTasks(round);
+            int orphans = round.held() ? failOrphanedClaims(round) : 0;
             int resolved = round.held() ? drainItemFailures(round) : 0;
             int repaired = round.held() ? repairRunningInstances(round) : 0;
             int stuck = round.held() ? reportStuckNodes(round) : 0;
-            if (polled > 0 || repaired > 0 || resolved > 0 || stuck > 0) {
-                log.info("reconcile round finished: polledTasks={}, repairedInstances={},"
-                    + " resolvedItemFailures={}, stuckNodes={}", polled, repaired, resolved,
-                    stuck);
+            if (polled > 0 || orphans > 0 || repaired > 0 || resolved > 0 || stuck > 0) {
+                log.info("reconcile round finished: polledTasks={}, orphanedClaims={},"
+                    + " repairedInstances={}, resolvedItemFailures={}, stuckNodes={}", polled,
+                    orphans, repaired, resolved, stuck);
             }
         } catch (RuntimeException ex) {
             // The scheduler must never die because one round hit a transient DB/engine error.
@@ -249,6 +258,62 @@ public class ReconcileJob {
             }
         }
         return polled;
+    }
+
+    /**
+     * Fails the tasks whose trigger was claimed but never reached the engine (independent review
+     * I4): the claim wrote a grace deadline; a row still {@code RUNNING} without an external id past
+     * that deadline lost its trigger to a crash. {@code TIMEOUT} runs the orchestrator's normal
+     * failure path — the node and instance end {@code FAILED}, siblings are skipped, the item
+     * repair listener sees it — so a rerun is possible instead of a forever-{@code RUNNING}
+     * instance that no endpoint accepts.
+     */
+    private int failOrphanedClaims(Round round) {
+        Instant now = Instant.now();
+        if (round.expired(now)) {
+            log.warn("reconcile round deadline reached before the orphaned-claim scan");
+            return 0;
+        }
+        if (!round.ensureLease(now)) {
+            return 0;
+        }
+        List<NodeTaskPO> orphans;
+        try {
+            orphans = taskMapper.selectOrphanedClaims(now, SCAN_LIMIT);
+        } catch (RuntimeException ex) {
+            log.error("reconcile orphaned-claim scan failed; the next round retries", ex);
+            return 0;
+        }
+        int failed = 0;
+        for (NodeTaskPO po : orphans) {
+            Instant moment = Instant.now();
+            if (round.expired(moment)) {
+                log.warn("reconcile round deadline ({} min) reached after {} orphaned claim(s);"
+                    + " the rest is deferred to the next round", roundDeadline.toMinutes(), failed);
+                break;
+            }
+            if (!round.ensureLease(moment)) {
+                break;
+            }
+            NodeTask task;
+            try {
+                task = po.toDomain();
+            } catch (RuntimeException ex) {
+                log.warn("reconcile skipping malformed node_task row id={}", po.getId(), ex);
+                continue;
+            }
+            try {
+                log.warn("reconcile: taskId={} claimed but never reached the engine (no external"
+                    + " id), deadline {} passed; marking TIMEOUT", task.id(), task.deadlineAt());
+                orchestrator.onTaskCompleted(task.id(), NodeTaskStatus.TIMEOUT, null,
+                    "reconcile: the deployment trigger was claimed but no engine job was recorded"
+                        + " before the grace deadline; the trigger was lost");
+                failed++;
+            } catch (RuntimeException ex) {
+                log.error("reconcile failed to time out orphaned claim taskId={}", task.id(), ex);
+            }
+        }
+        return failed;
     }
 
     /** Replays persisted listener/transition failures (V12); bounded by {@link #SCAN_LIMIT}. */

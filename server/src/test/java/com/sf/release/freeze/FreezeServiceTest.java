@@ -210,6 +210,30 @@ class FreezeServiceTest {
     }
 
     @Test
+    void a_new_freeze_does_not_demote_a_release_whose_two_signatures_are_already_given() {
+        // Independent review I2: an earlier freeze collected both signatures, they stay as
+        // evidence, and the new freeze finds nothing to append. Demoting the item then would leave
+        // PENDING_APPROVAL with no step anybody could sign (approve 40001, execute 40001).
+        long itemId = givenItem(taskA, unitA, "READY");
+        long orderId = givenOrder(itemId, "PO-FZ-SIGNED");
+        long snapshotId = givenSnapshot(orderId, itemId, true);
+        givenDecidedApproval(orderId, snapshotId, 1, "OPS_LEAD", "APPROVED", "fz-lead");
+        givenDecidedApproval(orderId, snapshotId, 2, "DEPT_MANAGER", "APPROVED", "fz-manager");
+
+        freezes.create("GLOBAL", null, "第二个封板", null, null, Instant.now().plusSeconds(3600),
+            ACTOR);
+
+        assertThat(itemStatus(itemId))
+            .as("no pending step was raised, so the release stays executable (blocked by the"
+                + " review while the freeze is in force)")
+            .isEqualTo("READY");
+        assertThat(approvals.stepViews(snapshotId)).extracting(ApprovalStepView::role)
+            .containsExactly("OPS_LEAD", "DEPT_MANAGER");
+        assertThat(approvals.stepViews(snapshotId)).extracting(ApprovalStepView::status)
+            .containsOnly("APPROVED");
+    }
+
+    @Test
     void a_subsystem_freeze_leaves_the_other_system_alone() {
         long itemA = givenItem(taskA, unitA, "SUBMITTED");
         long orderA = givenOrder(itemA, "PO-FZ-SYS-A");
