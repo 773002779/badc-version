@@ -5,19 +5,21 @@ import com.sf.release.application.ReleaseQueryService.NodeView;
 import com.sf.release.application.ReleaseQueryService.OrderView;
 import com.sf.release.application.ReleaseQueryService.ReleaseRecord;
 import com.sf.release.application.ReleaseQueryService.TaskView;
+import com.sf.release.application.ReleaseRecordsService;
 
 import java.time.Instant;
 import java.util.List;
 
 /**
- * Response bodies of {@code /api/v1/releases} (Task 16).
+ * Response bodies of {@code /api/v1/releases}: the 发布内容 detail/history (Task 16) and the global
+ * 发布记录 page (GAP-10, P4-A Task 2).
  *
  * <p>The web layer owns the wire shape — field names, null semantics (a {@code null} field is
  * part of the contract and must stay present in the JSON) and ordering — while the application
  * read model stays HTTP-agnostic. That is why the records mirror
- * {@link ReleaseQueryService}'s views and are mapped here instead of being serialized directly:
- * the use case never depends on the web package (the dependency direction stays
- * {@code web -> application}).
+ * {@link ReleaseQueryService}'s and {@link ReleaseRecordsService}'s views and are mapped here
+ * instead of being serialized directly: the use case never depends on the web package (the
+ * dependency direction stays {@code web -> application}).
  *
  * <p><strong>Null fields are meaningful.</strong>
  * <ul>
@@ -28,7 +30,9 @@ import java.util.List;
  *   <li>{@code commitSha} / {@code imageDigest} are null until an execution builds or starts
  *       from an image (and stay null for a full rebuild until it reports one);</li>
  *   <li>{@code operator} is null in phase 1 because {@code pipeline_instance} has no creator
- *       column.</li>
+ *       column;</li>
+ *   <li>on a global-record row, {@code pipelineNo}/{@code pipelineStatus} are null for an order
+ *       that was never executed and {@code executedBy} is null for a historical order (V25).</li>
  * </ul>
  */
 public final class ReleaseDtos {
@@ -61,6 +65,41 @@ public final class ReleaseDtos {
             .map(record -> new ReleaseRecordView(record.pipelineNo(), record.triggerType(),
                 record.status(), record.startAt(), record.endAt(), record.operator()))
             .toList();
+    }
+
+    /**
+     * Maps one page of the global 发布记录 list (GAP-10). Each row carries the machine status value
+     * plus its Chinese label, and the newest pipeline of the order ({@code null} when none).
+     */
+    public static ReleaseRecordsPageResponse recordsPageOf(
+            ReleaseRecordsService.PageResult page) {
+        return new ReleaseRecordsPageResponse(
+            page.total(),
+            page.pageNo(),
+            page.pageSize(),
+            page.records().stream().map(ReleaseDtos::recordRowOf).toList());
+    }
+
+    private static ReleaseRecordRowView recordRowOf(
+            ReleaseRecordsService.ReleaseRecordView view) {
+        return new ReleaseRecordRowView(
+            view.publishNo(),
+            view.itemId(),
+            view.crid(),
+            view.version(),
+            view.subsystemId(),
+            view.subsystemName(),
+            view.unitId(),
+            view.unitName(),
+            view.orderStatus(),
+            view.orderStatusLabel(),
+            view.itemStatus(),
+            view.itemStatusLabel(),
+            view.plannedReleaseTime(),
+            view.createdAt(),
+            view.executedBy(),
+            view.pipelineNo(),
+            view.pipelineStatus());
     }
 
     private static ReleaseOrderView orderOf(OrderView order) {
@@ -136,5 +175,45 @@ public final class ReleaseDtos {
         Instant startAt,
         Instant endAt,
         String operator) {
+    }
+
+    /**
+     * One page of the global 发布记录 list (GAP-10): {@code total} is the full match count, the
+     * page number/size echo the request and {@code records} is the newest-first page.
+     */
+    public record ReleaseRecordsPageResponse(
+        long total,
+        long pageNo,
+        long pageSize,
+        List<ReleaseRecordRowView> records) {
+
+        public ReleaseRecordsPageResponse {
+            records = records == null ? List.of() : List.copyOf(records);
+        }
+    }
+
+    /**
+     * One release order row of the global list. Statuses are the stable machine value plus the
+     * Chinese label; {@code pipelineNo}/{@code pipelineStatus} describe the newest execution of the
+     * order and are {@code null} before the first execution.
+     */
+    public record ReleaseRecordRowView(
+        String publishNo,
+        Long itemId,
+        String crid,
+        String version,
+        Long subsystemId,
+        String subsystemName,
+        Long unitId,
+        String unitName,
+        String orderStatus,
+        String orderStatusLabel,
+        String itemStatus,
+        String itemStatusLabel,
+        Instant plannedReleaseTime,
+        Instant createdAt,
+        String executedBy,
+        String pipelineNo,
+        String pipelineStatus) {
     }
 }
