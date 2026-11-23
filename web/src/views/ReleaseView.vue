@@ -38,6 +38,16 @@ const isProdPause = computed(() => {
   return detail.value?.status === 'PAUSED' && prod?.status === 'RUNNING'
 })
 
+/**
+ * A rerun that resumes at PROD_DEPLOY keeps the item TESTING and reuses the admission; the execute
+ * endpoint starts it with EXECUTE_RERUN. The panel needs this to offer「执行生产重跑」instead of
+ * claiming TESTING is not executable (independent review I1).
+ */
+const isProductionRerun = computed(() => {
+  const trigger = detail.value?.triggerType ?? ''
+  return isProdPause.value && (trigger === 'RERUN_FROM_NODE' || trigger === 'RERUN_FULL')
+})
+
 async function load(silent = false) {
   if (!silent) loading.value = true
   error.value = null
@@ -151,6 +161,7 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
                 :publish-no="publishNo"
                 :running="busy || detail.status === 'PAUSED'"
                 :paused="detail.status === 'PAUSED'"
+                :rerun="isProductionRerun"
                 @changed="load(true)"
               />
             </div>

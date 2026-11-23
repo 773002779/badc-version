@@ -19,6 +19,8 @@ const props = defineProps<{
   publishNo: string
   running: boolean
   paused: boolean
+  /** The newest instance is a rerun paused at PROD_DEPLOY (the backend's isProductionRerun). */
+  rerun: boolean
 }>()
 
 const emit = defineEmits<{ (e: 'changed'): void }>()
@@ -46,6 +48,37 @@ const chain = computed(() => admission.value?.chain ?? [])
 const review = computed<ReviewView | null>(() => admission.value?.review ?? null)
 const pendingStep = computed(() => chain.value.find((s) => s.status === 'PENDING') ?? null)
 
+/**
+ * A production rerun (RERUN_* instance paused at PROD_DEPLOY): the item stays TESTING and reuses
+ * the previous admission, so the same execute endpoint starts it with EXECUTE_RERUN. Without this
+ * the UI said "TESTING 不可执行" while the backend accepted it (independent review I1).
+ */
+const productionRerun = computed(() => itemStatus.value === 'TESTING' && props.paused && props.rerun)
+
+/**
+ * The newest snapshot belongs to an earlier generation: a full rerun walks the item back through
+ * BUILDING/TESTING to GATE_PENDING and the previous snapshot stays in the table as history. It must
+ * not be shown as the current evidence, and it must not hide the submit button (review B1).
+ */
+const snapshotStale = computed(() => {
+  if (!snapshot.value) return false
+  if (itemStatus.value === 'TESTING') return !productionRerun.value
+  return itemStatus.value === 'GATE_PENDING' || itemStatus.value === 'GATE_FAILED' ||
+    itemStatus.value === 'BUILDING'
+})
+
+const freezeAlert = computed(() => {
+  if (review.value?.frozen) {
+    if (itemStatus.value === 'PROD_DEPLOYING') return '封板生效中：生产执行已暂停在批次边界'
+    if (itemStatus.value === 'PENDING_APPROVAL') return '封板生效中：本单需要运维组长 + 部门经理双签'
+    return '封板生效中：执行前复核会拦截，封板解除后才能执行'
+  }
+  if (!snapshotStale.value && snapshot.value?.frozen) {
+    return '提交时处于封板期：本单需要运维组长 + 部门经理双签'
+  }
+  return ''
+})
+
 const canSubmit = computed(() => has('control:submit-prod'))
 const canApprove = computed(() => has('control:approve'))
 const canExecute = computed(() => has('control:execute-prod'))
@@ -66,21 +99,35 @@ const approveBlock = computed(() => {
 
 const executeBlock = computed(() => {
   if (!canExecute.value) return '只有运维可以执行生产发布（control:execute-prod）'
-  if (itemStatus.value === 'READY') return ''
-  if (itemStatus.value === 'PROD_DEPLOYING' && props.paused) return ''
+  const runnable = itemStatus.value === 'READY' ||
+    (itemStatus.value === 'PROD_DEPLOYING' && props.paused) || productionRerun.value
+  if (runnable) {
+    // The review decides at execution time; disabling the button with its reasons is honest
+    // (independent review M4): an item the server will refuse is not offered as an action.
+    if (review.value?.blocked) {
+      return review.value.reasons.length ? review.value.reasons.join('；') : '执行前复核未通过'
+    }
+    return ''
+  }
   if (itemStatus.value === 'PROD_DEPLOYING') return '生产部署进行中'
+  if (itemStatus.value === 'TESTING') {
+    return '测试阶段不能执行生产（只有停在生产部署的重跑可以）'
+  }
   return `当前状态「${itemStatus.value}」不可执行`
 })
 
-const showSubmit = computed(
-  () => canSubmit.value && !snapshot.value && itemStatus.value === 'GATE_PENDING'
-)
+const executeLabel = computed(() => {
+  if (itemStatus.value === 'TESTING') return '执行生产重跑'
+  return itemStatus.value === 'READY' ? '执行生产发布' : '继续生产执行'
+})
+
+const showSubmit = computed(() => canSubmit.value && itemStatus.value === 'GATE_PENDING')
 const showResubmit = computed(
   () => canSubmit.value && itemStatus.value === 'REJECTED' && !!snapshot.value
 )
 const showExecute = computed(
-  () => !!snapshot.value && (itemStatus.value === 'READY' ||
-    (itemStatus.value === 'PROD_DEPLOYING' && props.paused))
+  () => !snapshotStale.value && !!snapshot.value && (itemStatus.value === 'READY' ||
+    (itemStatus.value === 'PROD_DEPLOYING' && props.paused) || productionRerun.value)
 )
 
 const statusChip = computed(() => {
@@ -255,8 +302,8 @@ async function execute() {
     : '复核通过（封板、豁免、镜像一致）'
   try {
     await ElMessageBox.confirm(
-      `${reviewText}。确认执行生产发布？将按批次串行部署。`,
-      props.paused ? '继续生产执行' : '执行生产发布',
+      `${reviewText}。确认${executeLabel.value}？将按批次串行部署。`,
+      executeLabel.value,
       { confirmButtonText: '执行', cancelButtonText: '取消', type: 'warning' }
     )
   } catch {
@@ -285,7 +332,10 @@ onMounted(load)
       <span class="admission-title">生产准入</span>
       <span class="chip" :class="`chip-${statusChip.tone}`">{{ statusChip.label }}</span>
       <span class="topbar-spacer" />
-      <span class="weak small" v-if="snapshot">快照 #{{ snapshot.id }} · {{ formatDateTime(snapshot.createdAt) }}</span>
+      <span class="weak small" v-if="snapshot">
+        快照 #{{ snapshot.id }}<template v-if="snapshotStale">（上一代 · 历史）</template> ·
+        {{ formatDateTime(snapshot.createdAt) }}
+      </span>
     </div>
 
     <el-alert
@@ -301,23 +351,31 @@ onMounted(load)
 
     <template v-else>
       <el-alert
-        v-if="review?.frozen || snapshot?.frozen"
+        v-if="freezeAlert"
         type="warning"
         :closable="false"
         show-icon
-        :title="review?.frozen ? '封板生效中：生产执行已暂停在批次边界' : '提交时处于封板期：本单需要运维组长 + 部门经理双签'"
+        :title="freezeAlert"
         style="margin: 0 18px 12px"
       />
-      <div v-if="!snapshot" class="empty-block">
+      <div v-if="!snapshot || snapshotStale" class="empty-block">
         <div>
-          <div class="strong">尚未提交生产</div>
+          <div class="strong">{{ snapshotStale ? '上一代快照已归档' : '尚未提交生产' }}</div>
           <p class="weak small" style="margin: 4px 0 0">
-            门禁与测试都通过后，由开发填写计划生产时间与 OA 工单提交；窗口内免审批，窗口外需要运维组长，
-            封板期需要运维组长 + 部门经理双签。
+            <template v-if="snapshotStale">
+              本次重跑不沿用上一代的准入快照（计划时间、OA、封板与签名都是历史）。重新提交会生成新快照。
+            </template>
+            <template v-else>
+              门禁与测试都通过后，由开发填写计划生产时间与 OA 工单提交；窗口内免审批，窗口外需要运维组长，
+              封板期需要运维组长 + 部门经理双签。
+            </template>
           </p>
         </div>
-        <el-button v-if="showSubmit" type="primary" @click="openDialog(false)">提交生产发布</el-button>
+        <el-button v-if="showSubmit" type="primary" @click="openDialog(false)">
+          提交生产发布
+        </el-button>
         <span v-else-if="!canSubmit" class="weak small">需要权限 control:submit-prod</span>
+        <span v-else class="weak small">当前状态「{{ itemStatus }}」不能提交（门禁通过后才可提交）</span>
       </div>
 
       <template v-else>
@@ -409,8 +467,8 @@ onMounted(load)
 
           <span class="topbar-spacer" />
 
-          <el-button v-if="showExecute" type="primary" :disabled="!!executeBlock || busy" :title="executeBlock || '执行生产发布'" @click="execute">
-            {{ itemStatus === 'READY' ? '执行生产发布' : '继续生产执行' }}
+          <el-button v-if="showExecute" type="primary" :disabled="!!executeBlock || busy" :title="executeBlock || executeLabel" @click="execute">
+            {{ executeLabel }}
           </el-button>
           <span v-if="showExecute && executeBlock" class="weak small">{{ executeBlock }}</span>
 

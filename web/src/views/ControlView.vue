@@ -37,6 +37,20 @@ const freezes = ref<FreezeView[]>([])
 const freezeLoading = ref(false)
 const freezeDialog = ref(false)
 const savingFreeze = ref(false)
+
+/**
+ * The page lists every ACTIVE freeze, not only the ones in force: a scheduled freeze is recorded
+ * immediately (`FreezeService.create`), and an admin who mis-set its start time must still be able
+ * to lift it (independent review M3). The history rows are shown last, capped, so the list stays
+ * readable.
+ */
+const inForceFreezes = computed(() => freezes.value.filter((f) => f.status === 'ACTIVE' && f.active))
+const scheduledFreezes = computed(
+  () => freezes.value.filter((f) => f.status === 'ACTIVE' && !f.active)
+)
+const historyFreezes = computed(() => freezes.value.filter((f) => f.status !== 'ACTIVE'))
+const recentHistory = computed(() => historyFreezes.value.slice(0, 10))
+
 const freezeForm = reactive({
   scope: 'GLOBAL',
   subsystemId: null as number | null,
@@ -49,7 +63,9 @@ const freezeForm = reactive({
 async function loadFreezes() {
   freezeLoading.value = true
   try {
-    freezes.value = await listFreezes({ active: true })
+    // active=false is the history/newest-first list; it includes the ACTIVE rows, so one call
+    // feeds all three sections below.
+    freezes.value = await listFreezes({ active: false })
     error.value = null
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : '读取封板失败'
@@ -265,15 +281,15 @@ onMounted(async () => {
 
     <el-tabs v-model="tab">
       <el-tab-pane label="封板" name="freezes">
-        <DataSection title="生效中的封板" :subtitle="`${freezes.length} 条`">
+        <DataSection title="生效中的封板" :subtitle="`${inForceFreezes.length} 条`">
           <template #actions>
             <el-button :loading="freezeLoading" @click="loadFreezes">刷新</el-button>
             <el-button v-if="canFreeze" type="primary" @click="openFreeze">发起封板</el-button>
             <span v-else class="weak small">需要权限 control:freeze</span>
           </template>
 
-          <div v-if="freezes.length" class="freeze-list">
-            <div v-for="f in freezes" :key="f.id" class="freeze-row">
+          <div v-if="inForceFreezes.length" class="freeze-list">
+            <div v-for="f in inForceFreezes" :key="f.id" class="freeze-row">
               <div class="freeze-main">
                 <div class="row" style="gap: 8px">
                   <span class="chip chip-danger">封板中</span>
@@ -286,17 +302,62 @@ onMounted(async () => {
                 </div>
                 <div v-if="f.impact" class="weak small">影响：{{ f.impact }}</div>
               </div>
-              <el-button
-                v-if="canUnfreeze"
-                :disabled="!f.active"
-                :title="f.active ? '解除封板' : '该封板尚未生效或已结束'"
-                @click="doUnfreeze(f)"
-              >解除</el-button>
+              <el-button v-if="canUnfreeze" :title="'解除封板'" @click="doUnfreeze(f)">解除</el-button>
               <span v-else class="weak small">需要 control:unfreeze</span>
             </div>
           </div>
           <EmptyState v-else-if="!freezeLoading" title="当前没有生效中的封板" hint="封板期内的生产发布需要运维组长 + 部门经理双签，构建与测试部署不受影响。" />
           <div v-else style="padding: 24px"><el-skeleton :rows="3" animated /></div>
+        </DataSection>
+
+        <DataSection
+          v-if="scheduledFreezes.length"
+          title="待生效的封板"
+          :subtitle="`${scheduledFreezes.length} 条 · 已登记，到达开始时间后生效`"
+        >
+          <div class="freeze-list">
+            <div v-for="f in scheduledFreezes" :key="f.id" class="freeze-row">
+              <div class="freeze-main">
+                <div class="row" style="gap: 8px">
+                  <span class="chip chip-neutral">待生效</span>
+                  <span class="strong">{{ f.reason }}</span>
+                </div>
+                <div class="weak small freeze-meta">
+                  范围 {{ f.scope === 'GLOBAL' ? '全局' : `系统 #${f.subsystemId}` }}
+                  · {{ formatDateTime(f.startAt) }} → {{ formatDateTime(f.endAt) }}
+                  · 发起人 {{ f.initiator }}
+                </div>
+                <div v-if="f.impact" class="weak small">影响：{{ f.impact }}</div>
+              </div>
+              <el-button v-if="canUnfreeze" :title="'解除这条尚未生效的封板'" @click="doUnfreeze(f)">
+                解除
+              </el-button>
+              <span v-else class="weak small">需要 control:unfreeze</span>
+            </div>
+          </div>
+        </DataSection>
+
+        <DataSection
+          v-if="recentHistory.length"
+          title="历史封板"
+          :subtitle="`最近 ${recentHistory.length} 条 / 共 ${historyFreezes.length} 条`"
+        >
+          <div class="freeze-list">
+            <div v-for="f in recentHistory" :key="f.id" class="freeze-row">
+              <div class="freeze-main">
+                <div class="row" style="gap: 8px">
+                  <span class="chip chip-neutral">{{ f.statusLabel }}</span>
+                  <span class="strong">{{ f.reason }}</span>
+                </div>
+                <div class="weak small freeze-meta">
+                  范围 {{ f.scope === 'GLOBAL' ? '全局' : `系统 #${f.subsystemId}` }}
+                  · {{ formatDateTime(f.startAt) }} → {{ formatDateTime(f.endAt) }}
+                  · 发起人 {{ f.initiator }}
+                  <template v-if="f.releasedBy"> · {{ f.releasedBy }} 于 {{ formatDateTime(f.releasedAt) }} 解除</template>
+                </div>
+              </div>
+            </div>
+          </div>
         </DataSection>
       </el-tab-pane>
 
