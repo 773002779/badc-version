@@ -5,7 +5,6 @@ import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
 import com.sf.release.domain.approval.ApprovalRole;
-import com.sf.release.domain.approval.ApprovalStatus;
 import com.sf.release.domain.approval.ApprovalStep;
 import com.sf.release.domain.pipeline.InstanceStatus;
 import com.sf.release.domain.pipeline.NodeHandler;
@@ -71,9 +70,10 @@ import java.util.TreeSet;
  * stop, and a lease that expired must be re-published rather than failed mid-advance (40006).
  *
  * <p><strong>A freeze that appeared while the item was READY pulls it back.</strong> If a freeze is
- * in force now and the snapshot did not know about it, the execute attempt appends the missing
- * {@code DEPT_MANAGER} step to the latest snapshot's chain, applies {@code FREEZE_HIT}
- * ({@code READY → PENDING_APPROVAL}), mirrors the order and answers 40002 with the reason. That is
+ * in force now and the snapshot did not know about it, the execute attempt appends the freeze's two
+ * signatures ({@code OPS_LEAD} then {@code DEPT_MANAGER}, design 4.4) to the latest snapshot's
+ * chain, applies {@code FREEZE_HIT} ({@code READY → PENDING_APPROVAL}), mirrors the order and
+ * answers 40002 with the reason. That is
  * the same treatment a freeze declared at that moment gives the release (design 4.2/4.6), applied at
  * the last moment instead of at declaration. A broken waiver is a plain 40002 (nothing to pull back:
  * the item was admitted on an exemption that no longer exists), and a digest mismatch is the hard
@@ -270,24 +270,23 @@ public class ExecuteProdService {
     // ------------------------------------------------------------------ state changes
 
     /**
-     * The freeze that appeared after admission: raise the second signature on the <em>latest</em>
-     * snapshot's chain and pull the item back into approval, in one transaction so a release can
-     * never be found {@code READY} with a chain that requires a signature nobody will be asked for.
-     * If the chain already carries an active (approved) {@code DEPT_MANAGER} — a freeze the snapshot
-     * did not record but whose signature was collected — nothing is added and the item is left
-     * {@code READY}: the freeze still blocks execution (40002), and the release becomes executable
-     * as soon as it is lifted. Demoting it then would leave a {@code PENDING_APPROVAL} item with no
-     * pending step, which neither approve nor execute could leave (the dead-end of review round 1).
+     * The freeze that appeared after admission: raise the freeze's two signatures on the
+     * <em>latest</em> snapshot's chain ({@code OPS_LEAD} then {@code DEPT_MANAGER}, design 4.4; the
+     * window may have required neither) and pull the item back into approval, in one transaction so
+     * a release can never be found {@code READY} with a chain that requires a signature nobody will
+     * be asked for. If the chain already carries the signatures — a freeze the snapshot did not
+     * record but whose steps were collected — nothing is added and the item is left {@code READY}:
+     * the freeze still blocks execution (40002), and the release becomes executable as soon as it is
+     * lifted. Demoting it then would leave a {@code PENDING_APPROVAL} item with no pending step,
+     * which neither approve nor execute could leave (the dead-end of review round 1).
      */
     private void pullBackForFreeze(ReleaseOrderPO order, ReleaseItemPO item,
                                    AdmissionSnapshotPO snapshot, String publishNo) {
         boolean demoted = Boolean.TRUE.equals(transactionRunner.inTransaction(() -> {
-            List<ApprovalStep> chain = approvalService.appendIfMissing(order.getId(),
-                snapshot.getId(), ApprovalRole.DEPT_MANAGER);
-            boolean pendingSecondSignature = chain.stream().anyMatch(step ->
-                step.role() == ApprovalRole.DEPT_MANAGER
-                    && step.status() == ApprovalStatus.PENDING);
-            if (!pendingSecondSignature) {
+            List<ApprovalStep> chain = approvalService.ensureChain(order.getId(), snapshot.getId(),
+                List.of(ApprovalRole.OPS_LEAD, ApprovalRole.DEPT_MANAGER));
+            boolean pendingSignature = chain.stream().anyMatch(ApprovalStep::pending);
+            if (!pendingSignature) {
                 return false;
             }
             applyTransition(item.getId(), ItemEvent.FREEZE_HIT, publishNo);

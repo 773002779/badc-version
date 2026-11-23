@@ -24,7 +24,8 @@ public record AdmissionStep(Key key, boolean passed, String reason, String nextA
         /** 发布窗口: inside needs nothing, outside adds {@code OPS_LEAD}. */
         WINDOW,
         /** 封板: a freeze that governs the release (declared, not ended, starting no later than the
-         * later of now and the planned time) adds {@code DEPT_MANAGER} on top. */
+         * later of now and the planned time) requires the two signatures of design 4.4,
+         * {@code OPS_LEAD} and {@code DEPT_MANAGER} — inside the window too. */
         FREEZE,
         /** 计划发布时间: after now and at most 30 days ahead. */
         PLANNED_TIME;

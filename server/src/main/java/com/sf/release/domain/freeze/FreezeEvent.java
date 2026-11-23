@@ -4,8 +4,9 @@ import java.time.Instant;
 import java.util.Objects;
 
 /**
- * One 生产封板 (tech design 4.2): a declared time range in which production releases need a second
- * signature ({@code DEPT_MANAGER}) and in-flight releases are pulled back into approval.
+ * One 生产封板 (tech design 4.2): a declared time range in which production releases need the two
+ * signatures of design 4.4 ({@code OPS_LEAD} and {@code DEPT_MANAGER}) and in-flight releases are
+ * pulled back into approval.
  *
  * <p><strong>In force</strong> is {@code status == ACTIVE} <em>and</em> {@code start_at <= at <
  * end_at}; the half-open range means a freeze that ends exactly at {@code at} no longer blocks and

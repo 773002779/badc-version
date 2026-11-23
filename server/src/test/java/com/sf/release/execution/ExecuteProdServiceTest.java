@@ -54,6 +54,7 @@ class ExecuteProdServiceTest {
     private static final String OPS = "ex-ops";
     private static final String OPS_NO_SCOPE = "ex-ops-noscope";
     private static final String DEV = "ex-dev";
+    private static final String LEAD = "ex-lead";
     private static final String MANAGER = "ex-manager";
     private static final String PUBLISH_NO = "PO-EX-1";
     private static final String DIGEST = "sha256:exec";
@@ -84,6 +85,7 @@ class ExecuteProdServiceTest {
         givenUser(OPS, "OPS");
         givenUser(OPS_NO_SCOPE, "OPS");
         givenUser(DEV, "DEV");
+        givenUser(LEAD, "OPS_LEAD");
         givenUser(MANAGER, "DEPT_MANAGER");
 
         subsystemId = givenSubsystem("EX-SYS");
@@ -106,6 +108,8 @@ class ExecuteProdServiceTest {
             DEV, unitId);
         jdbc.update("INSERT INTO user_scope (user_id, scope_type, scope_id) VALUES (?, 'UNIT', ?)",
             MANAGER, unitId);
+        jdbc.update("INSERT INTO user_scope (user_id, scope_type, scope_id) VALUES (?, 'UNIT', ?)",
+            LEAD, unitId);
         // The unit lease the publishing flow would hold while the instance is alive.
         unitLockService.acquire(unitId, instanceId);
     }
@@ -178,10 +182,16 @@ class ExecuteProdServiceTest {
         assertThatOrder("PENDING_APPROVAL");
         assertThat(instanceStatus()).as("nothing was resumed").isEqualTo("PAUSED");
         assertThat(engine.deployCalls).isEmpty();
-        Integer pending = jdbc.queryForObject(
+        Integer pendingManager = jdbc.queryForObject(
             "SELECT COUNT(*) FROM approval WHERE order_id = ? AND role = 'DEPT_MANAGER'"
                 + " AND status = 'PENDING'", Integer.class, orderId);
-        assertThat(pending).as("the freeze adds the second signature").isEqualTo(1);
+        Integer pendingLead = jdbc.queryForObject(
+            "SELECT COUNT(*) FROM approval WHERE order_id = ? AND role = 'OPS_LEAD'"
+                + " AND status = 'PENDING'", Integer.class, orderId);
+        assertThat(pendingLead)
+            .as("a freeze needs the two signatures of design 4.4, OPS_LEAD first")
+            .isEqualTo(1);
+        assertThat(pendingManager).as("and DEPT_MANAGER second").isEqualTo(1);
     }
 
     @Test
@@ -221,6 +231,13 @@ class ExecuteProdServiceTest {
             .andExpect(jsonPath("$.code").value(40002));
         assertThatItem("PENDING_APPROVAL");
         assertThat(pendingSecondSignatures()).isEqualTo(1);
+
+        mvc.perform(post("/api/v1/releases/{publishNo}/approve", PUBLISH_NO)
+                .header(USER_HEADER, LEAD)
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content("{}"))
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.itemStatus").value("PENDING_APPROVAL"));
 
         mvc.perform(post("/api/v1/releases/{publishNo}/approve", PUBLISH_NO)
                 .header(USER_HEADER, MANAGER)

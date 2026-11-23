@@ -36,9 +36,10 @@ import java.util.Map;
  *
  * <p><strong>Chain construction is append-only and idempotent.</strong> {@link #ensureChain} adds a
  * step only for a role that has no pending or approved step; decided steps are never touched and
- * never deleted. A frozen order gets {@code DEPT_MANAGER} appended when it is missing, an unfrozen
- * one drops only the <em>unsigned</em> {@code DEPT_MANAGER} again — the signed ones stay as
- * evidence (design 4.2).
+ * never deleted. A frozen release gets the two signatures of design 4.4 ({@code OPS_LEAD} then
+ * {@code DEPT_MANAGER}) appended when they are missing, a release no longer governed by any freeze
+ * drops only its <em>unsigned</em> freeze steps again — the signed ones stay as evidence (design
+ * 4.2): {@code OPS_LEAD} when the snapshot is inside the window and {@code DEPT_MANAGER} always.
  *
  * <p><strong>Two mutating calls of one order never interleave.</strong> {@code ensureChain} and
  * {@code dropPending} lock the {@code release_order} row as their <em>first</em> statement, so a
@@ -162,7 +163,9 @@ public class ApprovalService {
 
     /**
      * Appends one role at the end of the snapshot's chain when it has no active step. This is the
-     * "封板生效 → 补一个 DEPT_MANAGER" hook of design 4.2.
+     * "封板生效 → 补签" hook of design 4.2/4.4; the freeze paths pass {@code OPS_LEAD} then
+     * {@code DEPT_MANAGER} through {@link #ensureChain}, so the step numbers keep the signature
+     * order.
      */
     @Transactional
     public List<ApprovalStep> appendIfMissing(long orderId, long snapshotId, ApprovalRole role) {
@@ -171,7 +174,8 @@ public class ApprovalService {
 
     /**
      * Removes the still-pending steps of one role from the snapshot's chain (design 4.2: "解除封板
-     * 后移除尚未签的 DEPT_MANAGER"). Decided steps are kept, so an approval that already happened
+     * 后移除尚未签的封板步骤" — {@code DEPT_MANAGER} always, {@code OPS_LEAD} only when the window
+     * would not have asked for it). Decided steps are kept, so an approval that already happened
      * stays visible.
      *
      * <p>The order row is locked first for the same reason as {@link #ensureChain}: the unfreeze
