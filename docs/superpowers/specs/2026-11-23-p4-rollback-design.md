@@ -15,29 +15,44 @@
 
 ## 2. 版本清单从哪来
 
-平台没有制品库索引（Q4 未定），一期**从成功生产部署记录推导**：
+平台没有制品库索引（Q4 未定），一期**从成功生产部署记录推导**，分两个查询：
 
 ```sql
-SELECT pi.image_digest                    AS digest,
-       MAX(nt.finished_at)                AS finished_at,
-       ro.publish_no                      AS publish_no,
-       ro.executed_by                     AS executed_by,
-       COUNT(DISTINCT nt.target_id)       AS batch_count
+-- 当前线上镜像：最近一次成功的生产部署任务（任意触发，含 ROLLBACK）
+SELECT pi.image_digest, nt.finished_at,
+       COALESCE(rr.target_publish_no, ro.publish_no) AS publish_no,
+       COALESCE(rr.requested_by, ro.executed_by)     AS executed_by
 FROM node_task nt
-JOIN pipeline_node     pn ON pn.id = nt.node_id
 JOIN pipeline_instance pi ON pi.id = nt.instance_id
+JOIN release_order ro     ON ro.id = pi.order_id
+JOIN release_item  ri     ON ri.id = ro.item_id
+LEFT JOIN rollback_record rr ON rr.instance_id = pi.id
+WHERE ri.unit_id = :unitId
+  AND nt.node_type = 'PROD_DEPLOY' AND nt.task_type = 'DEPLOY'
+  AND nt.status = 'SUCCESS' AND pi.image_digest IS NOT NULL
+ORDER BY nt.finished_at DESC, nt.id DESC LIMIT 1;
+
+-- 可回滚目标：整次生产部署成功的前向发布，按 digest 去重取最近一次，排除当前镜像
+SELECT pi.image_digest, MAX(nt.finished_at) AS finished_at, ro.publish_no, ro.executed_by
+FROM node_task nt
+JOIN pipeline_instance pi ON pi.id = nt.instance_id
+JOIN pipeline_node     pn ON pn.instance_id = pi.id AND pn.node_type = 'PROD_DEPLOY'
 JOIN release_order     ro ON ro.id = pi.order_id
 JOIN release_item      ri ON ri.id = ro.item_id
-WHERE ri.unit_id = #{unitId}
-  AND nt.node_type = 'PROD_DEPLOY' AND nt.task_type = 'DEPLOY'
-  AND nt.status = 'SUCCESS'
+WHERE ri.unit_id = :unitId
+  AND nt.node_type = 'PROD_DEPLOY' AND nt.task_type = 'DEPLOY' AND nt.status = 'SUCCESS'
+  AND pn.status = 'SUCCESS'
   AND pi.image_digest IS NOT NULL AND pi.trigger_type <> 'ROLLBACK'
+  AND pi.image_digest <> :currentDigest
 GROUP BY pi.image_digest, ro.publish_no, ro.executed_by
-ORDER BY MAX(nt.finished_at) DESC
-LIMIT 11
+ORDER BY MAX(nt.finished_at) DESC LIMIT 10;
 ```
 
-- 第 1 条 = **当前线上版本**，第 2–11 条 = 近 10 个历史版本；同一 digest 多次部署取最近一次。
+- 第 1 条 = **当前线上版本**：最近一次成功的生产部署任务，**包括回滚实例**——回滚后目标镜像就是线上镜像，
+  重复回滚到同一镜像应被拒绝（40000）；回滚实例的发布单/执行人取 `rollback_record` 的目标版本与发起人。
+- 第 2–11 条 = 近 10 个**可回滚目标**：只认「整次生产部署成功」的前向发布（`PROD_DEPLOY` 节点 `SUCCESS`，
+  即所有批次的所有 DE 都部署成功），同一 digest 取最近一次；批次中途失败的发布不是可回滚目标
+  （只有部分镜像在线），但仍可能是当前线上镜像，此时页面给「上一个完整版本」作为回滚目标，正好修复部分切换。
 - 环境列表（生产/容灾/蓝绿）由该实例成功任务的 DE 环境聚合，返给页面展示。
 - **新增 `release_order.executed_by`（V25）**：执行生产时写入操作人，版本清单的「发布人」由此而来；历史数据为空显示 `—`。
 

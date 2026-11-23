@@ -299,6 +299,10 @@ class RollbackControllerTest {
         long itemId = givenItem(taskId, unit, "CR-RBC-V" + n, "release/rbc-v" + n);
         long orderId = givenOrder(itemId, publishNo, "ctrl-ops");
         long instanceId = givenInstance(orderId, "PL-RBC-V" + n, digest);
+        jdbc.update("INSERT INTO pipeline_node (instance_id, node_type, seq_no, status,"
+                + " started_at, finished_at) VALUES (?, 'PROD_DEPLOY', 0, 'SUCCESS', ?, ?)",
+            instanceId, Timestamp.from(finishedAt.minusSeconds(600)),
+            Timestamp.from(finishedAt));
         jdbc.update("INSERT INTO node_task (instance_id, node_type, task_type, batch_no, target_id,"
                 + " status, attempt, started_at, finished_at, updated_at)"
                 + " VALUES (?, 'PROD_DEPLOY', 'DEPLOY', 1, ?, 'SUCCESS', 0, ?, ?, ?)",

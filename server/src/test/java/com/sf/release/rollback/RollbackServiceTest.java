@@ -159,20 +159,59 @@ class RollbackServiceTest {
     }
 
     @Test
-    void versions_excludes_rollback_instances() {
-        Instant now = Instant.now();
+    void after_a_rollback_the_target_becomes_the_current_version() {
+        // Independent review of Task 1: the authoritative version query excluded ROLLBACK
+        // instances, so after a successful rollback the page kept showing the pre-rollback image as
+        // "current" and a repeated rollback to the same target was not refused.
+        Instant now = Instant.now().plusSeconds(60);
         long itemId = givenItem(taskId, unitId, "CR-RB-RB", "release/rb-rb", "DONE");
         long orderId = givenOrder(itemId, "PO-RB-ROLLBACK", "DONE", USER);
-        long instanceId = givenInstance(orderId, "PL-RB-ROLLBACK", "ROLLBACK",
-            "sha256:rollback-only", COMMIT, "DONE");
+        long instanceId = givenInstance(orderId, "PL-RB-ROLLBACK", "ROLLBACK", TARGET, COMMIT,
+            "DONE");
         givenDeployTask(instanceId, prodOne, 1, "SUCCESS", now);
+        givenRollbackRecord(instanceId, unitId, current.orderId(), itemId, current.publishNo(),
+            CURRENT, TARGET, target.publishNo());
 
         RollbackService.VersionList list = rollbacks.versions(unitId);
 
         assertThat(list.current().digest())
-            .as("the rollback image is not a deployable version")
-            .isEqualTo(CURRENT);
-        assertThat(list.history()).extracting(RollbackVersionView::digest).containsExactly(TARGET);
+            .as("the rolled-back-to image is what production runs now")
+            .isEqualTo(TARGET);
+        assertThat(list.current().publishNo()).isEqualTo(target.publishNo());
+        assertThat(list.current().executedBy()).isEqualTo("ops-rb");
+        assertThat(list.history()).extracting(RollbackVersionView::digest)
+            .as("the previous online image stays available for a roll-forward")
+            .containsExactly(CURRENT);
+        assertBizError(() -> rollbacks.execute(unitId, TARGET, REASON),
+            BizError.PARAM_INVALID, "targetDigest");
+    }
+
+    @Test
+    void a_release_that_failed_mid_batch_is_not_a_rollback_target() {
+        Instant now = Instant.now();
+        long itemId = givenItem(taskId, unitId, "CR-RB-PARTIAL", "release/rb-partial", "FAILED");
+        long orderId = givenOrder(itemId, "PO-RB-PARTIAL", "FAILED", "ops-partial");
+        long instanceId = givenInstance(orderId, "PL-RB-PARTIAL", "INITIAL", "sha256:partial",
+            COMMIT, "FAILED");
+        givenDeployTask(instanceId, prodOne, 1, "SUCCESS", now);
+        givenDeployTask(instanceId, drTwo, 2, "FAILED", now);
+        jdbc.update("UPDATE pipeline_node SET status = 'FAILED' WHERE instance_id = ?", instanceId);
+
+        RollbackService.VersionList list = rollbacks.versions(unitId);
+
+        assertThat(list.current().digest())
+            .as("the partially deployed image is what production runs: the page must say so")
+            .isEqualTo("sha256:partial");
+        assertThat(list.history()).extracting(RollbackVersionView::digest)
+            .as("only fully deployed releases are rollback targets")
+            .containsExactly(CURRENT, TARGET);
+        assertBizError(() -> rollbacks.execute(unitId, "sha256:partial", REASON),
+            BizError.PARAM_INVALID, "targetDigest");
+
+        rollbacks.execute(unitId, CURRENT, REASON);
+        assertThat(recordCount())
+            .as("rolling the partial deployment back to the last full release is allowed")
+            .isEqualTo(1);
     }
 
     @Test
@@ -447,11 +486,34 @@ class RollbackServiceTest {
 
     private void givenDeployTask(long instanceId, long deId, int batchNo, String status,
                                  Instant finishedAt) {
+        Integer nodes = jdbc.queryForObject("SELECT COUNT(*) FROM pipeline_node"
+            + " WHERE instance_id = ? AND node_type = 'PROD_DEPLOY'", Integer.class, instanceId);
+        if (nodes == null || nodes == 0) {
+            // The history query requires the node itself to be SUCCESS (every batch deployed);
+            // tests for a partial release flip it to FAILED afterwards.
+            jdbc.update("INSERT INTO pipeline_node (instance_id, node_type, seq_no, status,"
+                    + " started_at, finished_at) VALUES (?, 'PROD_DEPLOY', 0, 'SUCCESS', NOW(3), ?)",
+                instanceId, Timestamp.from(finishedAt));
+        }
         jdbc.update("INSERT INTO node_task (instance_id, node_type, task_type, batch_no, target_id,"
                 + " status, attempt, started_at, finished_at, updated_at)"
                 + " VALUES (?, 'PROD_DEPLOY', 'DEPLOY', ?, ?, ?, 0, ?, ?, ?)",
             instanceId, batchNo, deId, status, Timestamp.from(finishedAt.minusSeconds(600)),
             Timestamp.from(finishedAt), Timestamp.from(finishedAt));
+    }
+
+    private void givenRollbackRecord(long instanceId, long unitId, long sourceOrderId,
+                                     long sourceItemId, String sourcePublishNo,
+                                     String sourceDigest, String targetDigest,
+                                     String targetPublishNo) {
+        jdbc.update("INSERT INTO rollback_record (unit_id, instance_id, pipeline_no,"
+                + " source_order_id, source_item_id, source_publish_no, source_digest,"
+                + " target_digest, target_publish_no, reason, requested_by, status, created_at,"
+                + " finished_at)"
+                + " SELECT ?, ?, pipeline_no, ?, ?, ?, ?, ?, ?, ?, 'ops-rb', 'SUCCESS', NOW(3),"
+                + " NOW(3) FROM pipeline_instance WHERE id = ?",
+            unitId, instanceId, sourceOrderId, sourceItemId, sourcePublishNo, sourceDigest,
+            targetDigest, targetPublishNo, REASON, instanceId);
     }
 
     private long recordCount() {

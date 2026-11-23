@@ -405,6 +405,14 @@ class RollbackFlowTest {
     }
 
     private void givenDeployTask(long instanceId, long deId, int batchNo, Instant finishedAt) {
+        Integer nodes = jdbc.queryForObject("SELECT COUNT(*) FROM pipeline_node"
+            + " WHERE instance_id = ? AND node_type = 'PROD_DEPLOY'", Integer.class, instanceId);
+        if (nodes == null || nodes == 0) {
+            // The version history requires the node itself to be SUCCESS (all batches deployed).
+            jdbc.update("INSERT INTO pipeline_node (instance_id, node_type, seq_no, status,"
+                    + " started_at, finished_at) VALUES (?, 'PROD_DEPLOY', 0, 'SUCCESS', NOW(3), ?)",
+                instanceId, Timestamp.from(finishedAt));
+        }
         jdbc.update("INSERT INTO node_task (instance_id, node_type, task_type, batch_no, target_id,"
                 + " status, attempt, started_at, finished_at, updated_at)"
                 + " VALUES (?, 'PROD_DEPLOY', 'DEPLOY', ?, ?, 'SUCCESS', 0, ?, ?, ?)",

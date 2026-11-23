@@ -51,9 +51,15 @@ import java.util.Objects;
  * The 生产回滚 use cases (rollback design section 2-5, P4-A): the version list derived from
  * successful production deployments, the single-step execution, and the record page/detail.
  *
- * <p><strong>Version list.</strong> There is no artifact index (Q4 is still open), so a deployable
- * version is "an image digest that once deployed successfully to production". The first row is the
- * current online version, the next ten are the history. A unit without any successful production
+ * <p><strong>Version list.</strong> There is no artifact index (Q4 is still open), so a
+ * <em>rollback target</em> is a <em>fully deployed</em> forward release: an image digest whose
+ * {@code PROD_DEPLOY} node reached {@code SUCCESS}. The <em>current online image</em> is the newest
+ * successful production deploy of any trigger, including a rollback: after rolling back, the target
+ * image is what production runs, so it is shown as current and repeating that rollback answers
+ * 40000. The next ten rows are the fully deployed forward releases, newest first. A release that
+ * failed mid-batch is deliberately not a target (only part of its image is online), while it can
+ * still be what production currently runs — the page then offers the last full release as the
+ * rollback target, which repairs the partial rollout. A unit without any successful production
  * deployment answers {@link BizError#STATE_NOT_ALLOWED} (40001): there is nothing to roll back to.
  *
  * <p><strong>Execution is one step (J13).</strong> {@code POST /rollbacks} creates the record and
@@ -320,18 +326,26 @@ public class RollbackService {
     // ------------------------------------------------------------------ version reading
 
     /**
-     * The version rows of {@code unitId} (current first), with the batch count merged from the
-     * companion aggregate query.
+     * The current online version followed by up to ten rollback targets, with the batch count merged
+     * from the companion aggregate query.
+     *
+     * <p>The current row is the newest successful production deploy of <em>any</em> trigger
+     * (including a rollback: after rolling back, the target image is what production runs, so it is
+     * the current version and repeating that rollback is refused). The history rows are fully
+     * deployed forward releases only; a release that failed mid-batch is not a rollback target.
      *
      * @throws BizException 40001 the unit has no successful production deployment
      */
     private List<RollbackVersionRow> loadVersionRows(long unitId) {
-        List<RollbackVersionRow> rows = recordMapper.selectVersions(unitId);
-        if (rows.isEmpty()) {
+        RollbackVersionRow current = recordMapper.selectCurrent(unitId);
+        if (current == null) {
             throw new BizException(BizError.STATE_NOT_ALLOWED,
                 "该部署单元没有成功的生产部署记录，暂不可回滚",
                 Map.of("unitId", unitId, "hint", "先完成一次生产发布再回滚"));
         }
+        List<RollbackVersionRow> rows = new ArrayList<>(11);
+        rows.add(current);
+        rows.addAll(recordMapper.selectHistory(unitId, current.getDigest()));
         Map<String, Integer> counts = new HashMap<>();
         for (RollbackVersionRow row : recordMapper.selectVersionBatchCounts(unitId)) {
             counts.put(row.getDigest(), row.getBatchCount());
