@@ -168,9 +168,10 @@ class P2BoundaryEndToEndTest {
     @Test
     void the_p2_pipeline_checks_passes_the_test_and_reaches_production_admission() throws Exception {
         assertThat(handlers.nodeTypes())
-            .as("P2 adds the verify handler; P3 adds the production deploy handler")
+            .as("P2 adds the verify handler; P3 adds the production deploy handler;"
+                + " P5-A appends the daily deploy handler")
             .containsExactlyInAnyOrder(NodeType.BUILD, NodeType.TEST_DEPLOY, NodeType.VERIFY,
-                NodeType.PROD_DEPLOY);
+                NodeType.PROD_DEPLOY, NodeType.DAILY_DEPLOY);
 
         runToChecksRunning();
 

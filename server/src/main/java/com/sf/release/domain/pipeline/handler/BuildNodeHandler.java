@@ -4,6 +4,7 @@ import com.sf.release.domain.engine.BuildCmd;
 import com.sf.release.domain.engine.CicdEngine;
 import com.sf.release.domain.engine.EngineException;
 import com.sf.release.domain.engine.TriggerResult;
+import com.sf.release.domain.pipeline.ExecType;
 import com.sf.release.domain.pipeline.NodeHandler;
 import com.sf.release.domain.pipeline.NodeTask;
 import com.sf.release.domain.pipeline.NodeTaskCompletionService;
@@ -134,9 +135,16 @@ public final class BuildNodeHandler implements NodeHandler {
      * Resolves the command, calls the engine <em>outside</em> any transaction, then persists
      * the external identifiers, the {@code WAITING_EXTERNAL} status and — when the engine
      * reported one — the commit in one short transaction.
+     *
+     * <p><strong>Context selection.</strong> A daily instance has no release order, so its unit,
+     * item and branch come from {@link PipelineRepository#dailyBuildContextOf(long)} (P5-A design
+     * §3); every online execution keeps using {@link PipelineRepository#buildContextOf(long)}.
+     * The chain itself is identical, which is the point of reusing the unit's one build task.
      */
     private void trigger(PipelineInstance instance, NodeTask task) {
-        PipelineRepository.BuildContext source = repository.buildContextOf(instance.id());
+        PipelineRepository.BuildContext source = instance.execType() == ExecType.DAILY
+            ? repository.dailyBuildContextOf(instance.id())
+            : repository.buildContextOf(instance.id());
         BuildCmd cmd = new BuildCmd(source.unitId(), source.planId(), source.branch(),
             source.commitSha(), instance.pipelineNo(), task.attempt());
         TriggerResult result;

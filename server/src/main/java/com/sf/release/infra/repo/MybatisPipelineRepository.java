@@ -351,6 +351,108 @@ public class MybatisPipelineRepository implements PipelineRepository {
             List.of(EnvKind.PROD.name(), EnvKind.DR.name(), EnvKind.BLUE.name()));
     }
 
+    /**
+     * The build coordinates of a daily instance (P5-A design §3). A daily instance carries its
+     * own {@code item_id/unit_id} (V28) because it has no release order to resolve them through;
+     * the plan, branch and commit rules are the online ones (enabled {@code BUILD} binding, the
+     * item's snapshot as fallback, the commit the pipeline already reported).
+     */
+    @Override
+    public BuildContext dailyBuildContextOf(long instanceId) {
+        PipelineInstancePO instance = instanceMapper.selectById(instanceId);
+        if (instance == null || instance.getItemId() == null || instance.getItemId() <= 0) {
+            return new BuildContext(0L, null, null, null);
+        }
+        ReleaseItemPO item = itemMapper.selectById(instance.getItemId());
+        if (item == null) {
+            return new BuildContext(0L, null, null, null);
+        }
+        long unitId = dailyUnitId(instance, item);
+        CodingTaskBindingPO binding = unitId <= 0 ? null : bindingMapper.selectOne(
+            Wrappers.<CodingTaskBindingPO>lambdaQuery()
+                .eq(CodingTaskBindingPO::getUnitId, unitId)
+                .eq(CodingTaskBindingPO::getTaskKind, TaskKind.BUILD.name())
+                .eq(CodingTaskBindingPO::getEnabled, true));
+        // Same authority order as the online context: the enabled BUILD binding wins, the item's
+        // creation-time snapshot is the fallback.
+        String planId = binding == null ? null : trimToNull(binding.getTaskId());
+        if (planId == null) {
+            planId = trimToNull(item.getBuildPlanId());
+        }
+        return new BuildContext(unitId, planId, trimToNull(item.getSourceBranch()),
+            trimToNull(instance.getCommitSha()));
+    }
+
+    /**
+     * The deploy coordinates of a daily instance (P5-A design §4): the enabled
+     * {@code DAILY_DEPLOY} binding with the unit's {@code TEST_DEPLOY} binding as the C24
+     * fallback, and the {@code DAILY} DEs (or the {@code TEST} DEs when the unit has no daily
+     * one). There is no release order, so the publish number is {@code null}.
+     */
+    @Override
+    public DeployContext dailyDeployContextOf(long instanceId) {
+        PipelineInstancePO instance = instanceMapper.selectById(instanceId);
+        if (instance == null || instance.getItemId() == null || instance.getItemId() <= 0) {
+            return new DeployContext(0L, null, null, List.of());
+        }
+        ReleaseItemPO item = itemMapper.selectById(instance.getItemId());
+        if (item == null) {
+            return new DeployContext(0L, null, null, List.of());
+        }
+        long unitId = dailyUnitId(instance, item);
+        if (unitId <= 0) {
+            return new DeployContext(0L, null, null, List.of());
+        }
+        String planId = enabledBindingTaskId(unitId, TaskKind.DAILY_DEPLOY);
+        if (planId == null) {
+            planId = enabledBindingTaskId(unitId, TaskKind.TEST_DEPLOY);
+        }
+        List<DeployTarget> targets = dailyDeployTargets(unitId);
+        return new DeployContext(unitId, null, planId, targets);
+    }
+
+    /**
+     * The unit of a daily instance: the row's own {@code unit_id} first, the item's unit as a
+     * defensive fallback (the service always writes both).
+     */
+    private static long dailyUnitId(PipelineInstancePO instance, ReleaseItemPO item) {
+        if (instance.getUnitId() != null && instance.getUnitId() > 0) {
+            return instance.getUnitId();
+        }
+        return item.getUnitId() == null ? 0L : item.getUnitId();
+    }
+
+    /** The CODING task id of one enabled binding kind, or {@code null} when there is none. */
+    private String enabledBindingTaskId(long unitId, TaskKind kind) {
+        CodingTaskBindingPO binding = bindingMapper.selectOne(
+            Wrappers.<CodingTaskBindingPO>lambdaQuery()
+                .eq(CodingTaskBindingPO::getUnitId, unitId)
+                .eq(CodingTaskBindingPO::getTaskKind, kind.name())
+                .eq(CodingTaskBindingPO::getEnabled, true));
+        return binding == null ? null : trimToNull(binding.getTaskId());
+    }
+
+    /**
+     * The daily deploy targets: the unit's {@code DAILY} DEs, or its {@code TEST} DEs when it has
+     * no daily DE (C24). Ordered by batch then id, the same deterministic order the factory used.
+     */
+    private List<DeployTarget> dailyDeployTargets(long unitId) {
+        List<DeployTarget> daily = envDeTargets(unitId, EnvKind.DAILY.name());
+        return daily.isEmpty() ? envDeTargets(unitId, EnvKind.TEST.name()) : daily;
+    }
+
+    private List<DeployTarget> envDeTargets(long unitId, String envKind) {
+        return envDeMapper.selectList(Wrappers.<EnvDePO>lambdaQuery()
+                .eq(EnvDePO::getUnitId, unitId)
+                .eq(EnvDePO::getEnvKind, envKind)
+                .orderByAsc(EnvDePO::getDeployBatchNo)
+                .orderByAsc(EnvDePO::getId))
+            .stream()
+            .map(de -> new DeployTarget(de.getId() == null ? 0L : de.getId(),
+                de.getEnvKind(), de.getDeName()))
+            .toList();
+    }
+
     private DeployContext resolveDeployContext(long instanceId, TaskKind kind,
                                                List<String> envKinds) {
         PipelineInstancePO instance = instanceMapper.selectById(instanceId);

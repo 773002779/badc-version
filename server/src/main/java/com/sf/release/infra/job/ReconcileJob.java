@@ -569,7 +569,7 @@ public class ReconcileJob {
     static JobKind kindFor(NodeTask task) {
         return switch (task.taskType()) {
             case CODE_CHECK, PKG_BUILD, IMG_BUILD -> JobKind.BUILD;
-            case DEPLOY, ROLLBACK -> JobKind.DEPLOY;
+            case DEPLOY, DAILY_DEPLOY, ROLLBACK -> JobKind.DEPLOY;
             case CHECK, AUTO_TEST -> null;
         };
     }

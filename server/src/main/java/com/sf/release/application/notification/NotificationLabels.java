@@ -58,6 +58,7 @@ final class NotificationLabels {
             case TEST_DEPLOY -> "测试部署";
             case VERIFY -> "验证";
             case PROD_DEPLOY -> "生产部署";
+            case DAILY_DEPLOY -> "日常部署";
         };
     }
 }

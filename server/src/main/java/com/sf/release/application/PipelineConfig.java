@@ -7,6 +7,7 @@ import com.sf.release.domain.pipeline.NodeTaskCompletionService;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.RerunPlanner;
 import com.sf.release.domain.pipeline.handler.BuildNodeHandler;
+import com.sf.release.domain.pipeline.handler.DailyDeployNodeHandler;
 import com.sf.release.domain.pipeline.handler.ProdDeployNodeHandler;
 import com.sf.release.domain.pipeline.handler.TestDeployNodeHandler;
 import com.sf.release.domain.pipeline.port.GitCommitProbe;
@@ -62,6 +63,19 @@ public class PipelineConfig {
                                                        ProductionBoundaryProbe productionBoundaryProbe) {
         return new ProdDeployNodeHandler(engine, repository, transactionRunner, completionService,
             productionBoundaryProbe);
+    }
+
+    /**
+     * The {@code DAILY_DEPLOY} handler (P5-A): the daily release's fan-out deploy. It differs from
+     * the test/production handlers by design only in its context (daily binding/DEs, no release
+     * order, no batching, no image consistency check); it is a plain domain handler like them.
+     */
+    @Bean
+    public DailyDeployNodeHandler dailyDeployNodeHandler(CicdEngine engine,
+                                                         PipelineRepository repository,
+                                                         TransactionRunner transactionRunner,
+                                                         NodeTaskCompletionService completionService) {
+        return new DailyDeployNodeHandler(engine, repository, transactionRunner, completionService);
     }
 
     @Bean

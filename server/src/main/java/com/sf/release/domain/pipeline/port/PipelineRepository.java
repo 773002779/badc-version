@@ -162,6 +162,30 @@ public interface PipelineRepository {
     DeployContext prodDeployContextOf(long instanceId);
 
     /**
+     * The build coordinates of a <em>daily</em> instance (P5-A design §3/§4). A daily instance
+     * has no release order, so the unit and the item are read from the instance's own
+     * {@code item_id/unit_id} columns (V28) instead of {@code order -> item}. The plan is the
+     * unit's enabled {@code BUILD} binding with the item's {@code build_plan_id} snapshot as the
+     * fallback, the branch is the item's read-only {@code source_branch}, and the commit is the
+     * commit the daily build already reported ({@code null} until then).
+     *
+     * <p>Unresolvable parts are {@code 0}/blank. The online {@link #buildContextOf(long)} is left
+     * exactly as it was: the two paths are selected by the caller on {@code exec_type}.
+     */
+    BuildContext dailyBuildContextOf(long instanceId);
+
+    /**
+     * The deploy coordinates of a daily instance's {@code DAILY_DEPLOY} node: the unit, the
+     * enabled {@code DAILY_DEPLOY} binding (falling back to the unit's {@code TEST_DEPLOY}
+     * binding, C24) and the target DEs — the unit's {@code DAILY} DEs, or its {@code TEST} DEs
+     * when it has no daily DE. Both are ordered by batch then id so the fan-out is deterministic.
+     * There is no publish number (a daily release is not a 发布单), so it is {@code null}.
+     *
+     * <p>Unresolvable parts are {@code 0}/blank/an empty list instead of failing the pipeline.
+     */
+    DeployContext dailyDeployContextOf(long instanceId);
+
+    /**
      * Durably claims the once-only {@code TestEnvReadyEvent} publication of an instance: the
      * first caller sets {@code pipeline_instance.test_ready_at} and wins, every later caller —
      * another thread, another application instance, a retry — loses. The compare-and-set is the

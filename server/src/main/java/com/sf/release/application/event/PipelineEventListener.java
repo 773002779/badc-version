@@ -190,7 +190,9 @@ public class PipelineEventListener {
                 case BUILD -> NotificationEventKey.BUILD_FAILED;
                 case TEST_DEPLOY -> NotificationEventKey.TEST_DEPLOY_FAILED;
                 case PROD_DEPLOY -> NotificationEventKey.PROD_DEPLOY_FAILED;
-                case VERIFY -> null;
+                // A daily release sends no notification (P5-A design §1 non-goals: FR-N-01 does
+                // not list it); its history is the daily page plus the DAILY_START audit row.
+                case VERIFY, DAILY_DEPLOY -> null;
             };
             if (key == null || event.orderId() <= 0) {
                 return;
@@ -208,6 +210,7 @@ public class PipelineEventListener {
                 case BUILD -> "构建";
                 case TEST_DEPLOY -> "测试部署";
                 case PROD_DEPLOY -> "生产部署";
+                case DAILY_DEPLOY -> "日常部署";
                 case VERIFY -> "验证";
             };
             StringBuilder body = new StringBuilder("发布单 ")
@@ -278,14 +281,18 @@ public class PipelineEventListener {
         }
     }
 
-    /** The item event a node result produces, or {@code null} when there is none. */
+    /**
+     * The item event a node result produces, or {@code null} when there is none. The daily deploy
+     * has none by design: a daily release never moves the 变更项 state machine (P5-A design §5),
+     * and its instance has no release order anyway (the order-id guard below would also skip it).
+     */
     static ItemEvent itemEventOf(NodeType nodeType, NodeStatus nodeStatus) {
         boolean success = nodeStatus == NodeStatus.SUCCESS;
         return switch (nodeType) {
             case BUILD -> success ? ItemEvent.BUILD_OK : ItemEvent.BUILD_FAIL;
             case TEST_DEPLOY -> success ? ItemEvent.TEST_DEPLOY_OK : ItemEvent.TEST_DEPLOY_FAIL;
             case PROD_DEPLOY -> success ? ItemEvent.PROD_OK : ItemEvent.PROD_FAIL;
-            case VERIFY -> null;
+            case VERIFY, DAILY_DEPLOY -> null;
         };
     }
 

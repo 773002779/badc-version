@@ -715,7 +715,8 @@ public final class PipelineOrchestrator {
             instance.execType(), instance.triggerType(), node.nodeType(),
             InstanceStatus.RUNNING, instance.imageDigest(), instance.commitSha(),
             instance.startAt() == null ? now : instance.startAt(), null,
-            instance.createdAt(), instance.statusReason(), nodes);
+            instance.createdAt(), instance.statusReason(), nodes,
+            instance.itemId(), instance.unitId(), instance.requestedBy());
     }
 
     /** Logical task identity used by the latest-attempt fold. */

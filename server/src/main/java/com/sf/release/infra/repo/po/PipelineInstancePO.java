@@ -54,6 +54,17 @@ public class PipelineInstancePO {
 
     private Instant createdAt;
 
+    /**
+     * Daily identity (V28): the 变更项, the deployment unit and who started the daily release.
+     * Only a {@code DAILY} instance fills them; an ONLINE instance keeps them {@code NULL} and is
+     * resolved through its release order ({@code order -> item -> unit}). They are part of the
+     * aggregate since P5-A: a daily instance has {@code order_id = 0} and no other way to name its
+     * owner.
+     */
+    private Long itemId;
+    private Long unitId;
+    private String requestedBy;
+
     public static PipelineInstancePO of(PipelineInstance instance) {
         PipelineInstancePO po = new PipelineInstancePO();
         po.id = instance.id();
@@ -69,6 +80,9 @@ public class PipelineInstancePO {
         po.startAt = instance.startAt();
         po.endAt = instance.endAt();
         po.createdAt = instance.createdAt();
+        po.itemId = instance.itemId();
+        po.unitId = instance.unitId();
+        po.requestedBy = instance.requestedBy();
         return po;
     }
 
@@ -95,7 +109,10 @@ public class PipelineInstancePO {
             endAt,
             createdAt,
             statusReason,
-            nodes);
+            nodes,
+            itemId,
+            unitId,
+            requestedBy);
     }
 
     public Long getId() {
@@ -217,5 +234,32 @@ public class PipelineInstancePO {
 
     public void setCreatedAt(Instant createdAt) {
         this.createdAt = createdAt;
+    }
+
+    /** Daily only: the 变更项 (V28); {@code null} for an online instance. */
+    public Long getItemId() {
+        return itemId;
+    }
+
+    public void setItemId(Long itemId) {
+        this.itemId = itemId;
+    }
+
+    /** Daily only: the deployment unit (V28); {@code null} for an online instance. */
+    public Long getUnitId() {
+        return unitId;
+    }
+
+    public void setUnitId(Long unitId) {
+        this.unitId = unitId;
+    }
+
+    /** Daily only: who started it (V28); online records the operator on the order instead. */
+    public String getRequestedBy() {
+        return requestedBy;
+    }
+
+    public void setRequestedBy(String requestedBy) {
+        this.requestedBy = requestedBy;
     }
 }

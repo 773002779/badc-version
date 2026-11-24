@@ -36,8 +36,9 @@ import java.util.UUID;
  *       deployment is deterministic (C14).</li>
  * </ol>
  *
- * <p>The daily pipeline and the second-party library pipeline are later tasks; the online shape
- * is exposed through {@link #createOnline} and {@link #createRerun}.
+ * <p>The daily pipeline ({@link #createDaily}) is a two-node simplification of the online one
+ * and the second-party library pipeline is a later task; the online shape is exposed through
+ * {@link #createOnline} and {@link #createRerun}.
  */
 public final class PipelineFactory {
 
@@ -200,6 +201,76 @@ public final class PipelineFactory {
         return new PipelineInstance(null, base.orderId(), base.pipelineNo(), ExecType.ONLINE,
             triggerType, fromNode, InstanceStatus.PENDING, imageDigest, commitSha,
             null, null, base.createdAt(), null, nodes);
+    }
+
+    /**
+     * Pre-generates a daily release instance (P5-A design §3): the simplified
+     * {@code BUILD → DAILY_DEPLOY} pipeline. It is not a 发布单, so the instance has
+     * {@code orderId = 0}, {@link ExecType#DAILY}, no unit lock and no item state change; it
+     * names its owner through {@code itemId/unitId/requestedBy}.
+     *
+     * <p><strong>Nodes.</strong>
+     * <ol>
+     *   <li>{@code BUILD} (seq 0): the same {@code CODE_CHECK → PKG_BUILD → IMG_BUILD} chain as
+     *       an online release, because the daily pipeline reuses the unit's one build task
+     *       (J4: the daily image never becomes a release image, but it is built by the same
+     *       chain);</li>
+     *   <li>{@code DAILY_DEPLOY} (seq 1): one {@code DEPLOY} task per target DE,
+     *       {@code batch_no = deploy_batch_no} (display only — daily deploys are not batched)
+     *       and {@code target_id = env_de.id}.</li>
+     * </ol>
+     *
+     * <p><strong>Target DE selection.</strong> The unit's {@code env_kind = DAILY} DEs, in batch
+     * then id order; when the unit has none, its {@code TEST} DEs (C24 "reuse the test deploy
+     * task, or a dedicated daily deploy task"). The caller validates the empty case with a
+     * business error <em>before</em> creating anything, so the {@link IllegalArgumentException}
+     * here is a programming-error guard, not the user-facing 40001.
+     */
+    public static PipelineInstance createDaily(ReleaseItem item, long unitId, List<EnvDe> envDes,
+                                               String requestedBy, Instant now) {
+        Objects.requireNonNull(item, "item must not be null");
+        Objects.requireNonNull(item.id(), "a daily pipeline requires a persisted item");
+        if (item.type() != UnitType.UNIT) {
+            // The application service rejects LIB items before calling the factory; this guard
+            // keeps the daily factory from silently building a pipeline for a library.
+            throw new IllegalArgumentException(
+                "the daily pipeline requires a UNIT item, got " + item.type());
+        }
+        Instant when = now == null ? Instant.now() : now;
+        Comparator<EnvDe> deOrder = Comparator
+            .comparingInt(EnvDe::deployBatchNo)
+            .thenComparing(de -> de.id() == null ? 0L : de.id());
+        List<EnvDe> des = envDes == null ? List.<EnvDe>of() : List.copyOf(envDes);
+        List<EnvDe> dailyDes = des.stream()
+            .filter(de -> de.envKind() == EnvKind.DAILY)
+            .sorted(deOrder)
+            .toList();
+        List<EnvDe> targets = dailyDes.isEmpty()
+            ? des.stream().filter(de -> de.envKind() == EnvKind.TEST).sorted(deOrder).toList()
+            : dailyDes;
+        if (targets.isEmpty()) {
+            throw new IllegalArgumentException(
+                "the daily pipeline requires a DAILY or TEST DE for unit " + unitId);
+        }
+
+        List<PipelineNode> nodes = new ArrayList<>(2);
+        nodes.add(PipelineNode.pending(NodeType.BUILD, 0, List.of(
+            NodeTask.pending(NodeType.BUILD, TaskType.CODE_CHECK, NO_BATCH, 0),
+            NodeTask.pending(NodeType.BUILD, TaskType.PKG_BUILD, NO_BATCH, 0),
+            NodeTask.pending(NodeType.BUILD, TaskType.IMG_BUILD, NO_BATCH, 0))));
+
+        List<NodeTask> deployTasks = new ArrayList<>(targets.size());
+        for (EnvDe de : targets) {
+            // The batch number is display-only here: the daily handler triggers every target in
+            // one go and never waits for a batch boundary (P5-A design §4/§8).
+            deployTasks.add(NodeTask.pending(NodeType.DAILY_DEPLOY, TaskType.DEPLOY,
+                de.deployBatchNo(), targetId(de)));
+        }
+        nodes.add(PipelineNode.pending(NodeType.DAILY_DEPLOY, 1, deployTasks));
+
+        return new PipelineInstance(null, 0L, newPipelineNo(when), ExecType.DAILY,
+            TriggerType.INITIAL, NodeType.BUILD, InstanceStatus.PENDING, null, null, null, null,
+            when, null, nodes, item.id(), unitId, requestedBy);
     }
 
     /**
