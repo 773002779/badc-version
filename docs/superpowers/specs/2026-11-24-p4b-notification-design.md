@@ -22,7 +22,8 @@
 - 邮件 / 飞书：只留 `NotificationChannel` 枚举与 `NotificationSender` 接口，不接实现（Q5 未定）。
 - 通知模板管理、按用户订阅偏好、@人、群机器人多租户：二期。
 - 审批 12h/24h 时效提醒、升级链：P7（GAP-12）。
-- 通知失败重投队列：一次重试后 `FAILED`，不自动再投；运维可在通知中心看到失败行。
+- 通知失败重投队列：一次重试后 `FAILED`，不自动再投。失败原因落 `failure_reason` 供排查；
+  通知中心只列站内消息（`channel=INAPP`），企微投递行不作为消息展示（残留，见 §10 第 11 条）。
 
 ## 2. 数据模型（V26）
 
@@ -230,3 +231,5 @@ createdAt, sentAt, failureReason`。`eventLabel` 由服务端给中文名，web 
 9. **`UnitLeaseRenewJob`** 保留旧的两参/三参构造器（不注入通知，既有租约测试不变）；生产装配用
    四参构造器。
 10. **企微发送为 at-least-once**：单实例按 id 取行；多实例可能重复发送一次，不追求 exactly-once。
+11. **失败投递行不在通知中心展示**：列表只查 `channel='INAPP'`；企微 `FAILED` 行的
+    `failure_reason` 只能从库/日志排查。若后续要让运维在页面看到，需另加投递视图（P7 与保留期一起）。
