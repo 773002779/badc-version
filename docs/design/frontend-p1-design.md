@@ -412,3 +412,86 @@
 - 企微发送失败行不在通知中心展示（接口只返回站内行），页面上看不到失败原因，要查 `notification` 表/日志。
 - 未读数靠 30s 轮询 + 路由切换 + 同页 revision，不是推送；多实例后端的徽标最多滞后一个轮询周期。
 - 页脚阶段标记仍是 `P4 · 回滚与记录`（本轮未改 `App.vue` 的页脚文案）。
+
+## 14. P4-C · 单元操作日志与全局审计页（2026-11-25）
+
+审计从「只有 `log.info`」变成可查、可筛、可导出：单元详情多一个通栏「操作日志」块，侧栏「平台」组
+多一个 `/audit` 审计页。截图：`shots/audit-{light,dark}.png`、`shots/unit-audit-{light,dark}.png`
+（1440×900，探针 `scripts/verify-p4c-ui.mjs --shots` 生成，`git add -f`）。
+
+![审计日志页（浅色）](shots/audit-light.png)
+![单元操作日志（浅色）](shots/unit-audit-light.png)
+
+**单元详情「操作日志」（`UnitDetailView.vue`）**
+
+- 位置：在两栏概览（左：基本信息 / 环境 DE，右：CODING 绑定 / 发布前置条件）之后、页脚之前，通栏
+  `DataSection`，标题「操作日志」、副标题「N 条」、右上「仅本单元」+「刷新」。**不用 Tab**：把现有
+  两栏概览塞进 `el-tabs` 会打断页面信息流，而 6 列表格放进约 570px 的右栏必然横向滚动；通栏后
+  1170px 内无横向滚动（实测 `bodyScrollW == bodyClientW`），与发布记录页的表格观感一致。
+- 数据：`listAudit({ unitId: id, page, size })`，服务端按 `unitId` 过滤（`scope_unit_id = ?`），
+  单元内的发布/审批/门禁/封板/回滚/资源修改都会落到这里；默认 10 行/页，可选 10/20/50。
+- 列：时间（`formatDateTime`）、操作人、动作（`actionLabel` chip，hover `title` 是机器码）、摘要、
+  原因（空显示 `—`）、traceId（前 8 位，hover `title` 全量）。**不展示 before/after**（列太多）。
+- 状态：加载 `el-skeleton`；失败独立 `el-alert`（不清空分页/筛选）；空态「尚无操作日志」，提示
+  「发布、门禁、封板、回滚与本单元的配置变更都会记录在这里」；页头「刷新」同时刷新概览与日志。
+- 越界/无范围：服务端回空页，页面显示空态而不是报错（审计不暴露单元是否存在）。
+
+**全局审计页（`AuditView.vue`，路由 `/audit`）**
+
+- 页头 `PageHeader`（标题「审计日志」，描述「谁在何时对哪个对象做了什么；按账号的数据范围收敛…」），
+  动作「刷新」「导出 CSV」。
+- 筛选栏（`DataSection` 顶部）：动作下拉（13 个常用动作，分「发布与审批 / 门禁与管控 / 配置与资源」
+  三组，首项「全部动作」且 `clearable`）、对象类型（9 个封闭值 + 全部）、对象 ID、操作人、时间范围
+  （`datetimerange`）、「查询」「重置」。`objectId` / `actor` 是**精确匹配**，占位文案按此写；
+  动作/对象类型/时间范围是服务端筛选，查询回到第 1 页。
+- 表格列：时间、操作人、动作、对象（`objectLabel || objectId` + 中文类型 + 机器 id）、摘要、原因、
+  traceId；首列展开行显示「变更前 / 变更后」两块 `<pre>`（`prettyJson`），null 分别显示
+  「无（新增对象）」「无（删除对象）」。全局页用展开行而不是加列：`before/after` 是 JSON 文本，
+  展开比横向铺开更省宽度。
+- 分页：默认 20，可选 10/20/50/100，`total` 来自服务端；`pageNo`/`pageSize` 是响应口径（R44）。
+- 导出：`fetch` 拿 blob 再 `<a download>`（**不用 `window.open`**，会丢 `X-User-Id`）；文件名取
+  `Content-Disposition` 的 `audit-*.csv`，回退 `audit-<时间戳>.csv`；沿用**当前筛选**、不带分页；
+  成功 `ElMessage.success`，失败 `ElMessage.error`（导出失败仍是 JSON 信封，由 `exportAudit` 转
+  `ApiError`）。
+- 空态：`NO-SUCH-OBJECT` 之类查不到 → 「没有符合条件的审计记录」+「调整筛选条件，或确认当前账号的
+  数据范围」；空结果不报错。页脚说明「最多 5000 行；`before/after` 只保存变化的字段，展开行可见
+  前后对比，不是整行快照」。
+- 亮/暗双主题沿用石墨令牌；筛选项与展开行不引入新色板。
+
+**导航**
+
+- 路由 `/audit`（`router.ts`，`meta.title/crumb = 审计日志`）；侧栏「平台」组新增「审计日志」
+  （`Memo` 图标），位于「发布记录」之后、「总览」之前。页脚阶段标记仍是 `P4 · 回滚与记录`（本轮未改）。
+
+**验收（P4-C）**
+
+- `cd web; npm run build` 通过（`vue-tsc -b` + vite，无 TS 诊断）。
+- `scripts/verify-p4c-ui.mjs`（复制到 `%TEMP%\rp-shot-tools` 后运行，两主题，0 console error）：单元页
+  「操作日志」标题 + 6 列表头 + ≥1 行 + traceId 短 8 位且 `title` 更长；侧栏 `a[href="/audit"]` 文案；
+  `/audit` 7 列表头 + ≥1 行 + traceId；动作筛选（总数变少且每行是该动作，chip 的 `title` 是机器码）；
+  重置回全量；对象类型筛选同形；展开行出现「变更前/变更后」；导出响应 200 + `text/csv` +
+  `Content-Disposition` 的 `audit-*.csv` + 成功 toast + 请求携带当前 `objectType` 且无 `page`/`size`；
+  空态；两主题各自 0 console error。原样输出：
+
+  ```
+  audit-light: unitRows=3 unitTrace=9a1bfd2a auditRows=8 total=8 actionFilter=3/3 objectFilter=3/3 export=200 text/csv;charset=UTF-8 attachment; filename="audit-20261125-003238.csv" errors=0
+  audit-dark: unitRows=3 unitTrace=9a1bfd2a auditRows=8 total=8 actionFilter=3/3 objectFilter=3/3 export=200 text/csv;charset=UTF-8 attachment; filename="audit-20261125-003244.csv" errors=0
+  OK all audit assertions passed
+  ```
+
+- 截图由探针生成并入库（4 张）；实现者无法读图，正确性以 DOM 文案/选择器/计算样式与包围盒断言为准。
+- 探针数据是 live 后端上的真实动作（`PUT /units/2` ×3、通知设置、窗口、封板 create+release）；仓库
+  没有 `scripts/demo-audit.sql`（简报点名的文件不存在，未新建），重建库后按上述 5 条重放即可。
+
+**未做（P4-C 明确不做）**
+
+- **时间范围未进探针断言**：控件与 `from`/`to` 已接（后端有 `from > to` 的 40000），但 Element Plus
+  双月面板的确定性点击成本高；探针覆盖动作/对象类型/对象 ID（空态）三条筛选路径与导出，日期范围
+  只做了手工验证（面板可开、0 console error）。
+- 动作下拉不是全量枚举：只列 13 个常用动作，未列动作（`GATE_TEST_FAIL`、`WAIVER_*`、
+  `FREEZE_EXPIRE`、P5 占位等）仍可通过「全部动作」检索到并显示服务端中文名；对象类型 9 个必须在
+  `utils/audit.ts` 镜像（行里没有 `objectTypeLabel`），改枚举时两处要同步。
+- 没有字段级 diff 高亮、没有审计告警、没有保留期/清理入口（P7）；单元页没有展开行（严格 6 列），
+  before/after 只在全局页看；没有按 `traceId` 串联请求的视图。
+- 导出是同步的 5000 行上限，没有导出预览、后台导出任务，**导出动作本身也不写审计行**（读操作不留痕）。
+- 页脚阶段标记未更新；没有对象/动作详情页。

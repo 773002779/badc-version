@@ -308,3 +308,52 @@ Ruling R32: P1 计划的 POST /units/{id}/coding-bindings/test（单元级：任
 Ruling R33: 测试基础设施修正：Flyway clean 会清库，但缓存的测试上下文仍持有 InMemoryDistributedLock 的租约；deploy_unit 的 AUTO_INCREMENT 重置后 id 复用，publish 误报 40006（DB 行已被清、内存 key 还在，UnitLockService 拒绝抢占）。FlywayTestConfig 在 clean 后调用 InMemoryDistributedLock.clearAllLeases()：租约守护的库已不存在，清掉是正确语义，不是掩盖问题。
 Follow-up: scripts/mock-coding.mjs 是本地假租户（只实现 job.list），配 --release.engine.allow-insecure-http=true 使用；生产禁用。
 Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有该字段）；设置页原来的「暂无管理接口」两处文案已删除。
+
+## R34–R52（P3–P4 补写，2026-11-25）
+
+> **这是补写，不是新裁决。** 正式台账此前停在 R33；R34–R52 是 P3、P4-A、P4-B 三轮执行中已经作出的
+> 裁决，此前只写在各自的 progress 文件里。下面逐条转写（英文原文压缩成中文一句，未改结论；编号与
+> 结论以来源文件为准），每条一句话 + 该文件记录/落地的提交，不新增编号。来源文件都在 `.gitignore`
+> 的 `.superpowers/` 下（未进提交），行号为 2026-11-25 的文件状态：
+>
+> - R34–R38：`.superpowers/sdd/p3-prod-control/progress.md`
+> - R39–R46：`.superpowers/sdd/p4-rollback/progress.md`
+> - R47–R52：`.superpowers/sdd/p4b-notification/progress.md`
+
+**R34–R38（P3 生产管控）**
+
+- Ruling R34: 封板一律意味着 `OPS_LEAD` 后接 `DEPT_MANAGER`（设计 4.4）；只有窗口、没有封板时只加 `OPS_LEAD`。`cb1e617`（`p3-prod-control/progress.md:38`）
+- Ruling R35: 解除封板的重算只在「快照在窗口内且已无封板生效」时撤掉待签的 `OPS_LEAD` 步骤，否则第二次封板的 `OPS_LEAD` 步骤会消失。`cb1e617`（`p3-prod-control/progress.md:38`）
+- Ruling R36: 所有封板路径（提交、在途声明、执行前拉回）都以同一顺序要求同两个签名；只有已无封板生效时才撤步骤。`2e3ad45`（同节记录的 pull-back 提交；该条在 `p3-prod-control/progress.md:44` 未直接给号）
+- Ruling R37: Task 3 修复与 web 轮的独立复评由 lead 的带证据评审替代，因为 provider 对每个子 agent 都返回 429 配额错误；之后可对 `2a4e389..HEAD` 重跑。无代码提交（流程裁决，`p3-prod-control/progress.md:45`）
+- Ruling R38: 封板发现两个签名都已给出时不再要求第三个——发布单保持 `READY`，执行前复核在封板生效期阻断执行，拒绝信息写明原因。`494597d`（P3 independent-review 修复轮；该条在 `p3-prod-control/progress.md:50` 未直接给号）
+
+**R39–R46（P4-A 回滚与发布记录）**
+
+- Ruling R39: 回滚在 `rollback:execute`（运维/管理员）下一步执行，owner 请运维操作；J13 的「发起 owner/运维、执行运维」读作权限声明，不是两步流程。实现落点 `90d64da`（preflight 裁决，`p4-rollback/progress.md:10-12` 未给提交号）
+- Ruling R40: 版本列表由成功的生产部署记录推导（无制品库，Q4 未定）；从未部署过的 digest 不能作为回滚目标。实现落点 `90d64da`（`p4-rollback/progress.md:13-15`）
+- Ruling R41: 回滚不新建发布单，复用来源发布单并写 `rollback_record`，发布记录列表因此不会被回滚刷屏。实现落点 `90d64da`（`p4-rollback/progress.md:16-18`）
+- Ruling R42: 「当前线上版本」= 任意触发方式（含 `ROLLBACK`）的最新成功生产部署；历史 = 完整部署成功的前向发布，排除当前 digest。`8c2199b`（`p4-rollback/progress.md:38-39`）
+- Ruling R43: 生产节点未成功的发布不是回滚目标；它仍可能是当前线上镜像，此时回滚目标是上一次完整发布。`8c2199b`（`p4-rollback/progress.md:40-41`）
+- Ruling R44: 全局发布记录响应为 `{total,pageNo,pageSize,records}`，请求 `page`/`size` 缺省 1/10（设计 §4 参数名），状态是机器值 + 中文标签。`e18317b`（`p4-rollback/progress.md:42-43`）
+- Ruling R45: 显式 `unitId` 在调用者范围外回 40009（与回滚记录页一致）；`systemId`/`keyword`/`status` 与范围 AND，越界系统给空页。`e18317b`（`p4-rollback/progress.md:44-46`）
+- Ruling R46: web 只在 `api/index.ts#listReleases` 映射 `page`/`size`；更早的列表请求与响应都保留 `pageNo`/`pageSize`。分页口径按端点分裂（R44），不改旧列表调用。`8c8962a`（文档记录；映射代码在 `a6a631e` 及同轮 `8c2199b`）（`p4-rollback/progress.md:47-50`）
+
+**R47–R52（P4-B 通知）**
+
+- Ruling R47: 通知列表沿用 R44 分页口径——请求 `page`/`size`、响应 `pageNo`/`pageSize`，`unreadOnly` 是服务端筛选；`read-all` 的计数字段命名 `updated`，旧列表不动。`74ce8f0` / `74001da`（`p4b-notification/progress.md:79-80`）
+- Ruling R48: 已存在的 `PENDING` 企微行遇到通道关闭/地址清空时，由派发任务标 `FAILED`（原因写明未启用或地址未配置），不每 15s 无限重试。`74ce8f0`（`p4b-notification/progress.md:81-82`）
+- Ruling R49: `notify` 用 `TransactionTemplate(PROPAGATION_REQUIRES_NEW)`，不是方法级 `@Transactional`——提交失败也要落在吞异常的 `try` 内；接受「业务回滚后可能留一条通知」的窗口，outbox 留 P7。`74ce8f0`（`p4b-notification/progress.md:83-84`）
+- Ruling R50: webhook 校验 = 非空 + ≤512 + `https://`；内网 `http://` 仅由 `release.notification.allow-insecure-http=true` 放开（测试 profile 打开，默认 false）；开关打开而地址为空 → 40000；配置是平台级单行（单租户）。`74ce8f0`（`p4b-notification/progress.md:85-87`）
+- Ruling R51: 接收人按平台角色（`user_role`/`role_permission`）解析，不按 `user_scope` 过滤；企微发送为 at-least-once（单实例按 id 取行，无分布式锁）。两者均接受，二期/P7 再收紧。`74ce8f0`（`p4b-notification/progress.md:88-89`）
+- Ruling R52: 他人行与不存在的通知统一回 40000（HTTP 200），不采用设计 §8 的 403/404——沿用平台统一响应包装，「与不存在同码」即防枚举。`74ce8f0`（`p4b-notification/progress.md:90-91`）
+
+## R53+（P4-C 审计，2026-11-25）
+
+- Ruling R53: 显式 `unitId` 在调用者范围外回空页/仅表头 CSV，不回 40009；无单元范围的调用者同样直接空结果、不执行 SQL——审计页不暴露「某个单元是否存在」，与发布记录页相反。`b4bbb81`
+- Ruling R54: 平台级行（两个 scope 列皆空）只对 `ALL` 可见；系统级设置（CODING / 窗口的 SUBSYSTEM 范围）写 `scope_subsystem_id`，按「调用者任一单元所属系统」可见。`b4bbb81`
+- Ruling R55: 审计写入用 `TransactionTemplate(REQUIRES_NEW)` 并吞掉一切异常，审计失败不改变业务结果；`actor` 不接受触发点参数，无 `UserContext` 时兜底 `SYSTEM`；行是流水，重复调用不去重。`b4bbb81`
+- Ruling R56: 20 个动作、24 处触发点一次接线（`RESOURCE_UPDATE` 覆盖系统/单元的 create+update 与任务 create，`SETTING_UPDATE` 覆盖 CODING 与通知，`WINDOW_UPDATE` 单独一码）；P5 的 6 个动作只占位、不写行。`b4bbb81`
+- Ruling R57: 导出取 5001 行以区分「恰好 5000」与「被截断」，截断追加末行中文提示；导出沿用当前筛选、不带分页，web 用 `fetch` + blob（`window.open` 会丢 `X-User-Id`），文件名取 `Content-Disposition`。`b4bbb81` / `ceeba6a`
+- Ruling R58: 单元详情的「操作日志」用通栏 `DataSection` 而非 Tab（6 列在约 570px 右栏必然横向滚动）；`before/after` 只在全局页用展开行展示，单元页严格 6 列。`ceeba6a`
+- Ruling R59: 审计动作下拉只列 13 个常用动作（三组），未列动作仍可经「全部动作」检索并显示服务端 `actionLabel`；对象类型 9 个在前端镜像（行里没有 `objectTypeLabel`），改枚举时两处同步。`ceeba6a`
