@@ -1,6 +1,10 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.notification.NotificationAudiences;
+import com.sf.release.application.notification.NotificationCommand;
+import com.sf.release.application.notification.NotificationService;
+import com.sf.release.domain.notification.NotificationEventKey;
 import com.sf.release.domain.pipeline.InstanceStatus;
 import com.sf.release.domain.pipeline.TriggerType;
 import com.sf.release.domain.pipeline.event.InstanceFinishedEvent;
@@ -62,16 +66,20 @@ public class RollbackCompletionService {
     private final PipelineInstanceMapper instanceMapper;
     private final ReleaseOrderMapper orderMapper;
     private final ItemTransitions transitions;
+    private final NotificationService notifications;
 
     public RollbackCompletionService(RollbackRecordMapper recordMapper,
                                      PipelineInstanceMapper instanceMapper,
                                      ReleaseOrderMapper orderMapper,
-                                     ItemTransitions transitions) {
+                                     ItemTransitions transitions,
+                                     NotificationService notifications) {
         this.recordMapper = Objects.requireNonNull(recordMapper, "recordMapper must not be null");
         this.instanceMapper = Objects.requireNonNull(instanceMapper,
             "instanceMapper must not be null");
         this.orderMapper = Objects.requireNonNull(orderMapper, "orderMapper must not be null");
         this.transitions = Objects.requireNonNull(transitions, "transitions must not be null");
+        this.notifications = Objects.requireNonNull(notifications,
+            "notifications must not be null");
     }
 
     @EventListener
@@ -114,6 +122,7 @@ public class RollbackCompletionService {
         if (!finishRecord(record.id(), RollbackStatus.SUCCESS, null, now)) {
             return;
         }
+        notifyRollback(record, true, null);
         if (record.sourceItemId() == null) {
             log.info("rollback {} succeeded without a source item; no item state to change",
                 record.id());
@@ -157,13 +166,41 @@ public class RollbackCompletionService {
 
     /** Marks the record {@code FAILED}; the source item is deliberately not changed. */
     private void completeFailure(RollbackRecord record, String reason, Instant now) {
-        if (!finishRecord(record.id(), RollbackStatus.FAILED,
-                truncate(reason == null || reason.isBlank() ? "流水线失败" : reason,
-                    MAX_FAILURE_REASON_LENGTH), now)) {
+        String failure = truncate(reason == null || reason.isBlank() ? "流水线失败" : reason,
+            MAX_FAILURE_REASON_LENGTH);
+        if (!finishRecord(record.id(), RollbackStatus.FAILED, failure, now)) {
             return;
         }
+        notifyRollback(record, false, failure);
         log.info("rollback {} failed; source item {} kept as it was", record.id(),
             record.sourceItemId());
+    }
+
+    /**
+     * {@code ROLLBACK_DONE} (design section 3): one event per finished rollback, success and failure
+     * distinguished by the title and the body. The ref carries the terminal status so the two
+     * records of one instance (impossible by the CAS, but explicit) could not collide; the instance
+     * cannot finish twice, so the ref is in practice the record id.
+     */
+    private void notifyRollback(RollbackRecord record, boolean success, String failureReason) {
+        if (notifications == null || record.id() == null) {
+            return;
+        }
+        String title = success ? "回滚完成" : "回滚失败";
+        StringBuilder body = new StringBuilder("部署单元 #").append(record.unitId())
+            .append(success ? " 已回滚到镜像 " : " 回滚到镜像 ").append(record.targetDigest());
+        if (record.targetPublishNo() != null) {
+            body.append("（发布单 ").append(record.targetPublishNo()).append("）");
+        }
+        if (!success) {
+            body.append(" 失败：").append(failureReason == null ? "流水线失败" : failureReason);
+        }
+        body.append('。');
+        notifications.notify(new NotificationCommand(
+            NotificationEventKey.ROLLBACK_DONE, String.valueOf(record.unitId()), null, title,
+            body.toString(), record.id() + ":" + (success ? "SUCCESS" : "FAILED"),
+            NotificationAudiences.rollback(record.unitId(), record.sourceOrderId(),
+                record.requestedBy())));
     }
 
     /**

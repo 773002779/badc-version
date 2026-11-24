@@ -1,6 +1,9 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.notification.NotificationAudiences;
+import com.sf.release.application.notification.NotificationCommand;
+import com.sf.release.application.notification.NotificationService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
@@ -9,15 +12,18 @@ import com.sf.release.domain.gate.GateConclusion;
 import com.sf.release.domain.gate.GateDecision;
 import com.sf.release.domain.gate.GateWaiver;
 import com.sf.release.domain.gate.GateWaiverStatus;
+import com.sf.release.domain.notification.NotificationEventKey;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.task.ItemStatus;
 import com.sf.release.domain.task.ReleaseItem;
 import com.sf.release.infra.repo.GateWaiverMapper;
 import com.sf.release.infra.repo.ReleaseItemMapper;
+import com.sf.release.infra.repo.ReleaseOrderMapper;
 import com.sf.release.infra.repo.ReleaseTaskMemberMapper;
 import com.sf.release.infra.repo.po.GateWaiverPO;
 import com.sf.release.infra.repo.po.ReleaseItemPO;
+import com.sf.release.infra.repo.po.ReleaseOrderPO;
 import com.sf.release.infra.repo.po.ReleaseTaskMemberPO;
 import com.sf.release.infra.security.CurrentUser;
 import com.sf.release.infra.security.ScopeGuard;
@@ -65,19 +71,26 @@ public class GateWaiverService {
     private final PipelineRepository repository;
     private final GateService gateService;
     private final GateCheckService checkService;
+    private final ReleaseOrderMapper orderMapper;
+    private final NotificationService notifications;
 
     public GateWaiverService(ReleaseItemMapper itemMapper,
                              GateWaiverMapper waiverMapper,
                              ReleaseTaskMemberMapper memberMapper,
                              PipelineRepository repository,
                              GateService gateService,
-                             GateCheckService checkService) {
+                             GateCheckService checkService,
+                             ReleaseOrderMapper orderMapper,
+                             NotificationService notifications) {
         this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper must not be null");
         this.waiverMapper = Objects.requireNonNull(waiverMapper, "waiverMapper must not be null");
         this.memberMapper = Objects.requireNonNull(memberMapper, "memberMapper must not be null");
         this.repository = Objects.requireNonNull(repository, "repository must not be null");
         this.gateService = Objects.requireNonNull(gateService, "gateService must not be null");
         this.checkService = Objects.requireNonNull(checkService, "checkService must not be null");
+        this.orderMapper = Objects.requireNonNull(orderMapper, "orderMapper must not be null");
+        this.notifications = Objects.requireNonNull(notifications,
+            "notifications must not be null");
     }
 
     /**
@@ -144,10 +157,36 @@ public class GateWaiverService {
             impactText, user.userId(), now, null, null, null, expireAt,
             instance == null ? null : instance.commitSha(),
             instance == null ? null : instance.imageDigest(), now, now);
-        waiverMapper.insert(GateWaiverPO.of(waiver));
+        GateWaiverPO waiverPo = GateWaiverPO.of(waiver);
+        waiverMapper.insert(waiverPo);
         log.info("waiver requested: itemId={}, by={}, expireAt={}", itemId, user.userId(),
             expireAt);
+        notifyWaiverPending(item, waiverPo.getId(), instance, why);
         return gateService.view(itemId);
+    }
+
+    /**
+     * {@code WAIVER_PENDING} (design section 3): everybody who may approve the waiver plus the
+     * system owner. The waiver id is the occurrence ref, so filing a second waiver after the first
+     * one is decided produces a new notification.
+     */
+    private void notifyWaiverPending(ReleaseItem item, Long waiverId, PipelineInstance instance,
+                                     String reason) {
+        if (waiverId == null) {
+            return;
+        }
+        String publishNo = null;
+        if (instance != null && instance.orderId() != null && instance.orderId() > 0) {
+            ReleaseOrderPO order = orderMapper.selectById(instance.orderId());
+            publishNo = order == null ? null : order.getPublishNo();
+        }
+        String label = publishNo == null ? item.crid() : publishNo;
+        notifications.notify(new NotificationCommand(
+            NotificationEventKey.WAIVER_PENDING, String.valueOf(waiverId), label,
+            NotificationEventKey.WAIVER_PENDING.label(),
+            "变更项 " + item.crid() + " 的检查豁免申请待审批：" + reason,
+            String.valueOf(waiverId),
+            NotificationAudiences.waiverApprovers(item.id())));
     }
 
     /**

@@ -1,6 +1,9 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.notification.NotificationAudiences;
+import com.sf.release.application.notification.NotificationCommand;
+import com.sf.release.application.notification.NotificationService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
@@ -13,6 +16,7 @@ import com.sf.release.domain.gate.GateEvaluator;
 import com.sf.release.domain.gate.GateWaiver;
 import com.sf.release.domain.gate.GateWaiverStatus;
 import com.sf.release.domain.gate.Severity;
+import com.sf.release.domain.notification.NotificationEventKey;
 import com.sf.release.domain.pipeline.CheckType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.port.PipelineAdvancer;
@@ -20,6 +24,7 @@ import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.task.GateStatus;
 import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.ItemStatus;
+import com.sf.release.domain.task.MemberRole;
 import com.sf.release.domain.task.ReleaseItem;
 import com.sf.release.domain.task.TestStatus;
 import com.sf.release.infra.repo.GateWaiverMapper;
@@ -41,6 +46,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -91,6 +97,7 @@ public class GateService {
     private final PipelineRepository repository;
     private final ItemTransitions transitions;
     private final PipelineAdvancer advancer;
+    private final NotificationService notifications;
 
     public GateService(ReleaseItemMapper itemMapper,
                        ReleaseOrderMapper orderMapper,
@@ -100,7 +107,8 @@ public class GateService {
                        PipelineInstanceMapper instanceMapper,
                        PipelineRepository repository,
                        ItemTransitions transitions,
-                       PipelineAdvancer advancer) {
+                       PipelineAdvancer advancer,
+                       NotificationService notifications) {
         this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper must not be null");
         this.orderMapper = Objects.requireNonNull(orderMapper, "orderMapper must not be null");
         this.checkService = Objects.requireNonNull(checkService, "checkService must not be null");
@@ -111,6 +119,8 @@ public class GateService {
         this.repository = Objects.requireNonNull(repository, "repository must not be null");
         this.transitions = Objects.requireNonNull(transitions, "transitions must not be null");
         this.advancer = Objects.requireNonNull(advancer, "advancer must not be null");
+        this.notifications = Objects.requireNonNull(notifications,
+            "notifications must not be null");
     }
 
     // ------------------------------------------------------------------ decision
@@ -136,10 +146,16 @@ public class GateService {
                 // an invalidated result, a failed or revoked test. A 中危 finding that could still
                 // be waived keeps the item in TESTING and the VERIFY node waiting, so the waiver
                 // decision can be made before the release is thrown away (FR-Q-02/FR-Q-03).
-                apply(itemId, ItemEvent.GATE_FAIL);
+                ItemTransitions.Outcome outcome = apply(itemId, ItemEvent.GATE_FAIL);
+                if (outcome == ItemTransitions.Outcome.APPLIED) {
+                    notifyCheckFailed(po, snapshot, decision);
+                }
             }
         } else if (revokesAdmission(item.status()) && !productionStillAdmitted(po, decision)) {
-            apply(itemId, invalidationEvent(item.status()));
+            ItemTransitions.Outcome outcome = apply(itemId, invalidationEvent(item.status()));
+            if (outcome == ItemTransitions.Outcome.APPLIED && inProduction(item.status())) {
+                notifyGateInvalidated(po, snapshot, decision);
+            }
         }
         if (snapshot.instanceId() > 0) {
             advancer.advance(snapshot.instanceId());
@@ -251,11 +267,16 @@ public class GateService {
             .set(ReleaseItemPO::getUpdatedAt, Instant.now()));
     }
 
-    private void apply(long itemId, ItemEvent event) {
+    /**
+     * Applies one main-state event and answers what happened, so a caller can notify only when the
+     * state really changed (a lost/duplicate transition is not a new event).
+     */
+    private ItemTransitions.Outcome apply(long itemId, ItemEvent event) {
         ItemTransitions.Outcome outcome = transitions.apply(itemId, event);
         if (outcome == ItemTransitions.Outcome.NOT_ALLOWED) {
             log.debug("item {} does not accept {} in its current state", itemId, event);
         }
+        return outcome;
     }
 
     /** Statuses where a granted admission still exists and can be revoked. */
@@ -393,13 +414,78 @@ public class GateService {
         if (item.status() == ItemStatus.TESTING || item.status() == ItemStatus.GATE_PENDING) {
             apply(itemId, ItemEvent.TEST_REVOKE);
         } else if (revokesAdmission(item.status())) {
-            apply(itemId, invalidationEvent(item.status()));
+            ItemTransitions.Outcome outcome = apply(itemId, invalidationEvent(item.status()));
+            if (outcome == ItemTransitions.Outcome.APPLIED && inProduction(item.status())) {
+                Snapshot invalidated = snapshotOf(item);
+                notifyGateInvalidated(po, invalidated, decide(item, invalidated));
+            }
         }
         Snapshot snapshot = snapshotOf(item);
         if (snapshot.instanceId() > 0) {
             advancer.advance(snapshot.instanceId());
         }
         return view(itemId);
+    }
+
+    // ------------------------------------------------------------------ notification wiring
+
+    /**
+     * Whether an invalidation happened while the release is in the production flow (design section 3:
+     * {@code GATE_INVALIDATED} is the "门禁失效（生产中）" event). {@code GATE_PENDING} is the
+     * pre-submission gate state and deliberately not notified under this key.
+     */
+    private static boolean inProduction(ItemStatus status) {
+        return status == ItemStatus.SUBMITTED || status == ItemStatus.PENDING_APPROVAL
+            || status == ItemStatus.READY;
+    }
+
+    /** {@code CHECK_FAILED}: a check verdict ended the item's gate. */
+    private void notifyCheckFailed(ReleaseItemPO po, Snapshot snapshot, GateDecision decision) {
+        ReleaseOrderPO order = orderOfInstance(snapshot.instanceId());
+        if (order == null || order.getPublishNo() == null) {
+            return;
+        }
+        String publishNo = order.getPublishNo();
+        StringBuilder body = new StringBuilder("发布单 ").append(publishNo)
+            .append(" 门禁检查不通过：").append(decision.summary());
+        if (decision.reasons() != null && !decision.reasons().isEmpty()) {
+            body.append("（").append(String.join("；", decision.reasons())).append("）");
+        }
+        body.append('。');
+        notifications.notify(new NotificationCommand(
+            NotificationEventKey.CHECK_FAILED, publishNo, publishNo,
+            NotificationEventKey.CHECK_FAILED.label(), body.toString(),
+            String.valueOf(snapshot.instanceId()),
+            NotificationAudiences.taskMembers(order.getId(),
+                EnumSet.of(MemberRole.DEV, MemberRole.TEST, MemberRole.OPS))));
+    }
+
+    /** {@code GATE_INVALIDATED}: a granted production admission stopped holding. */
+    private void notifyGateInvalidated(ReleaseItemPO po, Snapshot snapshot, GateDecision decision) {
+        ReleaseOrderPO order = orderOfInstance(snapshot.instanceId());
+        if (order == null || order.getPublishNo() == null) {
+            return;
+        }
+        String publishNo = order.getPublishNo();
+        notifications.notify(new NotificationCommand(
+            NotificationEventKey.GATE_INVALIDATED, publishNo, publishNo,
+            NotificationEventKey.GATE_INVALIDATED.label(),
+            "发布单 " + publishNo + " 的门禁结果已失效（生产中），需要重新评估：" + decision.summary()
+                + "。",
+            String.valueOf(snapshot.instanceId()),
+            NotificationAudiences.taskMembers(order.getId(), EnumSet.of(MemberRole.OPS))));
+    }
+
+    /** The release order behind an instance, or {@code null} for a daily/unknown instance. */
+    private ReleaseOrderPO orderOfInstance(long instanceId) {
+        if (instanceId <= 0) {
+            return null;
+        }
+        PipelineInstancePO instance = instanceMapper.selectById(instanceId);
+        if (instance == null || instance.getOrderId() == null || instance.getOrderId() <= 0) {
+            return null;
+        }
+        return orderMapper.selectById(instance.getOrderId());
     }
 
     // ------------------------------------------------------------------ admission

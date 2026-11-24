@@ -1,18 +1,24 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.notification.NotificationAudiences;
+import com.sf.release.application.notification.NotificationCommand;
+import com.sf.release.application.notification.NotificationService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.domain.approval.ApprovalChain;
 import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.approval.ApprovalStep;
+import com.sf.release.domain.notification.NotificationEventKey;
 import com.sf.release.infra.repo.AdmissionSnapshotMapper;
 import com.sf.release.infra.repo.ApprovalMapper;
 import com.sf.release.infra.repo.ReleaseOrderMapper;
 import com.sf.release.infra.repo.po.AdmissionSnapshotPO;
 import com.sf.release.infra.repo.po.ApprovalPO;
+import com.sf.release.infra.repo.po.ReleaseOrderPO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -74,12 +80,25 @@ public class ApprovalService {
     private final ReleaseOrderMapper releaseOrderMapper;
     private final ApprovalMapper approvalMapper;
     private final AdmissionSnapshotMapper snapshotMapper;
+    private final NotificationService notifications;
 
+    /**
+     * Test seam: the chain mechanics without the notification side effect (the mock-based tests
+     * construct the service this way).
+     */
     public ApprovalService(ReleaseOrderMapper releaseOrderMapper, ApprovalMapper approvalMapper,
                            AdmissionSnapshotMapper snapshotMapper) {
+        this(releaseOrderMapper, approvalMapper, snapshotMapper, null);
+    }
+
+    @Autowired
+    public ApprovalService(ReleaseOrderMapper releaseOrderMapper, ApprovalMapper approvalMapper,
+                           AdmissionSnapshotMapper snapshotMapper,
+                           NotificationService notifications) {
         this.releaseOrderMapper = releaseOrderMapper;
         this.approvalMapper = approvalMapper;
         this.snapshotMapper = snapshotMapper;
+        this.notifications = notifications;
     }
 
     /**
@@ -122,7 +141,8 @@ public class ApprovalService {
         // FIRST statement of the transaction: serialize concurrent chain builders of this order.
         // A locking read is a current read, so the plain chain read below starts its snapshot after
         // the competing transaction committed (a plain read on its own would not).
-        if (releaseOrderMapper.selectByIdForUpdate(orderId) == null) {
+        ReleaseOrderPO order = releaseOrderMapper.selectByIdForUpdate(orderId);
+        if (order == null) {
             throw new IllegalStateException(
                 "approval chain requires an existing release_order: " + orderId);
         }
@@ -157,8 +177,33 @@ public class ApprovalService {
         if (appended > 0) {
             log.info("approval chain extended: orderId={}, snapshotId={}, appended={}, total={}",
                 orderId, snapshotId, appended, chain.steps().size());
+            // APPROVAL_PENDING (design section 3): a generated/appended chain step notifies the first
+            // unsigned step's role, never both levels at once.
+            notifyFirstPending(order, snapshotId, chain);
         }
         return chain.steps();
+    }
+
+    /**
+     * Notifies the role of the first unsigned step of a chain that just grew. The notification is
+     * fired inside the business transaction; {@code NotificationService} writes it in its own
+     * transaction and swallows failures, so the chain append cannot be undone by a notification.
+     */
+    private void notifyFirstPending(ReleaseOrderPO order, long snapshotId, ApprovalChain chain) {
+        if (notifications == null || order == null || order.getPublishNo() == null) {
+            return;
+        }
+        ApprovalStep step = chain.nextPending().orElse(null);
+        if (step == null) {
+            return;
+        }
+        notifications.notify(new NotificationCommand(
+            NotificationEventKey.APPROVAL_PENDING, order.getPublishNo(), order.getPublishNo(),
+            NotificationEventKey.APPROVAL_PENDING.label(),
+            "发布单 " + order.getPublishNo() + " 第 " + step.stepNo() + " 步需要「"
+                + step.role().label() + "」审批。",
+            snapshotId + ":" + step.stepNo(),
+            NotificationAudiences.approvalPending(order.getId(), step.role())));
     }
 
     /**

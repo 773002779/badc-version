@@ -4,6 +4,8 @@ import com.sf.release.application.FreezeService;
 import com.sf.release.application.GateCheckService;
 import com.sf.release.application.GateService;
 import com.sf.release.application.GateWaiverService;
+import com.sf.release.application.notification.NotificationDispatchService;
+import com.sf.release.application.notification.NotificationService;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.port.DistributedLock;
 import com.sf.release.domain.pipeline.port.ItemFailureRepairer;
@@ -12,6 +14,7 @@ import com.sf.release.domain.pipeline.port.UnitLease;
 import com.sf.release.infra.engine.EngineRegistry;
 import com.sf.release.infra.job.FreezeExpiryJob;
 import com.sf.release.infra.job.GateReconcileJob;
+import com.sf.release.infra.job.NotificationDispatchJob;
 import com.sf.release.infra.job.ReconcileJob;
 import com.sf.release.infra.job.UnitLeaseRenewJob;
 import com.sf.release.infra.repo.DeployUnitLockMapper;
@@ -92,12 +95,26 @@ public class JobConfig {
     public UnitLeaseRenewJob unitLeaseRenewJob(
         DeployUnitLockMapper lockMapper,
         UnitLease unitLease,
+        NotificationService notifications,
         @Value("${release.unit-lease.max-paused-hours:168}") long maxPausedHours) {
         if (maxPausedHours <= 0) {
             throw new IllegalArgumentException(
                 "release.unit-lease.max-paused-hours must be positive: " + maxPausedHours);
         }
-        return new UnitLeaseRenewJob(lockMapper, unitLease,
+        return new UnitLeaseRenewJob(lockMapper, unitLease, notifications,
             java.time.Duration.ofHours(maxPausedHours));
+    }
+
+    /**
+     * The 15s WeCom delivery loop (P4-B, notification design section 5). Its own switch, like the
+     * other jobs: the test profile turns it off so the shared schema is not mutated by a background
+     * thread, and the dispatch tests invoke the service explicitly.
+     */
+    @Bean
+    @ConditionalOnProperty(name = "release.notification.dispatch-enabled", havingValue = "true",
+        matchIfMissing = true)
+    public NotificationDispatchJob notificationDispatchJob(
+        NotificationDispatchService dispatchService) {
+        return new NotificationDispatchJob(dispatchService);
     }
 }

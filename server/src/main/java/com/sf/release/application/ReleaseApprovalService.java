@@ -1,6 +1,9 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.notification.NotificationAudiences;
+import com.sf.release.application.notification.NotificationCommand;
+import com.sf.release.application.notification.NotificationService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
@@ -8,8 +11,10 @@ import com.sf.release.common.security.Roles;
 import com.sf.release.domain.approval.ApprovalChain;
 import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.approval.ApprovalStep;
+import com.sf.release.domain.notification.NotificationEventKey;
 import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.ItemStatus;
+import com.sf.release.domain.task.MemberRole;
 import com.sf.release.infra.repo.AdmissionSnapshotMapper;
 import com.sf.release.infra.repo.ReleaseItemMapper;
 import com.sf.release.infra.repo.ReleaseOrderMapper;
@@ -24,6 +29,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -66,19 +72,22 @@ public class ReleaseApprovalService {
     private final ApprovalService approvalService;
     private final ItemTransitions transitions;
     private final SubmitProdService submitProdService;
+    private final NotificationService notifications;
 
     public ReleaseApprovalService(ReleaseOrderMapper orderMapper,
                                   ReleaseItemMapper itemMapper,
                                   AdmissionSnapshotMapper snapshotMapper,
                                   ApprovalService approvalService,
                                   ItemTransitions transitions,
-                                  SubmitProdService submitProdService) {
+                                  SubmitProdService submitProdService,
+                                  NotificationService notifications) {
         this.orderMapper = orderMapper;
         this.itemMapper = itemMapper;
         this.snapshotMapper = snapshotMapper;
         this.approvalService = approvalService;
         this.transitions = transitions;
         this.submitProdService = submitProdService;
+        this.notifications = notifications;
     }
 
     /**
@@ -157,9 +166,55 @@ public class ReleaseApprovalService {
                 + " approved={}, by={}, complete={}, rejected={}", no, snapshot.getId(),
             step.stepNo(), requiredRole, approved, user.userId(), result.complete(),
             result.rejected());
+        notifyDecided(no, order, snapshot.getId(), step, approved, user.userId(), note, result);
         // The view is read back inside the same transaction: it shows the chain and the statuses
         // this decision just produced, plus the pre-execution review of the current state.
         return submitProdService.admission(no);
+    }
+
+    /**
+     * The approval notifications of design section 3: {@code APPROVAL_DECIDED} to the task members
+     * and the creator, then — when an approval left a later step unsigned — {@code APPROVAL_PENDING}
+     * for that step's role, so the next signer learns it is their turn (the first step was announced
+     * when the chain was built).
+     */
+    private void notifyDecided(String publishNo, ReleaseOrderPO order, long snapshotId,
+                               ApprovalStep step, boolean approved, String actor, String note,
+                               ApprovalService.DecideResult result) {
+        if (notifications == null) {
+            return;
+        }
+        String decision = approved ? "通过" : "驳回";
+        StringBuilder body = new StringBuilder("发布单 ").append(publishNo)
+            .append(" 第 ").append(step.stepNo()).append(" 步（").append(step.role().label())
+            .append("）已").append(decision).append("，审批人：").append(actor);
+        String comment = note == null ? null : note.trim();
+        if (comment != null && !comment.isEmpty()) {
+            body.append("；意见：").append(comment);
+        }
+        body.append('。');
+        notifications.notify(new NotificationCommand(
+            NotificationEventKey.APPROVAL_DECIDED, publishNo, publishNo,
+            NotificationEventKey.APPROVAL_DECIDED.label() + "：" + decision, body.toString(),
+            snapshotId + ":" + step.stepNo() + ":DECIDED",
+            NotificationAudiences.taskMembers(order.getId(),
+                EnumSet.allOf(MemberRole.class))));
+        if (!approved || result.complete()) {
+            return;
+        }
+        ApprovalStepView next = result.steps().stream()
+            .filter(candidate -> "PENDING".equals(candidate.status()))
+            .findFirst().orElse(null);
+        if (next == null) {
+            return;
+        }
+        ApprovalRole role = ApprovalRole.valueOf(next.role());
+        notifications.notify(new NotificationCommand(
+            NotificationEventKey.APPROVAL_PENDING, publishNo, publishNo,
+            NotificationEventKey.APPROVAL_PENDING.label(),
+            "发布单 " + publishNo + " 第 " + next.stepNo() + " 步需要「" + role.label() + "」审批。",
+            snapshotId + ":" + next.stepNo(),
+            NotificationAudiences.approvalPending(order.getId(), role)));
     }
 
     private static BizException wrongItemState(String publishNo, ReleaseItemPO item,

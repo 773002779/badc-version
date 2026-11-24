@@ -1,5 +1,9 @@
 package com.sf.release.infra.job;
 
+import com.sf.release.application.notification.NotificationAudiences;
+import com.sf.release.application.notification.NotificationCommand;
+import com.sf.release.application.notification.NotificationService;
+import com.sf.release.domain.notification.NotificationEventKey;
 import com.sf.release.domain.pipeline.port.UnitLease;
 import com.sf.release.infra.repo.DeployUnitLockMapper;
 import com.sf.release.infra.repo.po.LockedInstanceRow;
@@ -50,10 +54,12 @@ public class UnitLeaseRenewJob {
 
     private final DeployUnitLockMapper lockMapper;
     private final UnitLease unitLease;
+    private final NotificationService notifications;
     private final Duration maxPaused;
 
+    /** Test/legacy constructor: no notification subsystem (the lease logic stays unchanged). */
     public UnitLeaseRenewJob(DeployUnitLockMapper lockMapper, UnitLease unitLease) {
-        this(lockMapper, unitLease, DEFAULT_MAX_PAUSED);
+        this(lockMapper, unitLease, null, DEFAULT_MAX_PAUSED);
     }
 
     /**
@@ -62,11 +68,24 @@ public class UnitLeaseRenewJob {
      */
     public UnitLeaseRenewJob(DeployUnitLockMapper lockMapper, UnitLease unitLease,
                              Duration maxPaused) {
+        this(lockMapper, unitLease, null, maxPaused);
+    }
+
+    /**
+     * The production constructor: the same renewal rules, plus the {@code LOCK_TIMEOUT_RELEASED}
+     * notification when a pause crosses the bound (P4-B notification design section 3/4.4).
+     *
+     * @param notifications the notification service; {@code null} disables the notification (used by
+     *                      the lease tests that construct the job directly)
+     */
+    public UnitLeaseRenewJob(DeployUnitLockMapper lockMapper, UnitLease unitLease,
+                             NotificationService notifications, Duration maxPaused) {
         if (maxPaused == null || maxPaused.isNegative() || maxPaused.isZero()) {
             throw new IllegalArgumentException("maxPaused must be a positive duration");
         }
         this.lockMapper = lockMapper;
         this.unitLease = unitLease;
+        this.notifications = notifications;
         this.maxPaused = maxPaused;
     }
 
@@ -86,6 +105,7 @@ public class UnitLeaseRenewJob {
                 }
                 if (isAbandonedPause(owner, cutoff)) {
                     abandoned++;
+                    notifyAbandoned(owner);
                     continue;
                 }
                 try {
@@ -125,5 +145,29 @@ public class UnitLeaseRenewJob {
         }
         Instant pausedAt = owner.getPausedAt();
         return pausedAt != null && pausedAt.isBefore(cutoff);
+    }
+
+    /**
+     * Announces that an abandoned pause will lose its unit lease (design section 3,
+     * {@code LOCK_TIMEOUT_RELEASED}). The dedupe key uses the instance id, so the notification is
+     * written once even though every following round sees the same abandoned pause again.
+     */
+    private void notifyAbandoned(LockedInstanceRow owner) {
+        if (notifications == null || owner.getUnitId() == null || owner.getInstanceId() == null) {
+            return;
+        }
+        long unitId = owner.getUnitId();
+        String limit = maxPaused.toHours() > 0
+            ? maxPaused.toHours() + " 小时" : maxPaused.toMinutes() + " 分钟";
+        NotificationCommand command = new NotificationCommand(
+            NotificationEventKey.LOCK_TIMEOUT_RELEASED,
+            String.valueOf(unitId),
+            null,
+            "锁超时释放",
+            "部署单元 #" + unitId + " 的流水线暂停已超过允许上限（" + limit
+                + "），租约到期后该单元将被释放；如需继续发布，请重新发起。",
+            String.valueOf(owner.getInstanceId()),
+            NotificationAudiences.lockTimeout(unitId));
+        notifications.notify(command);
     }
 }

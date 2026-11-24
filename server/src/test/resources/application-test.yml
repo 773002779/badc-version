@@ -38,6 +38,11 @@ release:
   unit-lease:
     # Same reason: the 60s unit lease renewer is invoked explicitly by its own test.
     renew-enabled: false
+  notification:
+    # Same reason: the 15s WeCom dispatch loop is invoked explicitly by the notification tests.
+    dispatch-enabled: false
+    # MockWebServer speaks plain HTTP; the suite publishes its own webhook address.
+    allow-insecure-http: true
   redis:
     enabled: false
   pipeline:

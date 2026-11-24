@@ -2,6 +2,9 @@ package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.notification.NotificationAudiences;
+import com.sf.release.application.notification.NotificationCommand;
+import com.sf.release.application.notification.NotificationService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
@@ -11,6 +14,7 @@ import com.sf.release.domain.approval.ApprovalStep;
 import com.sf.release.domain.freeze.FreezeEvent;
 import com.sf.release.domain.freeze.FreezeScope;
 import com.sf.release.domain.freeze.FreezeStatus;
+import com.sf.release.domain.notification.NotificationEventKey;
 import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.ItemStatus;
 import com.sf.release.infra.repo.AdmissionSnapshotMapper;
@@ -21,6 +25,7 @@ import com.sf.release.infra.repo.po.AdmissionSnapshotPO;
 import com.sf.release.infra.repo.po.FreezeEventPO;
 import com.sf.release.infra.repo.po.InFlightOrderRow;
 import com.sf.release.infra.repo.po.ReleaseOrderPO;
+import com.sf.release.infra.repo.po.SubsystemPO;
 import com.sf.release.infra.security.CurrentUser;
 import com.sf.release.infra.security.UserContext;
 import org.slf4j.Logger;
@@ -29,6 +34,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -120,25 +127,32 @@ public class FreezeService {
     /** Upper bound of rows the history list returns; the page never shows more. */
     static final int HISTORY_LIMIT = 200;
 
+    /** The body label of a freeze window; local time is what the operator reads. */
+    private static final DateTimeFormatter FMT =
+        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault());
+
     private final FreezeMapper freezeMapper;
     private final SubsystemMapper subsystemMapper;
     private final ReleaseOrderMapper orderMapper;
     private final AdmissionSnapshotMapper snapshotMapper;
     private final ApprovalService approvalService;
     private final ItemTransitions transitions;
+    private final NotificationService notifications;
 
     public FreezeService(FreezeMapper freezeMapper,
                          SubsystemMapper subsystemMapper,
                          ReleaseOrderMapper orderMapper,
                          AdmissionSnapshotMapper snapshotMapper,
                          ApprovalService approvalService,
-                         ItemTransitions transitions) {
+                         ItemTransitions transitions,
+                         NotificationService notifications) {
         this.freezeMapper = freezeMapper;
         this.subsystemMapper = subsystemMapper;
         this.orderMapper = orderMapper;
         this.snapshotMapper = snapshotMapper;
         this.approvalService = approvalService;
         this.transitions = transitions;
+        this.notifications = notifications;
     }
 
     /**
@@ -184,6 +198,7 @@ public class FreezeService {
         int pulled = applyInFlight(stored, now);
         log.info("freeze declared: id={}, scope={}, subsystemId={}, by={}, startAt={}, endAt={},"
             + " pulledOrders={}", stored.id(), parsedScope, target, who, start, endAt, pulled);
+        notifyFreeze(NotificationEventKey.FREEZE_APPLIED, stored, "封板已生效");
         return toView(stored, now);
     }
 
@@ -227,6 +242,7 @@ public class FreezeService {
         int ready = recomputeAffectedOrders(List.of(released), now);
         log.info("freeze released: id={}, by={}, reason={}, recomputedToReady={}", id, who, why,
             ready);
+        notifyFreeze(NotificationEventKey.FREEZE_RELEASED, released, "封板已解除");
         return toView(released, now);
     }
 
@@ -323,6 +339,7 @@ public class FreezeService {
                 continue;
             }
             closed.add(event);
+            notifyFreeze(NotificationEventKey.FREEZE_RELEASED, event, "封板已到期");
             log.info("freeze expired: id={}, endAt={}", event.id(), event.endAt());
         }
         if (closed.isEmpty()) {
@@ -668,6 +685,39 @@ public class FreezeService {
                     .eq(FreezeEventPO::getSubsystemId, subsystemId)));
         }
         return query;
+    }
+
+    /**
+     * {@code FREEZE_APPLIED} / {@code FREEZE_RELEASED} (design section 3/4.3). The audience of a
+     * freeze is computed from the releases in the production flow inside its scope at notification
+     * time (the design's accepted "封板瞬时影响面", section 9); the base body carries the scope, the
+     * window and the reason, and the resolver appends each recipient's own release list and the
+     * system-owner fallback. The freeze id is the dedupe ref, so a lift/expiry of the same freeze is
+     * a second event (`FREEZE_RELEASED`) but one row per recipient.
+     */
+    private void notifyFreeze(NotificationEventKey key, FreezeEvent freeze, String verb) {
+        if (notifications == null || freeze == null || freeze.id() == null) {
+            return;
+        }
+        boolean global = freeze.scope() == FreezeScope.GLOBAL || freeze.subsystemId() == null;
+        String systemName = global ? null : subsystemName(freeze.subsystemId());
+        String scopeText = global ? "全局" : "系统「" + systemName + "」";
+        String label = global ? "全局封板" : systemName + " 封板";
+        String body = verb + "。\n封板范围：" + scopeText
+            + "；时间：" + FMT.format(freeze.startAt()) + " 至 " + FMT.format(freeze.endAt())
+            + "；原因：" + freeze.reason();
+        long scopeSubsystemId = global ? 0L : freeze.subsystemId();
+        notifications.notify(new NotificationCommand(key, String.valueOf(freeze.id()), label,
+            key.label() + "：" + freeze.reason(), body, String.valueOf(freeze.id()),
+            NotificationAudiences.freeze(scopeSubsystemId)));
+    }
+
+    private String subsystemName(Long subsystemId) {
+        if (subsystemId == null || subsystemId <= 0) {
+            return "未知系统";
+        }
+        SubsystemPO po = subsystemMapper.selectById(subsystemId);
+        return po == null || po.getName() == null ? "#" + subsystemId : po.getName();
     }
 
     private static FreezeView toView(FreezeEvent event, Instant now) {

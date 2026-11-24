@@ -53,3 +53,9 @@ release:
     # Daily expiry scan of the 封板 events (tech design 4.2); disable it in environments that run a
     # single externally scheduled scanner, and in tests that invoke expireDue() themselves.
     expiry-enabled: true
+  notification:
+    # 15s WeCom delivery loop (P4-B notification design 5); disable it in environments that run a
+    # single externally scheduled dispatcher.
+    dispatch-enabled: true
+    # The WeCom webhook must be https://. Enable only for an internal robot or a local test server.
+    allow-insecure-http: false

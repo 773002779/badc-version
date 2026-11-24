@@ -1,7 +1,12 @@
 package com.sf.release.application.event;
 
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.sf.release.application.ItemFailureAppService;
 import com.sf.release.application.ItemTransitions;
+import com.sf.release.application.notification.NotificationAudiences;
+import com.sf.release.application.notification.NotificationCommand;
+import com.sf.release.application.notification.NotificationService;
+import com.sf.release.domain.notification.NotificationEventKey;
 import com.sf.release.domain.pipeline.InstanceStatus;
 import com.sf.release.domain.pipeline.NodeStatus;
 import com.sf.release.domain.pipeline.NodeType;
@@ -9,7 +14,9 @@ import com.sf.release.domain.pipeline.TriggerType;
 import com.sf.release.domain.pipeline.event.InstanceFinishedEvent;
 import com.sf.release.domain.pipeline.event.NodeCompletedEvent;
 import com.sf.release.domain.pipeline.event.NodeTaskCompletedEvent;
+import com.sf.release.domain.pipeline.event.TestEnvReadyEvent;
 import com.sf.release.domain.task.ItemEvent;
+import com.sf.release.domain.task.MemberRole;
 import com.sf.release.infra.repo.PipelineInstanceMapper;
 import com.sf.release.infra.repo.ReleaseOrderMapper;
 import com.sf.release.infra.repo.po.PipelineInstancePO;
@@ -18,6 +25,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
+
+import java.util.EnumSet;
+import java.util.Set;
 
 /**
  * Application-layer wiring of the pipeline events to the 变更项 main state machine (tech design
@@ -62,15 +72,18 @@ public class PipelineEventListener {
     private final PipelineInstanceMapper instanceMapper;
     private final ItemTransitions transitions;
     private final ItemFailureAppService failureService;
+    private final NotificationService notifications;
 
     public PipelineEventListener(ReleaseOrderMapper orderMapper,
                                  PipelineInstanceMapper instanceMapper,
                                  ItemTransitions transitions,
-                                 ItemFailureAppService failureService) {
+                                 ItemFailureAppService failureService,
+                                 NotificationService notifications) {
         this.orderMapper = orderMapper;
         this.instanceMapper = instanceMapper;
         this.transitions = transitions;
         this.failureService = failureService;
+        this.notifications = notifications;
     }
 
     @EventListener
@@ -158,6 +171,110 @@ public class PipelineEventListener {
             }
         } catch (RuntimeException ex) {
             log.error("instance listener failed: instanceId={}", event.instanceId(), ex);
+        }
+    }
+
+    /**
+     * The failed-node notifications of design section 3: {@code BUILD_FAILED},
+     * {@code TEST_DEPLOY_FAILED} and {@code PROD_DEPLOY_FAILED}. It is a separate listener so a
+     * notification can never change the item transition above; a rollback instance and a daily
+     * instance (no release order) are excluded, exactly like the item mapping.
+     */
+    @EventListener
+    public void onNodeCompletedNotification(NodeCompletedEvent event) {
+        try {
+            if (event.status() != NodeStatus.FAILED) {
+                return;
+            }
+            NotificationEventKey key = switch (event.nodeType()) {
+                case BUILD -> NotificationEventKey.BUILD_FAILED;
+                case TEST_DEPLOY -> NotificationEventKey.TEST_DEPLOY_FAILED;
+                case PROD_DEPLOY -> NotificationEventKey.PROD_DEPLOY_FAILED;
+                case VERIFY -> null;
+            };
+            if (key == null || event.orderId() <= 0) {
+                return;
+            }
+            if (isRollbackInstance(event.instanceId())) {
+                return;
+            }
+            ReleaseOrderPO order = orderMapper.selectById(event.orderId());
+            if (order == null || order.getPublishNo() == null) {
+                return;
+            }
+            Set<MemberRole> roles = event.nodeType() == NodeType.PROD_DEPLOY
+                ? EnumSet.of(MemberRole.OPS) : EnumSet.of(MemberRole.DEV, MemberRole.TEST);
+            String node = switch (event.nodeType()) {
+                case BUILD -> "构建";
+                case TEST_DEPLOY -> "测试部署";
+                case PROD_DEPLOY -> "生产部署";
+                case VERIFY -> "验证";
+            };
+            StringBuilder body = new StringBuilder("发布单 ")
+                .append(order.getPublishNo()).append(" 的").append(node).append("节点执行失败");
+            if (event.message() != null && !event.message().isBlank()) {
+                body.append("：").append(event.message());
+            }
+            body.append("。请到发布记录查看详情。");
+            notifications.notify(new NotificationCommand(key, order.getPublishNo(),
+                order.getPublishNo(), key.label(), body.toString(),
+                String.valueOf(event.instanceId()),
+                NotificationAudiences.taskMembers(order.getId(), roles)));
+        } catch (RuntimeException ex) {
+            log.error("node failure notification failed: instanceId={}, node={}",
+                event.instanceId(), event.nodeType(), ex);
+        }
+    }
+
+    /** {@code TEST_ENV_READY}: the test environment of the release is ready (design section 3). */
+    @EventListener
+    public void onTestEnvReady(TestEnvReadyEvent event) {
+        try {
+            ReleaseOrderPO order = orderMapper.selectOne(Wrappers.<ReleaseOrderPO>lambdaQuery()
+                .eq(ReleaseOrderPO::getPublishNo, event.publishNo())
+                .last("LIMIT 1"));
+            if (order == null) {
+                return;
+            }
+            notifications.notify(new NotificationCommand(
+                NotificationEventKey.TEST_ENV_READY, event.publishNo(), event.publishNo(),
+                NotificationEventKey.TEST_ENV_READY.label(),
+                "发布单 " + event.publishNo() + " 的测试环境已就绪，可以开始验证。",
+                String.valueOf(event.instanceId()),
+                NotificationAudiences.taskMembers(order.getId(),
+                    EnumSet.of(MemberRole.TEST, MemberRole.DEV))));
+        } catch (RuntimeException ex) {
+            log.error("test-ready notification failed: instanceId={}", event.instanceId(), ex);
+        }
+    }
+
+    /**
+     * {@code PROD_DONE}: a non-rollback instance finished {@code DONE}. The instance only reaches
+     * {@code DONE} after its {@code PROD_DEPLOY} node succeeded, so the instance status is the
+     * production result the design names.
+     */
+    @EventListener
+    public void onInstanceFinishedNotification(InstanceFinishedEvent event) {
+        try {
+            if (event.status() != InstanceStatus.DONE || event.orderId() <= 0) {
+                return;
+            }
+            if (isRollbackInstance(event.instanceId())) {
+                return;
+            }
+            ReleaseOrderPO order = orderMapper.selectById(event.orderId());
+            if (order == null || order.getPublishNo() == null) {
+                return;
+            }
+            notifications.notify(new NotificationCommand(
+                NotificationEventKey.PROD_DONE, order.getPublishNo(), order.getPublishNo(),
+                NotificationEventKey.PROD_DONE.label(),
+                "发布单 " + order.getPublishNo() + " 已生产完成。",
+                String.valueOf(event.instanceId()),
+                NotificationAudiences.taskMembers(order.getId(),
+                    EnumSet.of(MemberRole.OPS, MemberRole.DEV))));
+        } catch (RuntimeException ex) {
+            log.error("production-done notification failed: instanceId={}", event.instanceId(), ex);
         }
     }
 
