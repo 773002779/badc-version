@@ -1,11 +1,19 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getCodingConn, getMe, listSubsystems, saveCodingConn, testCodingConn } from '../api'
+import {
+  getCodingConn,
+  getMe,
+  getNotificationSetting,
+  listSubsystems,
+  saveCodingConn,
+  saveNotificationSetting,
+  testCodingConn
+} from '../api'
 import { ApiError, currentUser, setCurrentUser } from '../api/http'
 import { applyTheme, currentTheme } from '../theme'
 import type { Theme } from '../theme'
-import type { CodingConnView, CodingProbeView } from '../api/types'
+import type { CodingConnView, CodingProbeView, NotificationSettingView } from '../api/types'
 import { formatDateTime } from '../utils/format'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
@@ -143,15 +151,93 @@ async function testConn() {
   }
 }
 
+// ---------------------------------------------------------------- 消息通知 (P4-B)
+//
+// The second `setting:manage` block on this page, after CODING: the WeCom robot switch and webhook
+// (design §5/§6). It fetches `/me` on its own because `loadConn` owns `canManage` only for its own
+// request: reading the flag from that block would race on page load.
+const notifyCanManage = ref(false)
+const notifyView = ref<NotificationSettingView | null>(null)
+const notifyLoading = ref(false)
+const notifyError = ref<string | null>(null)
+const notifySaving = ref(false)
+const notifyEnabled = ref(false)
+const notifyWebhook = ref('')
+
+const notifyStatus = computed(() => {
+  if (notifyLoading.value) return { label: '读取中…', tone: 'neutral' as const }
+  if (!notifyCanManage.value) return { label: '只读', tone: 'neutral' as const }
+  if (!notifyView.value) return { label: '默认关闭', tone: 'neutral' as const }
+  return notifyView.value.wecomEnabled
+    ? { label: '已开启', tone: 'success' as const }
+    : { label: '已关闭', tone: 'neutral' as const }
+})
+
+const notifySubtitle = computed(() => {
+  if (notifyLoading.value) return '读取中…'
+  if (!notifyCanManage.value) return '仅站内通知 · 企微配置仅管理员可见'
+  const view = notifyView.value
+  if (!view) return '未保存过，默认仅站内通知'
+  const state = view.wecomEnabled ? '企微已开启' : '企微已关闭'
+  return view.updatedBy
+    ? `${state} · ${view.updatedBy} 更新于 ${formatDateTime(view.updatedAt)}`
+    : state
+})
+
+async function loadNotify() {
+  notifyLoading.value = true
+  notifyError.value = null
+  try {
+    const me = await getMe()
+    notifyCanManage.value = me.perms.includes('setting:manage')
+    if (!notifyCanManage.value) {
+      // No permission means no read either: the endpoint answers 403, so do not call it.
+      notifyView.value = null
+      return
+    }
+    const view = await getNotificationSetting()
+    notifyView.value = view
+    notifyEnabled.value = view.wecomEnabled
+    notifyWebhook.value = view.wecomWebhook ?? ''
+  } catch (e) {
+    notifyError.value = e instanceof ApiError ? e.message : '读取消息通知配置失败'
+  } finally {
+    notifyLoading.value = false
+  }
+}
+
+async function saveNotify() {
+  if (notifyEnabled.value && !notifyWebhook.value.trim()) {
+    ElMessage.warning('开启企微通知时必须填写机器人地址')
+    return
+  }
+  notifySaving.value = true
+  try {
+    const view = await saveNotificationSetting({
+      wecomEnabled: notifyEnabled.value,
+      wecomWebhook: notifyWebhook.value.trim() || null
+    })
+    notifyView.value = view
+    notifyEnabled.value = view.wecomEnabled
+    notifyWebhook.value = view.wecomWebhook ?? ''
+    ElMessage.success('消息通知配置已保存')
+  } catch (e) {
+    ElMessage.error(e instanceof ApiError ? e.message : '保存失败')
+  } finally {
+    notifySaving.value = false
+  }
+}
+
 onMounted(() => {
   checkBackend()
   loadConn()
+  loadNotify()
 })
 </script>
 
 <template>
   <div>
-    <PageHeader title="设置" description="本地偏好、身份，以及 CODING 对接配置。" />
+    <PageHeader title="设置" description="本地偏好、身份，以及 CODING 对接与消息通知配置。" />
 
     <DataSection
       title="CODING 对接"
@@ -239,6 +325,78 @@ onMounted(() => {
             {{ probe.persisted ? '已记录为上次校验结果。' : '草稿测试：结果不写入配置。' }}
           </p>
         </div>
+      </template>
+    </DataSection>
+
+    <DataSection
+      class="settings-notify"
+      title="消息通知"
+      :subtitle="notifySubtitle"
+      style="margin-bottom: 16px"
+    >
+      <template #actions>
+        <span class="chip" :class="`chip-${notifyStatus.tone}`">{{ notifyStatus.label }}</span>
+        <el-button
+          v-if="notifyCanManage"
+          type="primary"
+          :disabled="notifySaving"
+          :loading="notifySaving"
+          @click="saveNotify"
+        >
+          保存
+        </el-button>
+      </template>
+
+      <el-alert
+        v-if="notifyError"
+        type="error"
+        :closable="false"
+        show-icon
+        :title="notifyError"
+        style="margin-bottom: 12px"
+      />
+
+      <div v-if="!notifyCanManage" class="restricted">
+        <span class="strong">需要平台管理员权限</span>
+        <span class="weak small">
+          企微机器人是全平台共用的一条配置，只有具备 <code class="mono">setting:manage</code>
+          的账号可以查看和修改；当前账号无权读取该配置。站内通知始终开启，无需配置。
+        </span>
+      </div>
+
+      <template v-else>
+        <div class="notify-grid">
+          <label class="field">
+            <span class="field-label">企微机器人通知</span>
+            <span class="switch-row">
+              <el-switch
+                v-model="notifyEnabled"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+              <span class="weak small">关闭时只发站内通知，不创建企微发送任务。</span>
+            </span>
+          </label>
+          <label class="field">
+            <span class="field-label">机器人 Webhook</span>
+            <el-input
+              v-model="notifyWebhook"
+              placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
+              spellcheck="false"
+            />
+          </label>
+          <div class="field hint">
+            <span>
+              机器人地址内嵌密钥，属于敏感配置：接口只对具备
+              <code class="mono">setting:manage</code> 的账号原样回显，请勿转发或截图外传。
+            </span>
+            <span>开启时必须填写 <code class="mono">https://</code> 地址；发送失败会记录在该条通知上，不阻塞发版流程。</span>
+            <span>站内通知始终开启，无需配置。</span>
+          </div>
+        </div>
+        <p v-if="notifyView?.updatedBy" class="weak small notify-audit">
+          最近保存：{{ notifyView.updatedBy }} · {{ formatDateTime(notifyView.updatedAt) }}
+        </p>
       </template>
     </DataSection>
 
@@ -409,6 +567,25 @@ onMounted(() => {
   font-size: 15px;
   font-weight: 600;
   margin-right: 2px;
+}
+
+/* 「消息通知」 block: same field grid as CODING, one column so the webhook gets the full width. */
+.notify-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  max-width: 760px;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.notify-audit {
+  margin: 12px 0 0;
 }
 
 .grid {

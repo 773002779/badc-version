@@ -486,3 +486,39 @@ export interface ReleaseRecordRow {
   pipelineNo?: string | null
   pipelineStatus?: string | null
 }
+
+// --------------------------------------------------- notification centre (P4-B)
+
+/**
+ * One in-app notification row (design §6): the notification centre and the topbar bell share it.
+ * `eventLabel` is the server-side Chinese name — the web keeps no copy of the event enum. `read` is
+ * the server's `read_at != null`.
+ */
+export interface NotificationView {
+  id: number
+  eventKey: string
+  eventLabel: string
+  objectType: string
+  objectId: string
+  objectLabel?: string | null
+  title: string
+  body: string
+  status: string
+  read: boolean
+  createdAt?: string | null
+  sentAt?: string | null
+  failureReason?: string | null
+}
+
+/** One page of the caller's notifications; `unread` rides along so the badge refreshes with it. */
+export interface NotificationPage extends PageResult<NotificationView> {
+  unread: number
+}
+
+/** The 「消息通知」 settings block; the webhook is returned as-is to a `setting:manage` caller. */
+export interface NotificationSettingView {
+  wecomEnabled: boolean
+  wecomWebhook?: string | null
+  updatedBy?: string | null
+  updatedAt?: string | null
+}

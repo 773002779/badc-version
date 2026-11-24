@@ -11,6 +11,8 @@ import type {
   ItemGate,
   ItemView,
   MeView,
+  NotificationPage,
+  NotificationSettingView,
   PageResult,
   ReleaseDetail,
   ReleaseRecord,
@@ -357,3 +359,48 @@ export const getRollbackVersions = (unitId: number) =>
 /** Executes a production rollback immediately; a freeze only adds a `freezeWarning`. */
 export const executeRollback = (body: { unitId: number; targetDigest: string; reason: string }) =>
   api<RollbackResult>('/api/v1/rollbacks', { method: 'POST', body: JSON.stringify(body) })
+
+// --------------------------------------------------------- notifications (P4-B)
+
+/**
+ * The caller's in-app notification page, newest first; the same response carries the unread badge.
+ * Like `listReleases` this endpoint names its paging `page`/`size` (design §6, R44); `unreadOnly` is
+ * only sent when it is on, so the default request stays the plain list.
+ */
+export const listNotifications = (
+  params: { page?: number; size?: number; unreadOnly?: boolean } = {}
+) =>
+  api<NotificationPage>(
+    `/api/v1/notifications${qs({
+      page: 1,
+      size: 20,
+      ...params,
+      unreadOnly: params.unreadOnly ? 'true' : undefined
+    })}`
+  )
+
+/** The badge only; the bell polls this on route change and every 30s. */
+export const getUnreadNotificationCount = () =>
+  api<{ unread: number }>('/api/v1/notifications/unread-count')
+
+/** Marks one of the caller's rows read; the backend answers success on a second call too. */
+export const markNotificationRead = (id: number) =>
+  api<{ id: number; read: boolean }>(`/api/v1/notifications/${id}/read`, { method: 'POST' })
+
+/** Marks every unread row of the caller read; `updated` is how many changed. */
+export const markAllNotificationsRead = () =>
+  api<{ updated: number }>('/api/v1/notifications/read-all', { method: 'POST' })
+
+/** The 「消息通知」 block; requires `setting:manage`. */
+export const getNotificationSetting = () =>
+  api<NotificationSettingView>('/api/v1/settings/notifications')
+
+/** Saves the block; a blank webhook clears it, and the switch cannot be on without an address. */
+export const saveNotificationSetting = (body: {
+  wecomEnabled: boolean
+  wecomWebhook?: string | null
+}) =>
+  api<NotificationSettingView>('/api/v1/settings/notifications', {
+    method: 'PUT',
+    body: JSON.stringify(body)
+  })
