@@ -152,10 +152,25 @@ class RollbackServiceTest {
             .isEqualTo(redeploy.publishNo());
         assertThat(list.current().executedBy()).isEqualTo("ops-new");
         assertThat(list.current().batchCount())
-            .as("distinct DEs deployed with this image across its history")
+            .as("distinct deploy batches the image went out in across its history")
             .isEqualTo(2);
         assertThat(list.history()).hasSize(1);
         assertThat(list.history()).extracting(RollbackVersionView::digest).containsExactly(TARGET);
+    }
+
+    @Test
+    void batch_count_counts_deploy_batches_not_deploy_targets() {
+        Instant now = Instant.now();
+        Version multi = addVersion("sha256:multi-de", now.minusSeconds(600), "ops-new", prodOne, 1);
+        // The same batch also deployed the DR DE; two targets, still one batch.
+        givenDeployTask(multi.instanceId(), drTwo, 1, "SUCCESS", now.minusSeconds(600));
+
+        RollbackService.VersionList list = rollbacks.versions(unitId);
+
+        assertThat(list.current().digest()).isEqualTo("sha256:multi-de");
+        assertThat(list.current().batchCount())
+            .as("the drawer's 批次数 counts deploy batches, not the DEs inside a batch")
+            .isEqualTo(1);
     }
 
     @Test

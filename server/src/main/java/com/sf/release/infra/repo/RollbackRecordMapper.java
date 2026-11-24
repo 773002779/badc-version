@@ -102,10 +102,14 @@ public interface RollbackRecordMapper extends BaseMapper<RollbackRecordPO> {
     List<RollbackVersionRow> selectHistory(@Param("unitId") long unitId,
                                            @Param("excludeDigest") String excludeDigest);
 
-    /** Distinct successful deploy targets (DEs) per image digest: the page's batch count. */
+    /**
+     * Distinct deploy batches per image digest: the drawer labels this 「批次数」, so it counts the
+     * serial batches of the production release (the same {@code deploy_batch_no} the rollback
+     * reverses), not the individual DEs inside a batch.
+     */
     @Select("""
         SELECT pi.image_digest          AS digest,
-               COUNT(DISTINCT nt.target_id) AS batchCount
+               COUNT(DISTINCT nt.batch_no) AS batchCount
         FROM node_task nt
         JOIN pipeline_instance pi ON pi.id = nt.instance_id
         JOIN release_order ro ON ro.id = pi.order_id
