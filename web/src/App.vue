@@ -6,6 +6,7 @@ import {
   Checked,
   Document,
   Grid,
+  Memo,
   Monitor,
   Moon,
   Odometer,
@@ -186,6 +187,9 @@ const initial = computed(() => (userId.value || '?').slice(0, 1).toUpperCase())
       </router-link>
       <router-link class="nav-item" to="/records">
         <el-icon><Document /></el-icon><span>发布记录</span>
+      </router-link>
+      <router-link class="nav-item" to="/audit">
+        <el-icon><Memo /></el-icon><span>审计日志</span>
       </router-link>
       <router-link class="nav-item" to="/">
         <el-icon><Odometer /></el-icon><span>总览</span>

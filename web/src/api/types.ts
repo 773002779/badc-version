@@ -522,3 +522,42 @@ export interface NotificationSettingView {
   updatedBy?: string | null
   updatedAt?: string | null
 }
+
+// ---------------------------------------------------------------- audit (P4-C)
+
+/**
+ * One audit row (audit design §4). `actionLabel` is the server's Chinese action name, so the web
+ * keeps no copy of the action enum. `before`/`after` are the stored JSON texts of the changed fields
+ * only and may be null (a new object has no before, a delete no after).
+ */
+export interface AuditRow {
+  id: number
+  action: string
+  actionLabel: string
+  actor: string
+  objectType: string
+  objectId: string
+  objectLabel?: string | null
+  summary: string
+  reason?: string | null
+  before?: string | null
+  after?: string | null
+  traceId?: string | null
+  createdAt?: string | null
+}
+
+/** The audit filters, shared by the page and the CSV export; the export ignores the page fields. */
+export interface AuditFilter {
+  objectType?: string
+  objectId?: string
+  action?: string
+  actor?: string
+  /** ISO-8601 Instant; the server answers 40000 when `from` is after `to`. */
+  from?: string
+  to?: string
+  /** The unit-detail convenience filter: only that unit's scoped rows. */
+  unitId?: number
+}
+
+/** One page of audit rows; `pageNo`/`pageSize` echo the server's own paging (R44). */
+export interface AuditPage extends PageResult<AuditRow> {}

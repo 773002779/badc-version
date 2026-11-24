@@ -11,6 +11,7 @@ const routes = [
   { path: '/units/:id', name: 'unit-detail', component: () => import('./views/UnitDetailView.vue'), meta: { title: '部署单元详情', crumb: '部署单元详情', parent: '/units' } },
   { path: '/control', name: 'control', component: () => import('./views/ControlView.vue'), meta: { title: '生产管控', crumb: '生产管控' } },
   { path: '/records', name: 'records', component: () => import('./views/RecordsView.vue'), meta: { title: '发布记录', crumb: '发布记录' } },
+  { path: '/audit', name: 'audit', component: () => import('./views/AuditView.vue'), meta: { title: '审计日志', crumb: '审计日志' } },
   { path: '/notifications', name: 'notifications', component: () => import('./views/NotificationsView.vue'), meta: { title: '消息通知', crumb: '消息通知' } },
   { path: '/settings', name: 'settings', component: () => import('./views/SettingsView.vue'), meta: { title: '设置', crumb: '设置' } },
   { path: '/:pathMatch(.*)*', redirect: '/' }

@@ -1,6 +1,8 @@
-import { api, qs } from './http'
+import { ApiError, api, currentUser, qs } from './http'
 import type {
   AdmissionView,
+  AuditFilter,
+  AuditPage,
   BindingView,
   CodingConnView,
   CodingJobView,
@@ -404,3 +406,47 @@ export const saveNotificationSetting = (body: {
     method: 'PUT',
     body: JSON.stringify(body)
   })
+
+// ------------------------------------------------------------------ audit (P4-C)
+
+/**
+ * One page of audit rows, newest first. `page`/`size` are this endpoint's own paging names (audit
+ * design §4, R44); every filter is optional and the server narrows the rows to the caller's scope.
+ */
+export const listAudit = (params: AuditFilter & { page?: number; size?: number } = {}) =>
+  api<AuditPage>(`/api/v1/audit${qs({ page: 1, size: 10, ...params })}`)
+
+/**
+ * The same filter as a CSV download. This is deliberately not an `api()` call: the endpoint answers
+ * a file body instead of the JSON envelope, and `window.open` would drop the `X-User-Id` header.
+ * The caller turns the blob into a download; a rejected filter still answers the JSON envelope,
+ * which surfaces here as an {@link ApiError} so the page can show `ElMessage.error`.
+ */
+export async function exportAudit(
+  params: AuditFilter = {}
+): Promise<{ blob: Blob; filename: string }> {
+  let res: Response
+  try {
+    res = await fetch(`/api/v1/audit/export${qs({ ...params })}`, {
+      headers: { 'X-User-Id': currentUser() }
+    })
+  } catch {
+    throw new ApiError(0, '无法连接后端服务（请确认已运行 scripts\\start.ps1）')
+  }
+
+  const type = res.headers.get('Content-Type') ?? ''
+  // The happy path is `text/csv`; a validation failure arrives as JSON even on a 200.
+  if (!res.ok || !type.toLowerCase().includes('text/csv')) {
+    let body: { code?: number; message?: string } | null = null
+    try {
+      body = (await res.json()) as { code?: number; message?: string }
+    } catch {
+      body = null
+    }
+    throw new ApiError(body?.code ?? res.status, body?.message || `导出失败（HTTP ${res.status}）`)
+  }
+
+  const disposition = res.headers.get('Content-Disposition') ?? ''
+  const named = /filename="?([^";]+)"?/i.exec(disposition)
+  return { blob: await res.blob(), filename: named?.[1] ?? `audit-${Date.now()}.csv` }
+}

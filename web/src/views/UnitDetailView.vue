@@ -2,8 +2,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { addEnvDe, bindCodingTasks, getSubsystem, getUnit, listCodingJobs, listCodingTasks, listEnvDes, updateUnit } from '../api'
-import type { BindingView, CodingJobView, EnvDeView, UnitView } from '../api/types'
+import { addEnvDe, bindCodingTasks, getSubsystem, getUnit, listAudit, listCodingJobs, listCodingTasks, listEnvDes, updateUnit } from '../api'
+import type { AuditRow, BindingView, CodingJobView, EnvDeView, UnitView } from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
@@ -11,6 +11,7 @@ import EmptyState from '../components/EmptyState.vue'
 import KeyValue from '../components/KeyValue.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { formatDateTime } from '../utils/format'
+import { shortTraceId } from '../utils/audit'
 
 const route = useRoute()
 const id = Number(route.params.id)
@@ -198,9 +199,50 @@ async function load() {
   }
 }
 
+// ---- audit log (P4-C) ------------------------------------------------------
+// The API's `unitId` filter is the convenience seam (audit design §4): it returns every row whose
+// object belongs to this unit, so a release, a gate decision and a unit edit all land here.
+const auditRows = ref<AuditRow[]>([])
+const auditTotal = ref(0)
+const auditPageNo = ref(1)
+const auditPageSize = ref(10)
+const auditLoading = ref(false)
+const auditError = ref<string | null>(null)
+
+async function loadAudit() {
+  auditLoading.value = true
+  auditError.value = null
+  try {
+    const page = await listAudit({
+      unitId: id,
+      page: auditPageNo.value,
+      size: auditPageSize.value
+    })
+    auditRows.value = page.records
+    auditTotal.value = page.total
+  } catch (e) {
+    auditError.value = e instanceof ApiError ? e.message : '加载操作日志失败'
+    auditRows.value = []
+    auditTotal.value = 0
+  } finally {
+    auditLoading.value = false
+  }
+}
+
+function onAuditSizeChange() {
+  auditPageNo.value = 1
+  loadAudit()
+}
+
+function reloadAll() {
+  load()
+  loadAudit()
+}
+
 onMounted(() => {
   load()
   loadJobs()
+  loadAudit()
 })
 
 async function saveBindings() {
@@ -260,7 +302,7 @@ async function submitDe() {
       :description="unit ? `${unit.type} · ${subsystemName ?? '系统 #' + unit.subsystemId} · owner ${unit.ownerId}` : ''"
     >
       <el-button type="primary" @click="openEdit">编辑</el-button>
-      <el-button @click="load">刷新</el-button>
+      <el-button @click="reloadAll">刷新</el-button>
     </PageHeader>
 
     <el-alert v-if="error" type="error" :closable="false" show-icon :title="error" style="margin-bottom: 16px" />
@@ -439,6 +481,72 @@ async function submitDe() {
         </DataSection>
       </div>
     </div>
+
+    <DataSection class="unit-audit" title="操作日志" :subtitle="`${auditTotal} 条`" flush>
+      <template #actions>
+        <span class="weak small">仅本单元</span>
+        <el-button text :loading="auditLoading" @click="loadAudit">刷新</el-button>
+      </template>
+
+      <div v-if="auditError" class="audit-alert">
+        <el-alert type="error" :closable="false" show-icon :title="auditError" />
+      </div>
+
+      <el-table v-else-if="auditRows.length" :data="auditRows" row-key="id" style="width: 100%">
+        <el-table-column label="时间" width="150">
+          <template #default="{ row }">
+            <span class="mono weak">{{ formatDateTime(row.createdAt) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="actor" label="操作人" width="100" />
+        <el-table-column label="动作" width="140">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain" type="info" :title="row.action">
+              {{ row.actionLabel }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="摘要" min-width="260">
+          <template #default="{ row }"><span class="summary-cell">{{ row.summary }}</span></template>
+        </el-table-column>
+        <el-table-column label="原因" min-width="160">
+          <template #default="{ row }">
+            <span v-if="row.reason">{{ row.reason }}</span>
+            <span v-else class="weak">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="traceId" width="110">
+          <template #default="{ row }">
+            <span
+              v-if="row.traceId"
+              class="mono weak trace-id"
+              :title="row.traceId"
+            >{{ shortTraceId(row.traceId) }}</span>
+            <span v-else class="weak">—</span>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <EmptyState
+        v-else-if="!auditLoading"
+        title="尚无操作日志"
+        hint="发布、门禁、封板、回滚与本单元的配置变更都会记录在这里。"
+      />
+      <div v-else class="loading-block"><el-skeleton :rows="3" animated /></div>
+
+      <div v-if="auditTotal > 0" class="pager">
+        <el-pagination
+          v-model:current-page="auditPageNo"
+          v-model:page-size="auditPageSize"
+          :total="auditTotal"
+          :page-sizes="[10, 20, 50]"
+          layout="total, sizes, prev, pager, next"
+          background
+          @current-change="loadAudit"
+          @size-change="onAuditSizeChange"
+        />
+      </div>
+    </DataSection>
 
     <p class="weak small footnote">
       CODING 连接在「设置 → CODING 对接」维护；任务候选来自所属系统的 CODING 项目，未填时用连接的默认项目。
@@ -637,6 +745,29 @@ async function submitDe() {
   max-height: 62vh;
   overflow-y: auto;
   padding-right: 6px;
+}
+
+/* 操作日志: a full-width table under the two-column overview, matching the records page. */
+.unit-audit {
+  margin-top: 16px;
+}
+.audit-alert {
+  padding: 14px 18px;
+}
+.summary-cell {
+  line-height: 1.5;
+}
+.trace-id {
+  cursor: help;
+}
+.loading-block {
+  padding: 24px;
+}
+.pager {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
 }
 
 @media (max-width: 960px) {
