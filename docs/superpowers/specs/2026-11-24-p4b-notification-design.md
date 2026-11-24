@@ -207,3 +207,26 @@ createdAt, sentAt, failureReason`。`eventLabel` 由服务端给中文名，web 
   准入面板提示，不再单独通知。
 - **webhook 单租户**：一个平台一个机器人地址；按系统分机器人是二期。
 - **通知保留期**：本阶段不清理，P7 与审计一起做保留策略。
+
+## 10. 实现说明（与草案的差异，代码为准）
+
+1. **通知写入时机**仍是业务事务内 `REQUIRES_NEW`（§9 已接受）；`notify` 用显式
+   `TransactionTemplate(PROPAGATION_REQUIRES_NEW)`，以便把「提交失败」也包进吞异常的 `try`
+   （方法级 `@Transactional` 的提交发生在方法体返回之后，方法内 catch 不到）。
+2. **封板解除/到期的影响面**按通知时刻范围内在途单计算（§4.3 原写「创建时影响面」，但创建时
+   影响面没有落库字段；§9「封板瞬时影响面」是实际口径）。
+3. **`APPROVAL_PENDING` 拆两处**：链首次生成/补签在 `ApprovalService`（ref=`snapshotId:stepNo`），
+   审批通过后轮到下一步在 `ReleaseApprovalService` 补发；同一事件不会给两级同时发。
+4. **`GATE_INVALIDATED` 只在** `SUBMITTED`/`PENDING_APPROVAL`/`READY` 且状态机实际 APPLIED 时发；
+   `GATE_PENDING`（提交前）不发。`CHECK_FAILED` 同理只在 APPLIED 后发。
+5. **对象类型由事件 key 派生**，触发点不传 `objectType`；`WAIVER` 的 `objectLabel` 存发布单号
+   （前端要跳 `/releases/{publishNo}#gate`），`UNIT` 事件允许标签为空。
+6. **webhook 校验**：非空 + ≤512 + `https://`；内网 `http://` 仅在
+   `release.notification.allow-insecure-http=true` 时允许（测试 profile 打开以便 MockWebServer）。
+   开关打开但地址为空 → 40000。
+7. **派发时的通道关闭**：已存在的 `PENDING` 企微行若遇到通道关闭/地址清空，派发任务将其标
+   `FAILED`（原因写明未启用），不无限重试。
+8. **接收人不做 `user_scope` 过滤**：按平台角色解析（与审批「角色可签」一致），本阶段接受。
+9. **`UnitLeaseRenewJob`** 保留旧的两参/三参构造器（不注入通知，既有租约测试不变）；生产装配用
+   四参构造器。
+10. **企微发送为 at-least-once**：单实例按 id 取行；多实例可能重复发送一次，不追求 exactly-once。
