@@ -318,3 +318,97 @@
 - 演示库（`scripts/demo-rollback.sql`，幂等、带 demo 标记）里单元 2 有两个完整前向发布：当前
   `PO-DEMO-RB-NEW`、目标 `PO-DEMO-RB-OLD`，抽屉因此至少有 1 行可选；
 - 两套主题截图已入库，`-dark` 为同名文件。
+
+## 13. P4-B · 顶栏铃铛、通知中心与消息通知设置（2026-11-24）
+
+通知从「只有后端事件」变成可读可配：顶栏铃铛（未读徽标 + 最近 5 条下拉）、`/notifications`
+通知中心、设置页「消息通知」块。截图：`shots/notifications-light.png` / `-dark.png`、
+`shots/settings-notify-light.png` / `-dark.png`。
+
+![通知中心（浅色）](shots/notifications-light.png)
+![消息通知设置](shots/settings-notify-light.png)
+
+**顶栏铃铛（`App.vue`）**
+
+- 铃铛常驻顶栏（`.notify-bell`），徽标 `.notify-badge` 只在 `unread > 0` 时出现；显示 `99+`
+  封顶（`unreadBadge`），`0` 不显示。`aria-label` 带未读条数，开合状态在 `aria-expanded`。
+- 未读数来源 `GET /api/v1/notifications/unread-count`；进入页面（`onMounted`）、每次路由切换
+  （`route.fullPath` watch）、以及通知中心标记已读后的共享 revision（`notificationRevision`）
+  都会立即刷新；另有 30s 轮询，组件卸载时清掉定时器。轮询失败静默（下一轮再试），不打扰业务页面。
+- 点铃铛开下拉：每次打开重新取最近 5 条（`GET /notifications?page=1&size=5`），面板头显示
+  「消息通知」+「N 条未读 / 全部已读」，行内是事件中文名（服务端 `eventLabel`）+ 时间；未读行
+  加粗并有强调色圆点；空态是「暂无通知」。加载中 `el-skeleton`，失败 `el-alert`，不白屏。
+- 点外部关闭（`document` 监听，面板内点击不关闭）；「查看全部」跳 `/notifications`。
+- 点单条：未读则先 `POST /notifications/{id}/read`，徽标本地减一（`Math.max(0, unread-1)`），
+  再按 `objectType` 跳转；标记失败不拦跳转（阅读优先，通知中心仍显示未读可重试）。跳转规则
+  收敛在 `web/src/utils/notification.ts#notificationTarget`：
+  - `ORDER` → `/releases/{objectId}`；`ITEM` → `/releases/{objectLabel || objectId}`（当前没有
+    ITEM 行，先兜底）；`UNIT` → `/units/{objectId}`；`FREEZE` → `/control`；
+  - `WAIVER` → `/releases/{objectLabel}#gate`；`objectLabel` 正常是发布单号，服务端在没有发布单时
+    退回 CRID（此时链接可能指向不存在的发布单）；未知类型返回 `null`，停在原页不误跳。
+
+**通知中心（`NotificationsView.vue`，路由 `/notifications`）**
+
+- 页头 `PageHeader`（标题「消息通知」，描述列出构建/部署/审批/封板/锁超时来源），动作「刷新」与
+  「全部已读」（无未读时禁用）。
+- 筛选「全部 / 未读」走服务端 `unreadOnly`，不是在当前页里过滤；切换筛选或每页条数回到第 1 页。
+  副标题「N 条 · M 条未读」，`M` 是接口给的本人未读总数。
+- 表格列：状态（未读/已读 + 圆点）、标题（标题 + 一行正文摘要）、事件（`eventLabel` chip）、对象
+  （`objectLabel || objectId`）、时间、操作（「标记已读」只在未读行出现、「查看」在不可跳时禁用）。
+  未读行用 `--accent-weak` 低对比底色，不引入新色板。
+- 分页 `page`/`size` 直传，默认 20，可选 10/20/50/100；`total` 来自服务端。
+- 单条「标记已读」成功后本地减一，并 bump 共享 revision 让铃铛立即刷新；在「未读」筛选下该行
+  随即从列表移除（重新取当前页）。
+  「全部已读」先 `ElMessageBox.confirm`（正文带未读条数），成功后 `ElMessage.success('已标记 N 条为已读')`
+  并刷新列表与徽标。
+- 点击行 = 先标已读再按同一跳转规则导航（与铃铛共用 `notificationTarget`）。
+- 空态：全部→「还没有通知」，未读→「没有未读通知」，提示「构建、部署、审批、封板与锁超时事件
+  会出现在这里」；接口失败给独立 `el-alert`，不清空已选筛选（保留可重试状态）。
+
+**设置页「消息通知」块（`SettingsView.vue`）**
+
+- 位置在「CODING 对接」之后，`DataSection` 标题「消息通知」；状态 chip：读取中 / 只读 / 默认关闭 /
+  已开启 / 已关闭。副标题带最近保存人与时间。
+- 有 `setting:manage` 时：企微开关（开启/关闭，说明「关闭时只发站内通知，不创建企微发送任务」）、
+  机器人 Webhook 输入框、保存按钮。保存后回显服务端返回的 `updatedBy`/`updatedAt`；开关打开而
+  地址为空时前端先给警告，不白跑一次请求。
+- 无权限时整块只读：不调用 `GET /settings/notifications`（避免必然的 40009 console error），只显示
+  「需要平台管理员权限」与原因；页面自己读 `GET /me` 判断权限，不蹭 CODING 块的 `canManage`
+  （两者加载时序不同，会闪只读态）。
+- 敏感提示：机器人地址内嵌密钥，接口只对 `setting:manage` 原样回显；「请勿转发或截图外传」写在
+  输入框下方；同时说明 `https://` 要求与「发送失败记录在该条通知上，不阻塞发版流程」。
+
+**导航**
+
+- `/notifications` 的入口是铃铛下拉的「查看全部」与直接 URL；侧栏未新增导航项（通知是顶栏常驻
+  入口，避免与「发布记录」等并列挤占一级导航）。
+
+**验收（P4-B）**
+
+- `cd web; npm run build` 通过（`vue-tsc -b` + vite，无 TS 报错）。
+- `scripts/verify-p4b-ui.mjs` 在明/暗两套下断言：徽标数 >0、下拉 5 行、`/notifications` 行数 ≥1、
+  未读筛选生效、单条标记已读后徽标减一、设置块可编辑、只读账号显示只读态；控制台错误 0：
+
+  ```
+  notifications-light: badge=7 dropdown=5 rows=10 unreadRows=7 markRead=7->6 settings=ok readonly=ok total="10 条 · 7 条未读" errors=0
+  notifications-dark: badge=6 dropdown=5 rows=10 unreadRows=6 markRead=6->5 settings=ok readonly=ok total="10 条 · 6 条未读" errors=0
+  OK all notification assertions passed
+  ```
+
+  探针每套主题会消耗一条未读，重跑前先重新应用 `scripts/demo-notify.sql`（幂等，插入 10 条
+  `INAPP` / `recipient='dev'`、7 条未读，带 `DEMO-NTF-` 标记）。
+- 补充人工路径（不属提交的探针）：豁免行 → `/releases/PO-20261121-5976BF#gate` 且徽标 5→4；
+  发布单行 → `/releases/PO-20261121-5976BF`；「标记已读」留在 `/notifications` 且徽标 5→4。
+- 截图由探针生成并入库；实现者无法读图，正确性以 DOM 文案/选择器/计算样式与包围盒断言为准。
+- 下拉面板 360×421 px（1440×900 视口），右缘与铃铛对齐，无横向溢出。
+
+**未做（P4-B 明确不做）**
+
+- 侧栏没有「消息通知」一级导航；`/notifications` 只能从铃铛或 URL 进入。
+- 通知中心只有「全部 / 未读」：没有关键字、事件类型、对象类型筛选，没有单条详情页，没有删除/归档。
+- `FREEZE` 行一律跳 `/control`，不带封板 id 或定位；`WAIVER` 行在没有发布单号时（`objectLabel`
+  退回 CRID）会跳到不存在的发布单路径；`ITEM` 行当前不产生。
+- 没有浏览器桌面通知/声音/标题闪烁；没有按用户订阅偏好、@人、模板管理；没有邮件/飞书（只留后端接口）。
+- 企微发送失败行不在通知中心展示（接口只返回站内行），页面上看不到失败原因，要查 `notification` 表/日志。
+- 未读数靠 30s 轮询 + 路由切换 + 同页 revision，不是推送；多实例后端的徽标最多滞后一个轮询周期。
+- 页脚阶段标记仍是 `P4 · 回滚与记录`（本轮未改 `App.vue` 的页脚文案）。
