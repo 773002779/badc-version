@@ -41,7 +41,8 @@ const LABELS: Record<string, string> = {
   BUILD: '构建',
   TEST_DEPLOY: '测试部署',
   VERIFY: '验证确认',
-  PROD_DEPLOY: '生产部署'
+  PROD_DEPLOY: '生产部署',
+  DAILY_DEPLOY: '日常部署'
 }
 
 export type StatusDomain = 'item' | 'node' | 'task'

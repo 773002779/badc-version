@@ -561,3 +561,50 @@ export interface AuditFilter {
 
 /** One page of audit rows; `pageNo`/`pageSize` echo the server's own paging (R44). */
 export interface AuditPage extends PageResult<AuditRow> {}
+
+// --------------------------------------------------------------- daily (P5-A)
+
+/**
+ * One row of the 日常发布 records of a 变更项 (design §6). `branch` is the item's read-only
+ * source branch; `commitSha` / `imageDigest` stay null until the daily build reports them.
+ */
+export interface DailyRecordView {
+  pipelineNo: string
+  status: string
+  requestedBy?: string | null
+  branch?: string | null
+  commitSha?: string | null
+  createdAt?: string | null
+  startAt?: string | null
+  endAt?: string | null
+  imageDigest?: string | null
+}
+
+/** The daily records list: `page`/`size` are this endpoint's own paging names. */
+export interface DailyPage extends PageResult<DailyRecordView> {}
+
+/** One task of a daily node; `externalUrl` is the engine log link (null until triggered). */
+export interface DailyTaskView {
+  taskType: string
+  status: string
+  externalUrl?: string | null
+  summary?: string | null
+}
+
+/** One node of the daily pipeline (`BUILD` seq 0, `DAILY_DEPLOY` seq 1). */
+export interface DailyNodeView {
+  nodeType: string
+  status: string
+  tasks: DailyTaskView[]
+}
+
+/** The full daily instance: the row fields plus its nodes and tasks. */
+export interface DailyDetailView extends DailyRecordView {
+  nodes: DailyNodeView[]
+}
+
+/** The answer of `POST /api/v1/items/{itemId}/daily`. */
+export interface DailyStartResult {
+  pipelineNo: string
+  instanceId: number
+}

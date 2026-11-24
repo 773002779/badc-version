@@ -7,6 +7,9 @@ import type {
   CodingConnView,
   CodingJobView,
   CodingProbeView,
+  DailyDetailView,
+  DailyPage,
+  DailyStartResult,
   EnvDeView,
   ExecuteResult,
   FreezeView,
@@ -168,6 +171,23 @@ export const createItem = (body: {
 
 export const publishItem = (itemId: number) =>
   api<{ publishNo: string; pipelineNo: string }>(`/api/v1/items/${itemId}/publish`, { method: 'POST' })
+
+// -------------------------------------------------------------- daily (P5-A)
+
+/**
+ * Starts one daily release of the 变更项. It creates no 发布单, takes no unit lock and never
+ * changes the item status, so the same item may be started several times in parallel.
+ */
+export const startDaily = (itemId: number) =>
+  api<DailyStartResult>(`/api/v1/items/${itemId}/daily`, { method: 'POST' })
+
+/** One page of the item's daily records, newest first (`page`/`size` are the server's names). */
+export const listDaily = (itemId: number, page = 1, size = 10) =>
+  api<DailyPage>(`/api/v1/items/${itemId}/daily${qs({ page, size })}`)
+
+/** One daily instance with its nodes, tasks and engine log links. */
+export const getDaily = (pipelineNo: string) =>
+  api<DailyDetailView>(`/api/v1/daily/${pipelineNo}`)
 
 // ------------------------------------------------------------------ releases
 export const getRelease = (publishNo: string) => api<ReleaseDetail>(`/api/v1/releases/${publishNo}`)
