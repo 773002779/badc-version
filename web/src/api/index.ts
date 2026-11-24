@@ -14,6 +14,9 @@ import type {
   PageResult,
   ReleaseDetail,
   ReleaseRecord,
+  ReleaseRecordRow,
+  RollbackResult,
+  RollbackVersions,
   SubsystemView,
   TaskDetailView,
   TaskView,
@@ -164,6 +167,25 @@ export const publishItem = (itemId: number) =>
 
 // ------------------------------------------------------------------ releases
 export const getRelease = (publishNo: string) => api<ReleaseDetail>(`/api/v1/releases/${publishNo}`)
+
+/**
+ * The global 发布记录 list; every filter except the page is optional (server-side data scope).
+ * This endpoint alone names its page parameters `page`/`size` (design §4); the older lists use
+ * `pageNo`/`pageSize`, so the mapping stays in this one function.
+ */
+export const listReleases = (
+  params: {
+    page?: number
+    size?: number
+    keyword?: string
+    status?: string
+    systemId?: number
+    unitId?: number
+  } = {}
+) =>
+  api<PageResult<ReleaseRecordRow>>(
+    `/api/v1/releases${qs({ page: 1, size: 20, ...params })}`
+  )
 
 export const getReleaseRecords = (publishNo: string) =>
   api<ReleaseRecord[]>(`/api/v1/releases/${publishNo}/records`)
@@ -325,3 +347,13 @@ export const saveWindow = (body: {
 
 export const checkWindow = (body: { subsystemId?: number; at?: string | null }) =>
   api<WindowCheckView>('/api/v1/windows/check', { method: 'POST', body: JSON.stringify(body) })
+
+// ------------------------------------------------- rollback execute (P4-A)
+
+/** The drawer data: current online version, up to ten targets, and the must-read notes. */
+export const getRollbackVersions = (unitId: number) =>
+  api<RollbackVersions>(`/api/v1/units/${unitId}/rollback-versions`)
+
+/** Executes a production rollback immediately; a freeze only adds a `freezeWarning`. */
+export const executeRollback = (body: { unitId: number; targetDigest: string; reason: string }) =>
+  api<RollbackResult>('/api/v1/rollbacks', { method: 'POST', body: JSON.stringify(body) })

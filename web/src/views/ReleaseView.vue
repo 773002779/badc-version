@@ -2,8 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getRelease, getReleaseRecords, resumeRelease } from '../api'
-import type { ReleaseDetail, ReleaseRecord } from '../api/types'
+import { getMe, getRelease, getReleaseRecords, resumeRelease } from '../api'
+import type { MeView, ReleaseDetail, ReleaseRecord } from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
@@ -13,6 +13,7 @@ import StepBar from '../components/StepBar.vue'
 import KeyValue from '../components/KeyValue.vue'
 import VerifyPanel from '../components/VerifyPanel.vue'
 import AdmissionPanel from '../components/AdmissionPanel.vue'
+import RollbackDialog from '../components/RollbackDialog.vue'
 import { formatDateTime, formatDuration, shortSha, statusLabel } from '../utils/format'
 
 const route = useRoute()
@@ -23,7 +24,25 @@ const records = ref<ReleaseRecord[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const tab = ref<'content' | 'records'>('content')
+const me = ref<MeView | null>(null)
+const meLoaded = ref(false)
+const rollbackOpen = ref(false)
 let timer: number | undefined
+
+/**
+ * The rollback entry is a header door, always visible: a caller without `rollback:execute` (or a
+ * release without a unit) sees why it cannot open instead of a missing button.
+ */
+const rollbackBlock = computed(() => {
+  if (!meLoaded.value) return '正在读取权限'
+  if (!me.value) return '无法读取当前身份（GET /me）'
+  if (!me.value.perms.includes('rollback:execute')) {
+    return '只有运维可以执行生产回滚（rollback:execute）'
+  }
+  if (!detail.value) return '发布单尚未加载'
+  if (!detail.value.unitId) return '该发布单没有关联部署单元，暂不可回滚'
+  return ''
+})
 
 const busy = computed(() => {
   const s = detail.value?.status
@@ -82,6 +101,16 @@ function schedule() {
 onMounted(async () => {
   await load()
   schedule()
+  getMe()
+    .then((view) => {
+      me.value = view
+    })
+    .catch(() => {
+      me.value = null
+    })
+    .finally(() => {
+      meLoaded.value = true
+    })
 })
 onBeforeUnmount(() => timer && window.clearInterval(timer))
 </script>
@@ -97,6 +126,13 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
         恢复执行
       </el-button>
       <el-button :loading="loading" @click="load()">刷新</el-button>
+      <el-button
+        :disabled="!!rollbackBlock"
+        :title="rollbackBlock || '按部署单元回滚生产镜像'"
+        @click="rollbackOpen = true"
+      >
+        进入生产回滚
+      </el-button>
     </PageHeader>
 
     <el-alert v-if="error" type="error" :closable="false" show-icon :title="error" style="margin-bottom: 16px" />
@@ -237,6 +273,13 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
         <code class="mono">PROD_DEPLOY / PAUSED</code>。
       </p>
     </div>
+
+    <RollbackDialog
+      v-model="rollbackOpen"
+      :unit-id="detail?.unitId ?? null"
+      :publish-no="publishNo"
+      @changed="load(true)"
+    />
   </div>
 </template>
 

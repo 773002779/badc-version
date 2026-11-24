@@ -425,3 +425,64 @@ export interface WindowCheckView {
   scope?: string | null
   inherited: boolean
 }
+
+// ------------------------------------------------ rollback + records (P4-A)
+
+/** One environment family the image runs in; both the machine value and its Chinese label. */
+export interface RollbackEnvironment {
+  kind: string
+  label: string
+}
+
+/**
+ * One deployable version of the rollback drawer: a successfully deployed image digest. The first
+ * row of the list is the current online version; the rest are rollback targets.
+ */
+export interface RollbackVersion {
+  digest: string
+  finishedAt?: string | null
+  publishNo: string
+  executedBy?: string | null
+  batchCount: number
+  environments: RollbackEnvironment[]
+}
+
+/** The rollback drawer data: current version, up to ten history targets, and the must-read notes. */
+export interface RollbackVersions {
+  current: RollbackVersion
+  history: RollbackVersion[]
+  warnings: string[]
+}
+
+/** The answer of `POST /api/v1/rollbacks`; `freezeWarning` is null outside a freeze. */
+export interface RollbackResult {
+  rollbackId: number
+  pipelineNo: string
+  unitId: number
+  targetDigest: string
+  freezeWarning?: string | null
+}
+
+/**
+ * One row of the global 发布记录 page. One row per release order; the newest pipeline instance is
+ * joined in. `pipelineNo` is null for an order that was never executed.
+ */
+export interface ReleaseRecordRow {
+  publishNo: string
+  itemId: number
+  crid: string
+  version: string
+  subsystemId: number
+  subsystemName?: string | null
+  unitId: number
+  unitName?: string | null
+  orderStatus: string
+  orderStatusLabel: string
+  itemStatus: string
+  itemStatusLabel: string
+  plannedReleaseTime?: string | null
+  createdAt?: string | null
+  executedBy?: string | null
+  pipelineNo?: string | null
+  pipelineStatus?: string | null
+}
