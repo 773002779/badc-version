@@ -2,8 +2,11 @@ package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
@@ -36,6 +39,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -96,6 +100,7 @@ public class RerunAppService {
     private final UnitLockService unitLockService;
     private final PipelineOrchestrator orchestrator;
     private final GateCheckService gateCheckService;
+    private final AuditService audit;
     /** Mirrors publish: tests turn the immediate start off and drive the nodes themselves. */
     private final boolean autoStart;
     private final TransactionTemplate transactionTemplate;
@@ -109,6 +114,7 @@ public class RerunAppService {
                            UnitLockService unitLockService,
                            PipelineOrchestrator orchestrator,
                            GateCheckService gateCheckService,
+                           AuditService audit,
                            @Value("${release.pipeline.auto-start:true}") boolean autoStart,
                            PlatformTransactionManager transactionManager) {
         this.itemMapper = itemMapper;
@@ -120,6 +126,7 @@ public class RerunAppService {
         this.unitLockService = unitLockService;
         this.orchestrator = orchestrator;
         this.gateCheckService = gateCheckService;
+        this.audit = audit;
         this.autoStart = autoStart;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -191,7 +198,23 @@ public class RerunAppService {
                 log.error("rerun pipeline did not start; reconcile enters its node later:"
                     + " instanceId={}", startedResult.instanceId(), ex);
             }
-            return startedResult.result();
+            RerunResult result = startedResult.result();
+            Map<String, Object> after = new LinkedHashMap<>();
+            after.put("itemStatus", full ? ItemStatus.BUILDING.name() : ItemStatus.TESTING.name());
+            after.put("triggerType", full ? TriggerType.RERUN_FULL.name()
+                : TriggerType.RERUN_FROM_NODE.name());
+            after.put("pipelineNo", result.pipelineNo());
+            after.put("full", full);
+            after.put("revokedTestPass", revoke);
+            after.put("degraded", plan.degraded());
+            audit.record(AuditCommand.of(AuditAction.RERUN, order.publishNo(), order.publishNo(),
+                    "重新发布：发布单 " + order.publishNo() + "（" + (full ? "全量重建" : "从节点 "
+                        + fromNode.name() + " 恢复") + "）")
+                .before(Map.of("itemStatus", item.status().name()))
+                .after(after)
+                .scopeUnitId(unitId)
+                .build());
+            return result;
         } catch (PublishAppService.LockLostException ex) {
             // The lock row is no longer ours (bindInstance reported it lost). Mirroring the
             // publish path, releasing here could delete a new holder's row/key, so the release

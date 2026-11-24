@@ -5,8 +5,12 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.domain.audit.AuditAction;
+import com.sf.release.domain.audit.AuditObjectType;
 import com.sf.release.domain.resource.BranchMode;
 import com.sf.release.domain.resource.CodingTaskBinding;
 import com.sf.release.domain.resource.DeployUnit;
@@ -32,6 +36,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -88,19 +93,22 @@ public class UnitAppService {
     private final SubsystemMapper subsystemMapper;
     private final AppUserRepository appUserRepository;
     private final ObjectMapper objectMapper;
+    private final AuditService audit;
 
     public UnitAppService(DeployUnitMapper unitMapper,
                           EnvDeMapper envDeMapper,
                           CodingTaskBindingMapper bindingMapper,
                           SubsystemMapper subsystemMapper,
                           AppUserRepository appUserRepository,
-                          ObjectMapper objectMapper) {
+                          ObjectMapper objectMapper,
+                          AuditService audit) {
         this.unitMapper = unitMapper;
         this.envDeMapper = envDeMapper;
         this.bindingMapper = bindingMapper;
         this.subsystemMapper = subsystemMapper;
         this.appUserRepository = appUserRepository;
         this.objectMapper = objectMapper;
+        this.audit = audit;
     }
 
     /** Creates a unit under an existing subsystem and returns its id. */
@@ -152,6 +160,19 @@ public class UnitAppService {
             // Concurrent create won the unique-key race after our pre-check.
             throw duplicateName(name);
         }
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("name", name);
+        after.put("subsystemId", cmd.subsystemId());
+        after.put("type", type.name());
+        after.put("ownerId", ownerId);
+        after.put("status", UnitStatus.ACTIVE.name());
+        audit.record(AuditCommand.of(AuditAction.RESOURCE_UPDATE, String.valueOf(po.getId()), name,
+                "新增部署单元：" + name)
+            .objectType(AuditObjectType.UNIT)
+            .after(after)
+            .scopeUnitId(po.getId())
+            .scopeSubsystemId(cmd.subsystemId())
+            .build());
         return po.getId();
     }
 
@@ -215,6 +236,24 @@ public class UnitAppService {
         if (rows == 0) {
             throw notFound(id);
         }
+        Map<String, Object> before = new LinkedHashMap<>();
+        before.put("name", existing.name());
+        before.put("type", existing.type().name());
+        before.put("ownerId", existing.ownerId());
+        before.put("status", existing.status().name());
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("name", name);
+        after.put("type", type.name());
+        after.put("ownerId", ownerId);
+        after.put("status", status.name());
+        audit.record(AuditCommand.of(AuditAction.RESOURCE_UPDATE, String.valueOf(id), name,
+                "修改部署单元：" + name)
+            .objectType(AuditObjectType.UNIT)
+            .before(before)
+            .after(after)
+            .scopeUnitId(id)
+            .scopeSubsystemId(existing.subsystemId())
+            .build());
     }
 
     public UnitView get(long id) {

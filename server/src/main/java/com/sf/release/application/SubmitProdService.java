@@ -1,11 +1,14 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
 import com.sf.release.domain.admission.AdmissionDecision;
 import com.sf.release.domain.approval.ApprovalRole;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.ItemStatus;
 import com.sf.release.infra.repo.AdmissionSnapshotMapper;
@@ -70,6 +73,7 @@ public class SubmitProdService {
     private final ApprovalService approvalService;
     private final ItemTransitions transitions;
     private final ReviewService reviewService;
+    private final AuditService audit;
 
     public SubmitProdService(ReleaseOrderMapper orderMapper,
                              ReleaseItemMapper itemMapper,
@@ -77,7 +81,8 @@ public class SubmitProdService {
                              AdmissionService admissionService,
                              ApprovalService approvalService,
                              ItemTransitions transitions,
-                             ReviewService reviewService) {
+                             ReviewService reviewService,
+                             AuditService audit) {
         this.orderMapper = orderMapper;
         this.itemMapper = itemMapper;
         this.snapshotMapper = snapshotMapper;
@@ -85,6 +90,7 @@ public class SubmitProdService {
         this.approvalService = approvalService;
         this.transitions = transitions;
         this.reviewService = reviewService;
+        this.audit = audit;
     }
 
     /**
@@ -121,6 +127,16 @@ public class SubmitProdService {
                 + " by={}", no, order.getId(), item.getId(), snapshotId, plan.windowResult(),
             plan.frozen(), plan.decision().requiredRoles(), finalStatus, plan.oaTicketNo(),
             plan.plannedAt(), user.userId());
+        audit.record(AuditCommand.of(AuditAction.SUBMIT_PROD, no, no,
+                "提交生产：发布单 " + no + "（变更项 " + item.getCrid() + "）")
+            .before(Map.of("itemStatus", status.name()))
+            .after(Map.of(
+                "itemStatus", finalStatus,
+                "oaTicketNo", plan.oaTicketNo(),
+                "plannedReleaseTime", plan.plannedAt().toString(),
+                "snapshotId", snapshotId))
+            .scopeUnitId(unitIdOf(item))
+            .build());
         return admissionView(order, item, finalStatus, finalStatus, snapshotId, plan.decision());
     }
 

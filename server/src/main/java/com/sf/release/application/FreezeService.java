@@ -2,6 +2,8 @@ package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.application.notification.NotificationAudiences;
 import com.sf.release.application.notification.NotificationCommand;
 import com.sf.release.application.notification.NotificationService;
@@ -11,6 +13,7 @@ import com.sf.release.common.security.Permissions;
 import com.sf.release.domain.approval.ApprovalChain;
 import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.approval.ApprovalStep;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.domain.freeze.FreezeEvent;
 import com.sf.release.domain.freeze.FreezeScope;
 import com.sf.release.domain.freeze.FreezeStatus;
@@ -40,6 +43,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -138,6 +142,7 @@ public class FreezeService {
     private final ApprovalService approvalService;
     private final ItemTransitions transitions;
     private final NotificationService notifications;
+    private final AuditService audit;
 
     public FreezeService(FreezeMapper freezeMapper,
                          SubsystemMapper subsystemMapper,
@@ -145,7 +150,8 @@ public class FreezeService {
                          AdmissionSnapshotMapper snapshotMapper,
                          ApprovalService approvalService,
                          ItemTransitions transitions,
-                         NotificationService notifications) {
+                         NotificationService notifications,
+                         AuditService audit) {
         this.freezeMapper = freezeMapper;
         this.subsystemMapper = subsystemMapper;
         this.orderMapper = orderMapper;
@@ -153,6 +159,7 @@ public class FreezeService {
         this.approvalService = approvalService;
         this.transitions = transitions;
         this.notifications = notifications;
+        this.audit = audit;
     }
 
     /**
@@ -198,6 +205,19 @@ public class FreezeService {
         int pulled = applyInFlight(stored, now);
         log.info("freeze declared: id={}, scope={}, subsystemId={}, by={}, startAt={}, endAt={},"
             + " pulledOrders={}", stored.id(), parsedScope, target, who, start, endAt, pulled);
+        Map<String, Object> declared = new LinkedHashMap<>();
+        declared.put("scope", parsedScope.name());
+        declared.put("subsystemId", target);
+        declared.put("status", stored.status().name());
+        declared.put("startAt", start.toString());
+        declared.put("endAt", endAt.toString());
+        declared.put("reason", why);
+        audit.record(AuditCommand.of(AuditAction.FREEZE_CREATE, String.valueOf(stored.id()),
+                freezeLabel(stored), "创建封板：" + freezeLabel(stored))
+            .after(declared)
+            .reason(why)
+            .scopeSubsystemId(target)
+            .build());
         notifyFreeze(NotificationEventKey.FREEZE_APPLIED, stored, "封板已生效");
         return toView(stored, now);
     }
@@ -242,6 +262,17 @@ public class FreezeService {
         int ready = recomputeAffectedOrders(List.of(released), now);
         log.info("freeze released: id={}, by={}, reason={}, recomputedToReady={}", id, who, why,
             ready);
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("status", released.status().name());
+        after.put("releasedBy", who);
+        after.put("releasedAt", now.toString());
+        audit.record(AuditCommand.of(AuditAction.FREEZE_RELEASE, String.valueOf(released.id()),
+                freezeLabel(released), "解除封板：" + freezeLabel(released))
+            .before(Map.of("status", FreezeStatus.ACTIVE.name()))
+            .after(after)
+            .reason(why)
+            .scopeSubsystemId(released.subsystemId())
+            .build());
         notifyFreeze(NotificationEventKey.FREEZE_RELEASED, released, "封板已解除");
         return toView(released, now);
     }
@@ -341,6 +372,12 @@ public class FreezeService {
             closed.add(event);
             notifyFreeze(NotificationEventKey.FREEZE_RELEASED, event, "封板已到期");
             log.info("freeze expired: id={}, endAt={}", event.id(), event.endAt());
+            audit.record(AuditCommand.of(AuditAction.FREEZE_EXPIRE, String.valueOf(event.id()),
+                    freezeLabel(event), "封板到期：" + freezeLabel(event))
+                .before(Map.of("status", FreezeStatus.ACTIVE.name()))
+                .after(Map.of("status", event.status().name()))
+                .scopeSubsystemId(event.subsystemId())
+                .build());
         }
         if (closed.isEmpty()) {
             return 0;
@@ -718,6 +755,14 @@ public class FreezeService {
         }
         SubsystemPO po = subsystemMapper.selectById(subsystemId);
         return po == null || po.getName() == null ? "#" + subsystemId : po.getName();
+    }
+
+    /** The audit label of a freeze: a GLOBAL one, or the owning system's name. */
+    private String freezeLabel(FreezeEvent freeze) {
+        if (freeze.scope() == FreezeScope.GLOBAL || freeze.subsystemId() == null) {
+            return "全局封板";
+        }
+        return subsystemName(freeze.subsystemId()) + " 封板";
     }
 
     private static FreezeView toView(FreezeEvent event, Instant now) {

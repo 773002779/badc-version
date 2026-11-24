@@ -3,9 +3,12 @@ package com.sf.release.application;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.domain.pipeline.PipelineFactory;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
@@ -117,6 +120,7 @@ public class RollbackService {
     private final FreezeService freezeService;
     private final PipelineOrchestrator orchestrator;
     private final PublishAppService publishAppService;
+    private final AuditService audit;
     private final TransactionTemplate transactionTemplate;
 
     /**
@@ -137,6 +141,7 @@ public class RollbackService {
                            FreezeService freezeService,
                            PipelineOrchestrator orchestrator,
                            PublishAppService publishAppService,
+                           AuditService audit,
                            @Value("${release.pipeline.auto-start:true}") boolean autoStart,
                            PlatformTransactionManager transactionManager) {
         this.recordMapper = recordMapper;
@@ -149,6 +154,7 @@ public class RollbackService {
         this.freezeService = freezeService;
         this.orchestrator = orchestrator;
         this.publishAppService = publishAppService;
+        this.audit = audit;
         this.autoStart = autoStart;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -228,6 +234,23 @@ public class RollbackService {
             log.info("production rollback started: rollbackId={}, unitId={}, from={}, to={},"
                     + " by={}, freezeWarning={}", result.recordId(), id, current.getDigest(),
                 targetVersion.getDigest(), user.userId(), freezeWarning);
+            Map<String, Object> before = new LinkedHashMap<>();
+            before.put("digest", current.getDigest());
+            before.put("publishNo", current.getPublishNo());
+            Map<String, Object> after = new LinkedHashMap<>();
+            after.put("digest", targetVersion.getDigest());
+            after.put("publishNo", targetVersion.getPublishNo());
+            after.put("rollbackId", result.recordId());
+            after.put("pipelineNo", result.pipelineNo());
+            audit.record(AuditCommand.of(AuditAction.ROLLBACK_EXECUTE,
+                    String.valueOf(result.recordId()), targetVersion.getPublishNo(),
+                    "执行回滚：部署单元 " + id + " 从 " + current.getDigest() + " 到 "
+                        + targetVersion.getDigest())
+                .before(before)
+                .after(after)
+                .reason(why)
+                .scopeUnitId(id)
+                .build());
             return new ExecuteResult(result.recordId(), result.pipelineNo(), id,
                 targetVersion.getDigest(), freezeWarning);
         } catch (PublishAppService.LockLostException ex) {

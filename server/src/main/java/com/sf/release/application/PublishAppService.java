@@ -2,8 +2,11 @@ package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.domain.pipeline.NodeTask;
 import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineFactory;
@@ -120,6 +123,7 @@ public class PublishAppService {
     private final UnitLockService unitLockService;
     private final GitCommitProbe commitProbe;
     private final PipelineOrchestrator orchestrator;
+    private final AuditService audit;
     private final TransactionTemplate transactionTemplate;
 
     /**
@@ -139,6 +143,7 @@ public class PublishAppService {
                              UnitLockService unitLockService,
                              GitCommitProbe commitProbe,
                              PipelineOrchestrator orchestrator,
+                             AuditService audit,
                              @Value("${release.pipeline.auto-start:true}") boolean autoStart,
                              PlatformTransactionManager transactionManager) {
         this.itemMapper = itemMapper;
@@ -151,6 +156,7 @@ public class PublishAppService {
         this.unitLockService = unitLockService;
         this.commitProbe = commitProbe;
         this.orchestrator = orchestrator;
+        this.audit = audit;
         this.autoStart = autoStart;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -197,6 +203,15 @@ public class PublishAppService {
             if (autoStart) {
                 startPipeline(result.instanceId());
             }
+            audit.record(AuditCommand.of(AuditAction.PUBLISH, result.result().publishNo(),
+                    result.result().publishNo(),
+                    "发起发布：发布单 " + result.result().publishNo() + "（变更项 " + item.crid() + "）")
+                .before(Map.of("itemStatus", item.status().name()))
+                .after(Map.of("itemStatus", ItemStatus.BUILDING.name(),
+                    "publishNo", result.result().publishNo(),
+                    "pipelineNo", result.result().pipelineNo()))
+                .scopeUnitId(unitId)
+                .build());
             return result.result();
         } catch (LockLostException ex) {
             // The lock row is no longer ours (bindInstance reported it lost). Releasing here

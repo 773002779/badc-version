@@ -4,8 +4,12 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.sf.release.application.SubsystemAppService.PageResult;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.domain.audit.AuditAction;
+import com.sf.release.domain.audit.AuditObjectType;
 import com.sf.release.domain.task.ItemStatus;
 import com.sf.release.domain.task.MemberRole;
 import com.sf.release.domain.task.ReleaseTask;
@@ -33,6 +37,7 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -75,19 +80,22 @@ public class TaskAppService {
     private final SubsystemMapper subsystemMapper;
     private final AppUserRepository appUserRepository;
     private final TaskQueryMapper taskQueryMapper;
+    private final AuditService audit;
 
     public TaskAppService(ReleaseTaskMapper taskMapper,
                           ReleaseTaskMemberMapper memberMapper,
                           ReleaseItemMapper itemMapper,
                           SubsystemMapper subsystemMapper,
                           AppUserRepository appUserRepository,
-                          TaskQueryMapper taskQueryMapper) {
+                          TaskQueryMapper taskQueryMapper,
+                          AuditService audit) {
         this.taskMapper = taskMapper;
         this.memberMapper = memberMapper;
         this.itemMapper = itemMapper;
         this.subsystemMapper = subsystemMapper;
         this.appUserRepository = appUserRepository;
         this.taskQueryMapper = taskQueryMapper;
+        this.audit = audit;
     }
 
     /**
@@ -122,6 +130,19 @@ public class TaskAppService {
             // Concurrent create won the unique-key race after our pre-check.
             throw duplicateName(name);
         }
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("name", name);
+        after.put("subsystemId", cmd.subsystemId());
+        after.put("creator", creator);
+        after.put("planFinishDate", cmd.planFinishDate() == null ? null
+            : cmd.planFinishDate().toString());
+        after.put("status", TaskStatus.ACTIVE.name());
+        audit.record(AuditCommand.of(AuditAction.RESOURCE_UPDATE, String.valueOf(po.getId()), name,
+                "新增发布任务：" + name)
+            .objectType(AuditObjectType.TASK)
+            .after(after)
+            .scopeSubsystemId(cmd.subsystemId())
+            .build());
         return po.getId();
     }
 

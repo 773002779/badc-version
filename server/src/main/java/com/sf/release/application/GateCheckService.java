@@ -1,8 +1,11 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.domain.engine.CicdEngine;
 import com.sf.release.domain.engine.EngineException;
 import com.sf.release.domain.engine.GateCheckCmd;
@@ -36,6 +39,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -80,6 +84,7 @@ public class GateCheckService {
     private final ReleaseItemMapper itemMapper;
     private final ReleaseOrderMapper orderMapper;
     private final PipelineRepository repository;
+    private final AuditService audit;
     private final TransactionTemplate transactionTemplate;
 
     public GateCheckService(CicdEngine engine,
@@ -88,6 +93,7 @@ public class GateCheckService {
                             ReleaseItemMapper itemMapper,
                             ReleaseOrderMapper orderMapper,
                             PipelineRepository repository,
+                            AuditService audit,
                             PlatformTransactionManager transactionManager) {
         this.engine = Objects.requireNonNull(engine, "engine must not be null");
         this.checkMapper = Objects.requireNonNull(checkMapper, "checkMapper must not be null");
@@ -95,6 +101,7 @@ public class GateCheckService {
         this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper must not be null");
         this.orderMapper = Objects.requireNonNull(orderMapper, "orderMapper must not be null");
         this.repository = Objects.requireNonNull(repository, "repository must not be null");
+        this.audit = Objects.requireNonNull(audit, "audit must not be null");
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -194,6 +201,21 @@ public class GateCheckService {
             existing == null ? 0 : existing.attempt(), null, null, null);
         save(reset);
         start(instance, type, contextOf(instance), existing);
+        GateCheck refreshed = find(itemId, type);
+        Map<String, Object> before = new LinkedHashMap<>();
+        before.put("checkKind", type.name());
+        before.put("status", existing == null ? null : existing.status().name());
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("checkKind", type.name());
+        after.put("status", refreshed == null ? GateCheckStatus.UNKNOWN.name()
+            : refreshed.status().name());
+        after.put("attempt", refreshed == null ? 0 : refreshed.attempt());
+        audit.record(AuditCommand.of(AuditAction.GATE_REFRESH, String.valueOf(itemId),
+                item.getCrid(), "刷新检查：" + type.label() + "（变更项 " + item.getCrid() + "）")
+            .before(before)
+            .after(after)
+            .scopeUnitId(item.getUnitId())
+            .build());
     }
 
     /**

@@ -1,6 +1,8 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.application.notification.NotificationAudiences;
 import com.sf.release.application.notification.NotificationCommand;
 import com.sf.release.application.notification.NotificationService;
@@ -11,6 +13,7 @@ import com.sf.release.common.security.Roles;
 import com.sf.release.domain.approval.ApprovalChain;
 import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.approval.ApprovalStep;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.domain.notification.NotificationEventKey;
 import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.ItemStatus;
@@ -73,6 +76,7 @@ public class ReleaseApprovalService {
     private final ItemTransitions transitions;
     private final SubmitProdService submitProdService;
     private final NotificationService notifications;
+    private final AuditService audit;
 
     public ReleaseApprovalService(ReleaseOrderMapper orderMapper,
                                   ReleaseItemMapper itemMapper,
@@ -80,7 +84,8 @@ public class ReleaseApprovalService {
                                   ApprovalService approvalService,
                                   ItemTransitions transitions,
                                   SubmitProdService submitProdService,
-                                  NotificationService notifications) {
+                                  NotificationService notifications,
+                                  AuditService audit) {
         this.orderMapper = orderMapper;
         this.itemMapper = itemMapper;
         this.snapshotMapper = snapshotMapper;
@@ -88,6 +93,7 @@ public class ReleaseApprovalService {
         this.transitions = transitions;
         this.submitProdService = submitProdService;
         this.notifications = notifications;
+        this.audit = audit;
     }
 
     /**
@@ -167,9 +173,37 @@ public class ReleaseApprovalService {
             step.stepNo(), requiredRole, approved, user.userId(), result.complete(),
             result.rejected());
         notifyDecided(no, order, snapshot.getId(), step, approved, user.userId(), note, result);
+        recordAudit(no, item, step, approved, result, note);
         // The view is read back inside the same transaction: it shows the chain and the statuses
         // this decision just produced, plus the pre-execution review of the current state.
         return submitProdService.admission(no);
+    }
+
+    /**
+     * One audit row for the signature (audit design section 1): who signed which step, the item
+     * state the decision produced and the chain's completeness. The comment/reason is the caller's
+     * text; the row is written after the chain and state writes, before the response.
+     */
+    private void recordAudit(String publishNo, ReleaseItemPO item, ApprovalStep step, boolean approved,
+                             ApprovalService.DecideResult result, String note) {
+        String afterStatus = approved
+            ? (result.complete() ? ItemStatus.READY.name() : ItemStatus.PENDING_APPROVAL.name())
+            : ItemStatus.REJECTED.name();
+        String verb = approved ? "审批通过" : "审批驳回";
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("itemStatus", afterStatus);
+        after.put("stepNo", step.stepNo());
+        after.put("stepStatus", approved ? "APPROVED" : "REJECTED");
+        after.put("chainComplete", result.complete());
+        audit.record(AuditCommand.of(approved ? AuditAction.APPROVE : AuditAction.REJECT, publishNo,
+                publishNo, verb + "：发布单 " + publishNo + " 第 " + step.stepNo() + " 步（"
+                    + step.role().label() + "）")
+            .before(Map.of("itemStatus", ItemStatus.PENDING_APPROVAL.name(),
+                "stepNo", step.stepNo(), "stepStatus", "PENDING"))
+            .after(after)
+            .reason(note)
+            .scopeUnitId(item.getUnitId())
+            .build());
     }
 
     /**

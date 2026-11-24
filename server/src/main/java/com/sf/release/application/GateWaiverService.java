@@ -1,6 +1,8 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.application.notification.NotificationAudiences;
 import com.sf.release.application.notification.NotificationCommand;
 import com.sf.release.application.notification.NotificationService;
@@ -8,6 +10,7 @@ import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
 import com.sf.release.common.security.Roles;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.domain.gate.GateConclusion;
 import com.sf.release.domain.gate.GateDecision;
 import com.sf.release.domain.gate.GateWaiver;
@@ -34,6 +37,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -73,6 +77,7 @@ public class GateWaiverService {
     private final GateCheckService checkService;
     private final ReleaseOrderMapper orderMapper;
     private final NotificationService notifications;
+    private final AuditService audit;
 
     public GateWaiverService(ReleaseItemMapper itemMapper,
                              GateWaiverMapper waiverMapper,
@@ -81,7 +86,8 @@ public class GateWaiverService {
                              GateService gateService,
                              GateCheckService checkService,
                              ReleaseOrderMapper orderMapper,
-                             NotificationService notifications) {
+                             NotificationService notifications,
+                             AuditService audit) {
         this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper must not be null");
         this.waiverMapper = Objects.requireNonNull(waiverMapper, "waiverMapper must not be null");
         this.memberMapper = Objects.requireNonNull(memberMapper, "memberMapper must not be null");
@@ -91,6 +97,7 @@ public class GateWaiverService {
         this.orderMapper = Objects.requireNonNull(orderMapper, "orderMapper must not be null");
         this.notifications = Objects.requireNonNull(notifications,
             "notifications must not be null");
+        this.audit = Objects.requireNonNull(audit, "audit must not be null");
     }
 
     /**
@@ -161,6 +168,19 @@ public class GateWaiverService {
         waiverMapper.insert(waiverPo);
         log.info("waiver requested: itemId={}, by={}, expireAt={}", itemId, user.userId(),
             expireAt);
+        Map<String, Object> requested = new LinkedHashMap<>();
+        requested.put("status", GateWaiverStatus.PENDING.name());
+        requested.put("reason", why);
+        requested.put("impact", impactText);
+        requested.put("expireAt", expireAt.toString());
+        requested.put("commitSha", waiver.commitSha());
+        requested.put("imageDigest", waiver.imageDigest());
+        audit.record(AuditCommand.of(AuditAction.WAIVER_REQUEST, String.valueOf(waiverPo.getId()),
+                item.crid(), "申请豁免：变更项 " + item.crid())
+            .after(requested)
+            .reason(why)
+            .scopeUnitId(item.unitId())
+            .build());
         notifyWaiverPending(item, waiverPo.getId(), instance, why);
         return gateService.view(itemId);
     }
@@ -217,7 +237,20 @@ public class GateWaiverService {
         log.info("waiver approved: waiverId={}, itemId={}, by={}", waiverId, waiver.itemId(),
             user.userId());
         gateService.evaluate(waiver.itemId());
-        return gateService.view(waiver.itemId());
+        GateService.GateView view = gateService.view(waiver.itemId());
+        ReleaseItemPO scoped = itemMapper.selectById(waiver.itemId());
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("status", GateWaiverStatus.APPROVED.name());
+        after.put("approvedBy", user.userId());
+        after.put("decideReason", trimToNull(note));
+        audit.record(AuditCommand.of(AuditAction.WAIVER_APPROVE, String.valueOf(waiverId),
+                labelOf(scoped, waiver.itemId()), "批准豁免：" + labelOf(scoped, waiver.itemId()))
+            .before(Map.of("status", GateWaiverStatus.PENDING.name()))
+            .after(after)
+            .reason(note)
+            .scopeUnitId(scoped == null ? null : scoped.getUnitId())
+            .build());
+        return view;
     }
 
     /** Rejects a pending waiver; the rejection reason is required and kept. */
@@ -237,7 +270,20 @@ public class GateWaiverService {
         log.info("waiver rejected: waiverId={}, itemId={}, by={}", waiverId, waiver.itemId(),
             user.userId());
         gateService.evaluate(waiver.itemId());
-        return gateService.view(waiver.itemId());
+        GateService.GateView view = gateService.view(waiver.itemId());
+        ReleaseItemPO scoped = itemMapper.selectById(waiver.itemId());
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("status", GateWaiverStatus.REJECTED.name());
+        after.put("approvedBy", user.userId());
+        after.put("decideReason", why);
+        audit.record(AuditCommand.of(AuditAction.WAIVER_REJECT, String.valueOf(waiverId),
+                labelOf(scoped, waiver.itemId()), "驳回豁免：" + labelOf(scoped, waiver.itemId()))
+            .before(Map.of("status", GateWaiverStatus.PENDING.name()))
+            .after(after)
+            .reason(why)
+            .scopeUnitId(scoped == null ? null : scoped.getUnitId())
+            .build());
+        return view;
     }
 
     /**
@@ -344,5 +390,11 @@ public class GateWaiverService {
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    /** The item's CRID for the audit label, or its id when the item row is gone. */
+    private static String labelOf(ReleaseItemPO item, long itemId) {
+        return item == null || item.getCrid() == null || item.getCrid().isBlank()
+            ? String.valueOf(itemId) : item.getCrid();
     }
 }

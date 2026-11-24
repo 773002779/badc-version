@@ -3,8 +3,11 @@ package com.sf.release.application;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.domain.resource.Subsystem;
 import com.sf.release.domain.resource.SubsystemStatus;
 import com.sf.release.infra.repo.AppUserRepository;
@@ -15,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -42,10 +46,13 @@ public class SubsystemAppService {
 
     private final SubsystemMapper subsystemMapper;
     private final AppUserRepository appUserRepository;
+    private final AuditService audit;
 
-    public SubsystemAppService(SubsystemMapper subsystemMapper, AppUserRepository appUserRepository) {
+    public SubsystemAppService(SubsystemMapper subsystemMapper, AppUserRepository appUserRepository,
+                               AuditService audit) {
         this.subsystemMapper = subsystemMapper;
         this.appUserRepository = appUserRepository;
+        this.audit = audit;
     }
 
     /** Creates an {@code ACTIVE} subsystem and returns its id. */
@@ -74,6 +81,16 @@ public class SubsystemAppService {
             // Concurrent create won the unique-key race after our pre-check.
             throw duplicateName(name);
         }
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("name", name);
+        after.put("ownerId", ownerId);
+        after.put("agentId", agentId);
+        after.put("status", SubsystemStatus.ACTIVE.name());
+        audit.record(AuditCommand.of(AuditAction.RESOURCE_UPDATE, String.valueOf(po.getId()), name,
+                "新增系统：" + name)
+            .after(after)
+            .scopeSubsystemId(po.getId())
+            .build());
         return po.getId();
     }
 
@@ -119,6 +136,22 @@ public class SubsystemAppService {
         if (rows == 0) {
             throw notFound(id);
         }
+        Map<String, Object> before = new LinkedHashMap<>();
+        before.put("name", existing.name());
+        before.put("ownerId", existing.ownerId());
+        before.put("agentId", existing.agentId());
+        before.put("status", existing.status().name());
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("name", name);
+        after.put("ownerId", ownerId);
+        after.put("agentId", agentId);
+        after.put("status", status.name());
+        audit.record(AuditCommand.of(AuditAction.RESOURCE_UPDATE, String.valueOf(id), name,
+                "修改系统：" + name)
+            .before(before)
+            .after(after)
+            .scopeSubsystemId(id)
+            .build());
     }
 
     public SubsystemView get(long id) {

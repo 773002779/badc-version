@@ -1,8 +1,12 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.domain.audit.AuditAction;
+import com.sf.release.domain.audit.AuditObjectType;
 import com.sf.release.domain.resource.CodingConn;
 import com.sf.release.domain.resource.CodingScope;
 import com.sf.release.infra.crypto.CredentialCipher;
@@ -19,6 +23,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -57,15 +62,18 @@ public class CodingConnAppService {
     private final SubsystemMapper subsystemMapper;
     private final CredentialCipher credentialCipher;
     private final ObjectProvider<CodingProbe> probeProvider;
+    private final AuditService audit;
 
     public CodingConnAppService(CodingConnMapper connMapper,
                                 SubsystemMapper subsystemMapper,
                                 CredentialCipher credentialCipher,
-                                ObjectProvider<CodingProbe> probeProvider) {
+                                ObjectProvider<CodingProbe> probeProvider,
+                                AuditService audit) {
         this.connMapper = connMapper;
         this.subsystemMapper = subsystemMapper;
         this.credentialCipher = credentialCipher;
         this.probeProvider = probeProvider;
+        this.audit = audit;
     }
 
     /**
@@ -124,6 +132,29 @@ public class CodingConnAppService {
         CodingConnView view = loadStoredView(effectiveScope, effectiveSubsystemId);
         log.info("coding connection saved: id={}, scope={}, subsystemId={}",
             view.id(), view.scope(), view.subsystemId());
+        Map<String, Object> before = null;
+        if (stored != null) {
+            before = new LinkedHashMap<>();
+            before.put("baseUrl", stored.getBaseUrl());
+            before.put("team", stored.getTeam());
+            before.put("project", stored.getProject());
+        }
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("baseUrl", view.baseUrl());
+        after.put("team", view.team());
+        after.put("project", view.project());
+        String objectId = "CODING:" + effectiveScope.name()
+            + (effectiveScope == CodingScope.SUBSYSTEM ? ":" + effectiveSubsystemId : "");
+        audit.record(AuditCommand.of(AuditAction.SETTING_UPDATE, objectId, "CODING 连接",
+                "更新 CODING 连接：" + effectiveScope.name()
+                    + (effectiveScope == CodingScope.SUBSYSTEM ? "（系统 " + effectiveSubsystemId
+                    + "）" : "（租户级）"))
+            .objectType(AuditObjectType.SETTING)
+            .before(before)
+            .after(after)
+            .scopeSubsystemId(effectiveScope == CodingScope.SUBSYSTEM ? effectiveSubsystemId
+                : null)
+            .build());
         return view;
     }
 

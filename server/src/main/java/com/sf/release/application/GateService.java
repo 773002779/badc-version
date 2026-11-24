@@ -1,6 +1,8 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.application.notification.NotificationAudiences;
 import com.sf.release.application.notification.NotificationCommand;
 import com.sf.release.application.notification.NotificationService;
@@ -8,6 +10,7 @@ import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
 import com.sf.release.common.security.Roles;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.domain.gate.GateCheck;
 import com.sf.release.domain.gate.GateCheckStatus;
 import com.sf.release.domain.gate.GateConclusion;
@@ -98,6 +101,7 @@ public class GateService {
     private final ItemTransitions transitions;
     private final PipelineAdvancer advancer;
     private final NotificationService notifications;
+    private final AuditService audit;
 
     public GateService(ReleaseItemMapper itemMapper,
                        ReleaseOrderMapper orderMapper,
@@ -108,7 +112,8 @@ public class GateService {
                        PipelineRepository repository,
                        ItemTransitions transitions,
                        PipelineAdvancer advancer,
-                       NotificationService notifications) {
+                       NotificationService notifications,
+                       AuditService audit) {
         this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper must not be null");
         this.orderMapper = Objects.requireNonNull(orderMapper, "orderMapper must not be null");
         this.checkService = Objects.requireNonNull(checkService, "checkService must not be null");
@@ -121,6 +126,7 @@ public class GateService {
         this.advancer = Objects.requireNonNull(advancer, "advancer must not be null");
         this.notifications = Objects.requireNonNull(notifications,
             "notifications must not be null");
+        this.audit = Objects.requireNonNull(audit, "audit must not be null");
     }
 
     // ------------------------------------------------------------------ decision
@@ -345,6 +351,13 @@ public class GateService {
             .set(ReleaseItemPO::getTestFailReason, null)
             .set(ReleaseItemPO::getUpdatedAt, now));
         log.info("test passed: itemId={}, by={}", itemId, user.userId());
+        audit.record(AuditCommand.of(AuditAction.GATE_TEST_PASS, String.valueOf(itemId),
+                item.crid(), "测试通过：变更项 " + item.crid())
+            .before(Map.of("testStatus", testStatusOf(po).name()))
+            .after(Map.of("testStatus", TestStatus.TEST_PASS.name(),
+                "testPassBy", user.userId(), "testPassAt", now.toString()))
+            .scopeUnitId(item.unitId())
+            .build());
         evaluate(itemId);
         return view(itemId);
     }
@@ -359,7 +372,8 @@ public class GateService {
     public GateView failTest(long itemId, String reason) {
         CurrentUser user = UserContext.current();
         requirePerm(user, Permissions.GATE_TEST_PASS);
-        ReleaseItem item = requireItem(itemId).toDomain();
+        ReleaseItemPO po = requireItem(itemId);
+        ReleaseItem item = po.toDomain();
         ScopeGuard.assertUnitInScope(item.unitId());
         requireTester(user, item);
         if (item.status() != ItemStatus.TESTING) {
@@ -375,6 +389,13 @@ public class GateService {
             .set(ReleaseItemPO::getTestFailReason, text)
             .set(ReleaseItemPO::getUpdatedAt, now));
         log.info("test failed: itemId={}, by={}, reason={}", itemId, user.userId(), text);
+        audit.record(AuditCommand.of(AuditAction.GATE_TEST_FAIL, String.valueOf(itemId),
+                item.crid(), "测试不通过：变更项 " + item.crid())
+            .before(Map.of("testStatus", testStatusOf(po).name()))
+            .after(Map.of("testStatus", TestStatus.TEST_FAIL.name(), "testFailReason", text))
+            .reason(text)
+            .scopeUnitId(item.unitId())
+            .build());
         evaluate(itemId);
         return view(itemId);
     }
@@ -424,6 +445,14 @@ public class GateService {
         if (snapshot.instanceId() > 0) {
             advancer.advance(snapshot.instanceId());
         }
+        audit.record(AuditCommand.of(AuditAction.GATE_TEST_REVOKE, String.valueOf(itemId),
+                item.crid(), "撤回测试通过：变更项 " + item.crid())
+            .before(Map.of("testStatus", TestStatus.TEST_PASS.name(),
+                "testPassBy", item.lastTestPassBy() == null ? "" : item.lastTestPassBy()))
+            .after(Map.of("testStatus", TestStatus.TEST_REVOKED.name(), "testFailReason", text))
+            .reason(text)
+            .scopeUnitId(item.unitId())
+            .build());
         return view(itemId);
     }
 

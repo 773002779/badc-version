@@ -1,8 +1,11 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.domain.window.ReleaseWindow;
 import com.sf.release.domain.window.WindowCheck;
 import com.sf.release.domain.window.WindowException;
@@ -18,6 +21,7 @@ import com.sf.release.infra.repo.po.WindowExceptionPO;
 import com.sf.release.infra.repo.po.WindowRulePO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,6 +35,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -89,15 +94,31 @@ public class WindowService {
     private final WindowRuleMapper ruleMapper;
     private final WindowExceptionMapper exceptionMapper;
     private final SubsystemMapper subsystemMapper;
+    private final AuditService audit;
 
+    /**
+     * The audit seam is optional in the overload below because a unit test constructs this service
+     * with raw mappers to exercise the concurrent-insert path without a Spring context.
+     */
+    @Autowired
     public WindowService(ReleaseWindowMapper windowMapper,
                          WindowRuleMapper ruleMapper,
                          WindowExceptionMapper exceptionMapper,
-                         SubsystemMapper subsystemMapper) {
+                         SubsystemMapper subsystemMapper,
+                         AuditService audit) {
         this.windowMapper = windowMapper;
         this.ruleMapper = ruleMapper;
         this.exceptionMapper = exceptionMapper;
         this.subsystemMapper = subsystemMapper;
+        this.audit = audit;
+    }
+
+    /** Test-only constructor without the audit seam; a save simply writes no audit row. */
+    public WindowService(ReleaseWindowMapper windowMapper,
+                         WindowRuleMapper ruleMapper,
+                         WindowExceptionMapper exceptionMapper,
+                         SubsystemMapper subsystemMapper) {
+        this(windowMapper, ruleMapper, exceptionMapper, subsystemMapper, null);
     }
 
     /** One weekly slot of the save form. */
@@ -227,6 +248,28 @@ public class WindowService {
                 + " rules={}, exceptions={}, warnings={}",
             windowId, scope, subsystemId, enabled, rules.size(), exceptions.size(),
             warnings.size());
+        if (audit != null) {
+            Map<String, Object> before = null;
+            if (stored != null) {
+                before = new LinkedHashMap<>();
+                before.put("enabled", stored.getEnabled());
+                before.put("timezone", stored.getTimezone());
+            }
+            Map<String, Object> after = new LinkedHashMap<>();
+            after.put("enabled", enabled);
+            after.put("timezone", zone.getId());
+            after.put("ruleCount", rules.size());
+            after.put("exceptionCount", exceptions.size());
+            String objectId = "WINDOW:" + scope.name()
+                + (scope == WindowScope.SUBSYSTEM ? ":" + subsystemId : "");
+            audit.record(AuditCommand.of(AuditAction.WINDOW_UPDATE, objectId, "发布窗口",
+                    "更新发布窗口：" + (scope == WindowScope.GLOBAL ? "全局"
+                        : "系统 " + subsystemId))
+                .before(before)
+                .after(after)
+                .scopeSubsystemId(scope == WindowScope.SUBSYSTEM ? subsystemId : null)
+                .build());
+        }
         return new SaveResult(view, warnings);
     }
 

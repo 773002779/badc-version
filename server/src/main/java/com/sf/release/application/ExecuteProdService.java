@@ -1,11 +1,14 @@
 package com.sf.release.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
 import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.approval.ApprovalStep;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.domain.pipeline.InstanceStatus;
 import com.sf.release.domain.pipeline.NodeHandler;
 import com.sf.release.domain.pipeline.NodeHandlerRegistry;
@@ -105,6 +108,7 @@ public class ExecuteProdService {
     private final ItemTransitions transitions;
     private final TransactionRunner transactionRunner;
     private final UnitLease unitLease;
+    private final AuditService audit;
 
     public ExecuteProdService(ReleaseOrderMapper orderMapper,
                               ReleaseItemMapper itemMapper,
@@ -117,7 +121,8 @@ public class ExecuteProdService {
                               ApprovalService approvalService,
                               ItemTransitions transitions,
                               TransactionRunner transactionRunner,
-                              UnitLease unitLease) {
+                              UnitLease unitLease,
+                              AuditService audit) {
         this.orderMapper = Objects.requireNonNull(orderMapper, "orderMapper must not be null");
         this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper must not be null");
         this.snapshotMapper = Objects.requireNonNull(snapshotMapper,
@@ -135,6 +140,7 @@ public class ExecuteProdService {
         this.transactionRunner = Objects.requireNonNull(transactionRunner,
             "transactionRunner must not be null");
         this.unitLease = Objects.requireNonNull(unitLease, "unitLease must not be null");
+        this.audit = Objects.requireNonNull(audit, "audit must not be null");
     }
 
     /**
@@ -272,6 +278,20 @@ public class ExecuteProdService {
         log.info("production execution started: publishNo={}, instanceId={}, itemId={},"
                 + " previousStatus={}, batches={}, by={}", no, instance.id(), item.getId(),
             status, batches, user.userId());
+        Map<String, Object> before = new LinkedHashMap<>();
+        before.put("itemStatus", status.name());
+        before.put("instanceStatus", instance.status().name());
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("itemStatus", afterStatus);
+        after.put("instanceStatus", afterInstance == null ? null : afterInstance.status().name());
+        after.put("node", NodeType.PROD_DEPLOY.name());
+        after.put("batches", batches);
+        audit.record(AuditCommand.of(AuditAction.EXECUTE_PROD, no, no,
+                "生产执行：发布单 " + no + "（变更项 " + item.getCrid() + "）")
+            .before(before)
+            .after(after)
+            .scopeUnitId(unitId)
+            .build());
         return new ExecuteResult(no, afterStatus, NodeType.PROD_DEPLOY.name(), batches, review,
             statusReason);
     }

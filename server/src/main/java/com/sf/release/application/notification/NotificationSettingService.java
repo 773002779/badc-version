@@ -1,8 +1,11 @@
 package com.sf.release.application.notification;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.sf.release.application.audit.AuditCommand;
+import com.sf.release.application.audit.AuditService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
+import com.sf.release.domain.audit.AuditAction;
 import com.sf.release.infra.repo.NotificationSettingMapper;
 import com.sf.release.infra.repo.po.NotificationSettingPO;
 import com.sf.release.infra.security.UserContext;
@@ -11,6 +14,7 @@ import org.springframework.stereotype.Service;
 
 import java.net.URI;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -37,12 +41,15 @@ public class NotificationSettingService {
 
     private final NotificationSettingMapper settingMapper;
     private final boolean allowInsecureHttp;
+    private final AuditService audit;
 
     public NotificationSettingService(NotificationSettingMapper settingMapper,
                                       @Value("${release.notification.allow-insecure-http:false}")
-                                      boolean allowInsecureHttp) {
+                                      boolean allowInsecureHttp,
+                                      AuditService audit) {
         this.settingMapper = settingMapper;
         this.allowInsecureHttp = allowInsecureHttp;
+        this.audit = audit;
     }
 
     /** The current setting; the seeded row is the default (WeCom off, no webhook). */
@@ -67,6 +74,7 @@ public class NotificationSettingService {
     public NotificationSettingView save(Boolean enabled, String webhook) {
         boolean on = Boolean.TRUE.equals(enabled);
         String hook = requireWebhook(on, webhook);
+        NotificationSettingView before = view();
         String actor = UserContext.current().userId();
         Instant now = Instant.now();
         int rows = settingMapper.update(null, Wrappers.<NotificationSettingPO>lambdaUpdate()
@@ -85,7 +93,19 @@ public class NotificationSettingService {
             po.setUpdatedAt(now);
             settingMapper.insert(po);
         }
-        return view();
+        NotificationSettingView saved = view();
+        Map<String, Object> beforeValues = new LinkedHashMap<>();
+        beforeValues.put("wecomEnabled", before.wecomEnabled());
+        beforeValues.put("wecomWebhook", before.wecomWebhook());
+        Map<String, Object> afterValues = new LinkedHashMap<>();
+        afterValues.put("wecomEnabled", saved.wecomEnabled());
+        afterValues.put("wecomWebhook", saved.wecomWebhook());
+        audit.record(AuditCommand.of(AuditAction.SETTING_UPDATE, "NOTIFICATION", "消息通知设置",
+                "更新消息通知设置（企微通知" + (saved.wecomEnabled() ? "开启" : "关闭") + "）")
+            .before(beforeValues)
+            .after(afterValues)
+            .build());
+        return saved;
     }
 
     private String requireWebhook(boolean enabled, String raw) {
