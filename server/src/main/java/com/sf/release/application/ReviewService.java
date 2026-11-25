@@ -47,6 +47,13 @@ import java.util.Objects;
  *       waived.</li>
  * </ol>
  *
+ * <p><strong>Emergency release skips the freeze only (P6-D §1).</strong> An order an administrator
+ * released through J11 has no pending signature left and must not wait for the freeze to end:
+ * {@code frozen}/{@code freezeIds} still report the physical freeze (the page can say the wait was
+ * skipped), but the freeze adds no reason and does not block. The waiver and digest checks are
+ * untouched — a release that bypassed a freeze still cannot execute a rebuilt image or an expired
+ * waiver (design §1/§6).
+ *
  * <p><strong>Read-only.</strong> The review never writes, never changes an item state and never
  * resumes anything; {@link ExecuteProdService} owns the state changes it may imply (a freeze pulls
  * the item back into approval). It does not check the gate either: a gate that became final fails
@@ -125,6 +132,7 @@ public class ReviewService {
     ReviewView reviewOf(ReleaseOrderPO order, ReleaseItemPO item, AdmissionSnapshotPO snapshot) {
         Instant now = Instant.now();
         long subsystemId = subsystemOf(item);
+        boolean emergency = emergencyReleased(order);
         List<FreezeView> freezes = freezeService.active(subsystemId, now);
         List<Long> freezeIds = freezes.stream().map(FreezeView::id).toList();
         boolean frozen = !freezeIds.isEmpty();
@@ -150,7 +158,7 @@ public class ReviewService {
             && instanceDigest.length() <= DIGEST_MAX_LENGTH;
 
         List<String> reasons = new ArrayList<>(3);
-        if (frozen) {
+        if (frozen && !emergency) {
             reasons.add("生产封板生效：" + freezes.stream().map(FreezeView::reason)
                 .filter(Objects::nonNull).reduce((a, b) -> a + "；" + b).orElse("封板中")
                 + "，需重新审批");
@@ -194,6 +202,16 @@ public class ReviewService {
             freezeIds = freezeIds == null ? List.of() : List.copyOf(freezeIds);
             reasons = reasons == null ? List.of() : List.copyOf(reasons);
         }
+    }
+
+    /**
+     * Whether the order was released through J11 (P6-D). The marker lives on the order row, not in
+     * the admission snapshot: an emergency release happens after the snapshot was taken. A {@code null}
+     * column (a row written before V32, or a PO built from the domain) is "not released".
+     */
+    private static boolean emergencyReleased(ReleaseOrderPO order) {
+        Integer flag = order.getEmergencyRelease();
+        return flag != null && flag != 0;
     }
 
     private static String trimToNull(String value) {

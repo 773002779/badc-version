@@ -32,7 +32,10 @@ import java.util.List;
  *   <li>{@code operator} is null in phase 1 because {@code pipeline_instance} has no creator
  *       column;</li>
  *   <li>on a global-record row, {@code pipelineNo}/{@code pipelineStatus} are null for an order
- *       that was never executed and {@code executedBy} is null for a historical order (V25).</li>
+ *       that was never executed and {@code executedBy} is null for a historical order (V25);</li>
+ *   <li>{@code emergencyRelease} is always the machine word {@code "true"} or {@code "false"}; the
+ *       other three emergency fields (reason/administrator/ISO-8601 instant) are null until an
+ *       administrator used J11 on the order (P6-D §3).</li>
  * </ul>
  */
 public final class ReleaseDtos {
@@ -57,7 +60,11 @@ public final class ReleaseDtos {
             orderOf(view.order()),
             view.nodes().stream().map(ReleaseDtos::nodeOf).toList(),
             view.itemId(),
-            view.unitId());
+            view.unitId(),
+            view.emergencyRelease(),
+            view.emergencyReason(),
+            view.emergencyBy(),
+            view.emergencyAt());
     }
 
     /** Maps the instance history of one 发布单, preserving the newest-first order. */
@@ -100,7 +107,11 @@ public final class ReleaseDtos {
             view.createdAt(),
             view.executedBy(),
             view.pipelineNo(),
-            view.pipelineStatus());
+            view.pipelineStatus(),
+            view.emergencyRelease(),
+            view.emergencyReason(),
+            view.emergencyBy(),
+            view.emergencyAt());
     }
 
     private static ReleaseOrderView orderOf(OrderView order) {
@@ -138,7 +149,16 @@ public final class ReleaseDtos {
         ReleaseOrderView order,
         List<ReleaseNodeView> nodes,
         Long itemId,
-        Long unitId) {
+        Long unitId,
+        /**
+         * J11 (P6-D §3): {@code emergencyRelease} is the string {@code "true"} or {@code "false"}
+         * (the page compares the machine word, it is not a JSON boolean); the other three are the
+         * reason, the administrator and the ISO-8601 instant of the most recent use, or null.
+         */
+        String emergencyRelease,
+        String emergencyReason,
+        String emergencyBy,
+        String emergencyAt) {
     }
 
     /** Admission fields of the 发布单. */
@@ -216,6 +236,10 @@ public final class ReleaseDtos {
         Instant createdAt,
         String executedBy,
         String pipelineNo,
-        String pipelineStatus) {
+        String pipelineStatus,
+        String emergencyRelease,
+        String emergencyReason,
+        String emergencyBy,
+        String emergencyAt) {
     }
 }

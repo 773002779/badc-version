@@ -160,7 +160,24 @@ public class ReleaseRecordsService {
             row.getCreatedAt(),
             row.getExecutedBy(),
             row.getPipelineNo(),
-            row.getPipelineStatus());
+            row.getPipelineStatus(),
+            emergencyFlagOf(row.getEmergencyRelease()),
+            row.getEmergencyReason(),
+            row.getEmergencyBy(),
+            instantOf(row.getEmergencyAt()));
+    }
+
+    /**
+     * The J11 marker as {@code "true"}/{@code "false"} (P6-D design §3: the page paints the red chip
+     * from this string). A pre-V32 {@code null} column means the same as the 0 default.
+     */
+    private static String emergencyFlagOf(Integer flag) {
+        return flag != null && flag != 0 ? "true" : "false";
+    }
+
+    /** A stored instant as an ISO-8601 string (the emergency fields travel as strings). */
+    private static String instantOf(Instant instant) {
+        return instant == null ? null : instant.toString();
     }
 
     /** The Chinese label of a stored status; an unknown value degrades to the raw value. */
@@ -204,7 +221,15 @@ public class ReleaseRecordsService {
         Instant createdAt,
         String executedBy,
         String pipelineNo,
-        String pipelineStatus) {
+        String pipelineStatus,
+        /**
+         * J11 marker as {@code "true"}/{@code "false"}; the other three are null unless an emergency
+         * release happened (P6-D design §2/§3).
+         */
+        String emergencyRelease,
+        String emergencyReason,
+        String emergencyBy,
+        String emergencyAt) {
     }
 
     /** Page response shape shared by the paged read services. */

@@ -32,10 +32,13 @@ import java.util.Objects;
  *       the execute use case finds the instance {@code PAUSED} at {@code PROD_DEPLOY}.</li>
  *   <li><strong>No freeze is in force.</strong> {@link FreezeService#active(long, Instant)} (the
  *       strict {@code start_at <= now < end_at} predicate): a batch boundary is the place to stop,
- *       so an in-force freeze pauses the next batch rather than aborting a running one.</li>
+ *       so an in-force freeze pauses the next batch rather than aborting a running one. An order
+ *       an administrator released through J11 (P6-D §1) skips <em>this condition only</em>: it has
+ *       no signature left to collect and must not wait for the freeze to end.</li>
  *   <li><strong>The gate is not finally blocked.</strong> {@code INVALID} or a non-waivable
  *       {@code BLOCK} (the same rule {@link GateService#verifyBlockedReason} uses): a waivable
- *       medium finding never pauses production, the waiver already lifted it at admission.</li>
+ *       medium finding never pauses production, the waiver already lifted it at admission. This
+ *       check is <em>not</em> skipped for an emergency release (design §6).</li>
  * </ol>
  *
  * <p>Read-only: the handler writes the pause and its reason, this class only explains it.
@@ -91,9 +94,12 @@ public class ProductionBoundaryProbeService implements ProductionBoundaryProbe {
         DeployUnitPO unit = unitMapper.selectById(item.getUnitId());
         long subsystemId = unit == null || unit.getSubsystemId() == null
             ? 0L : unit.getSubsystemId();
-        List<FreezeView> freezes = freezeService.active(subsystemId, Instant.now());
-        if (!freezes.isEmpty()) {
-            return "生产封板生效：" + joinReasons(freezes) + "，批次边界暂停在生产部署（PROD_DEPLOY）";
+        if (!emergencyReleased(order)) {
+            List<FreezeView> freezes = freezeService.active(subsystemId, Instant.now());
+            if (!freezes.isEmpty()) {
+                return "生产封板生效：" + joinReasons(freezes)
+                    + "，批次边界暂停在生产部署（PROD_DEPLOY）";
+            }
         }
         GateDecision gate = gateService.decisionForInstance(instance);
         if (gate.conclusion() == GateConclusion.INVALID
@@ -112,5 +118,14 @@ public class ProductionBoundaryProbeService implements ProductionBoundaryProbe {
             text.append(freeze.reason() == null ? "封板中" : freeze.reason());
         }
         return text.toString();
+    }
+
+    /**
+     * The J11 marker (P6-D §1): an order an administrator released without a signature skips the
+     * freeze wait at the batch boundary. {@code null} (a pre-V32 row) is "not released".
+     */
+    private static boolean emergencyReleased(ReleaseOrderPO order) {
+        Integer flag = order.getEmergencyRelease();
+        return flag != null && flag != 0;
     }
 }

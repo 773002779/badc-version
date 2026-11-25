@@ -57,7 +57,13 @@ public enum AuditAction {
     EXIT("退出发布", AuditObjectType.ORDER, false),
     CLOSE("关闭发布", AuditObjectType.ORDER, false),
     ARCHIVE("归档发布", AuditObjectType.ORDER, false),
-    LOCK_FORCE_RELEASE("强制解除单元锁", AuditObjectType.UNIT, false);
+    LOCK_FORCE_RELEASE("强制解除单元锁", AuditObjectType.UNIT, false),
+    /**
+     * The J11 break-glass release (P6-D design §1/§2): only an administrator may force a release
+     * that is still waiting for a signature to {@code READY}. One row per use, with the mandatory
+     * reason and the before/after status, so every use stays visible.
+     */
+    EMERGENCY_RELEASE("紧急放行", AuditObjectType.ORDER, false);
 
     private final String label;
     private final AuditObjectType objectType;

@@ -78,6 +78,10 @@ public interface ReleaseRecordsMapper {
                o.planned_release_time  AS plannedReleaseTime,
                o.created_at            AS createdAt,
                o.executed_by           AS executedBy,
+               o.emergency_release     AS emergencyRelease,
+               o.emergency_reason      AS emergencyReason,
+               o.emergency_by          AS emergencyBy,
+               o.emergency_at          AS emergencyAt,
                pi.pipeline_no          AS pipelineNo,
                pi.status               AS pipelineStatus
         FROM release_order o

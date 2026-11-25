@@ -100,7 +100,11 @@ public class ReleaseQueryService {
             new OrderView(head.getOaTicketNo(), head.getPlannedReleaseTime()),
             nodes,
             head.getItemId(),
-            head.getUnitId());
+            head.getUnitId(),
+            emergencyFlagOf(head.getEmergencyRelease()),
+            head.getEmergencyReason(),
+            head.getEmergencyBy(),
+            instantOf(head.getEmergencyAt()));
     }
 
     /**
@@ -186,6 +190,20 @@ public class ReleaseQueryService {
         }
     }
 
+    /**
+     * The J11 read marker as the machine word the page compares (P6-D design §3: "four string
+     * fields"). A never-released order answers {@code "false"}; the column default (0) and a
+     * pre-V32 {@code null} both mean the same.
+     */
+    private static String emergencyFlagOf(Integer flag) {
+        return flag != null && flag != 0 ? "true" : "false";
+    }
+
+    /** A stored instant as an ISO-8601 string (the emergency fields travel as strings). */
+    private static String instantOf(Instant instant) {
+        return instant == null ? null : instant.toString();
+    }
+
     private static String requirePublishNo(String raw) {
         String no = trimToNull(raw);
         if (no == null) {
@@ -224,7 +242,15 @@ public class ReleaseQueryService {
         OrderView order,
         List<NodeView> nodes,
         Long itemId,
-        Long unitId) {
+        Long unitId,
+        /**
+         * J11 marker as {@code "true"}/{@code "false"}; the other three are null unless an
+         * emergency release happened (P6-D design §2/§3).
+         */
+        String emergencyRelease,
+        String emergencyReason,
+        String emergencyBy,
+        String emergencyAt) {
 
         public ReleaseDetail {
             nodes = nodes == null ? List.of() : List.copyOf(nodes);

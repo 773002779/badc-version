@@ -38,6 +38,12 @@ public class ReleaseHeadRow {
     private Instant startAt;
     private Instant endAt;
 
+    /** The J11 read marker of the order (V32, P6-D design §2/§3); {@code null} or 0 = never used. */
+    private Integer emergencyRelease;
+    private String emergencyReason;
+    private String emergencyBy;
+    private Instant emergencyAt;
+
     public String getPublishNo() {
         return publishNo;
     }
@@ -164,5 +170,37 @@ public class ReleaseHeadRow {
 
     public void setEndAt(Instant endAt) {
         this.endAt = endAt;
+    }
+
+    public Integer getEmergencyRelease() {
+        return emergencyRelease;
+    }
+
+    public void setEmergencyRelease(Integer emergencyRelease) {
+        this.emergencyRelease = emergencyRelease;
+    }
+
+    public String getEmergencyReason() {
+        return emergencyReason;
+    }
+
+    public void setEmergencyReason(String emergencyReason) {
+        this.emergencyReason = emergencyReason;
+    }
+
+    public String getEmergencyBy() {
+        return emergencyBy;
+    }
+
+    public void setEmergencyBy(String emergencyBy) {
+        this.emergencyBy = emergencyBy;
+    }
+
+    public Instant getEmergencyAt() {
+        return emergencyAt;
+    }
+
+    public void setEmergencyAt(Instant emergencyAt) {
+        this.emergencyAt = emergencyAt;
     }
 }

@@ -32,6 +32,19 @@ public class ReleaseOrderPO {
      */
     private String executedBy;
 
+    /**
+     * The J11 emergency-release marker (V32). {@code emergency_release} is 1 on an order an
+     * administrator released without a signature; the other three columns are the reason, the actor
+     * and the instant of the most recent use. They are written by
+     * {@link com.sf.release.application.EmergencyReleaseService} and are deliberately absent from the
+     * {@link ReleaseOrder} domain aggregate: they are an operational fact the pages and the execution
+     * review read, not part of the order's lifecycle.
+     */
+    private Integer emergencyRelease;
+    private String emergencyReason;
+    private String emergencyBy;
+    private Instant emergencyAt;
+
     public static ReleaseOrderPO of(ReleaseOrder order) {
         ReleaseOrderPO po = new ReleaseOrderPO();
         po.id = order.id();
@@ -45,8 +58,13 @@ public class ReleaseOrderPO {
         po.rowVersion = order.rowVersion();
         po.createdAt = order.createdAt();
         // The domain record has no operator field: an insert never carries one, the execute use
-        // case writes it explicitly on the row.
+        // case writes it explicitly on the row. The emergency columns start NULL/null: the DB
+        // default 0 is the marker, so a PO built from the domain never carries one.
         po.executedBy = null;
+        po.emergencyRelease = null;
+        po.emergencyReason = null;
+        po.emergencyBy = null;
+        po.emergencyAt = null;
         return po;
     }
 
@@ -141,5 +159,37 @@ public class ReleaseOrderPO {
 
     public void setExecutedBy(String executedBy) {
         this.executedBy = executedBy;
+    }
+
+    public Integer getEmergencyRelease() {
+        return emergencyRelease;
+    }
+
+    public void setEmergencyRelease(Integer emergencyRelease) {
+        this.emergencyRelease = emergencyRelease;
+    }
+
+    public String getEmergencyReason() {
+        return emergencyReason;
+    }
+
+    public void setEmergencyReason(String emergencyReason) {
+        this.emergencyReason = emergencyReason;
+    }
+
+    public String getEmergencyBy() {
+        return emergencyBy;
+    }
+
+    public void setEmergencyBy(String emergencyBy) {
+        this.emergencyBy = emergencyBy;
+    }
+
+    public Instant getEmergencyAt() {
+        return emergencyAt;
+    }
+
+    public void setEmergencyAt(Instant emergencyAt) {
+        this.emergencyAt = emergencyAt;
     }
 }

@@ -32,7 +32,10 @@ public enum NotificationEventKey {
     RELEASE_STOPPED("发布单已停止", NotificationObjectType.ORDER),
     RELEASE_EXITED("发布单已退出", NotificationObjectType.ORDER),
     ITEM_CLOSED("变更项已关闭", NotificationObjectType.ITEM),
-    TASK_ARCHIVED("任务已归档", NotificationObjectType.TASK);
+    TASK_ARCHIVED("任务已归档", NotificationObjectType.TASK),
+    // P6-D J11: an administrator forced a release that was still waiting for a signature. The
+    // audience is the task's OPS/DEV members plus its creator; the body carries the reason.
+    EMERGENCY_RELEASE("紧急放行", NotificationObjectType.ORDER);
 
     private final String label;
     private final NotificationObjectType objectType;
