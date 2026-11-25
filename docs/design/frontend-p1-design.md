@@ -970,6 +970,144 @@
   界面证据**（真实 live 只到 BUILD 失败）。
 - **截图未人眼复核**；端到端成功路径（`publish.start` 真正返回）未在本机验证。
 
+## 19. P6-B · 平台设置三段（2026-11-26）
+
+> **编号与补写说明**：本节是 P6-C §20 编号说明里预留的 P6-B 页面章节。前端 `9a13915` 早已合并，文档于本次
+> 补写；P6-C 正文与台账 R90–R98 未改动。接口与后端口径见技术方案 §8.14 / §12.2.11，残留见未实现清单 GAP-08。
+
+设置页在「消息通知」之后多出三块：**门禁规则 / 审批人名单 / 锁超时**。`web/src/views/SettingsView.vue`
+新增 3 个 `DataSection`、6 个 API 函数（`web/src/api/index.ts`）与 3 个响应类型（`web/src/api/types.ts`）；**不新增
+路由、不新增导航、不新增依赖**。无 `setting:manage` 时三块只读且**连 GET 都不发**。
+
+截图（1440×900，探针生成，`git add -f`；两张都是**已恢复默认值**的状态——7 项全开 / 空名单 / 168）：
+
+![平台设置三段（浅色）](shots/settings-rules-light.png)
+![平台设置三段（暗色）](shots/settings-rules-dark.png)
+
+**块位置与结构（`SettingsView.vue`）**
+
+- 三块依次在「消息通知」`DataSection` 之后：`.settings-gate`（标题「门禁规则」）、`.settings-approvers`
+  （「审批人名单」）、`.settings-lock`（「锁超时」）；每块 `#actions` 是状态 `chip`（`读取中…` / `默认…` /
+  `已保存` / `只读`）+「保存」按钮（无权限不渲染，保存中 loading/disabled）。
+- 副标题随状态变化：门禁「N / 7 项启用 · {user} 更新于 …」或「… · 默认配置」；审批人「运营负责人 X 人 ·
+  部门经理 Y 人」；锁「暂停上限 X 小时」。`updatedAt` 用 `formatDateTime`（本地时区、分钟精度）。
+- 三块共享**一次** `GET /api/v1/me`（页面原有 CODING、消息通知各自查一次；三段是一个整体，避免页面加载 5 次
+  `/me`），有权限后用 `Promise.allSettled` 并发三段 GET；任一段失败只在对应块内显示 `el-alert`，不阻塞另两块。
+- 保存成功用响应回填本块 view + `updatedBy/updatedAt` + toast；失败 toast 用服务端 message（40000/40009 原文）。
+
+**门禁规则**
+
+- 7 个 `el-checkbox`，由服务端 `enabledChecks` 驱动；每行显示「中文名 + 机器值 + 阶段说明」（如
+  `Sonar 扫描` / `SONAR` / `镜像检查 · 构建后`）。中文名来自页面本地只读映射 `GATE_CHECKS`，机器值是契约；
+  服务端返回未知值（新版本）时以原值追加渲染并原样提交，不静默丢弃。
+- 常驻提示原文：「停用对在途发布立即生效，且不会补跑：已停用检查的历史结果在评估时被忽略，新实例也不再生成该
+  检查任务。」+「至少保留 1 项检查；当前启用 N / 7 项。」
+- 保存前客户端拦「一项都没有」（`ElMessage.warning('至少需要启用一项检查')`，不发 PUT）；若本次保存会**停用**
+  已保存的检查项，弹 `ElMessageBox.confirm`（标题「保存门禁规则」，列出生效的检查中文名，正文含「停用对在途
+  发布立即生效，且不会补跑…」，确认「确认停用」/取消「取消」）；取消不保存。只重新启用、或本来就没启用过的
+  项被勾上，不弹确认。
+- 保存 `PUT /api/v1/settings/gate`（`{enabledChecks: string[]}`），成功后回填并 toast「门禁规则已保存」；状态
+  chip 变「已保存」，副标题变「6 / 7 项启用 · {user} 更新于 …」。
+
+**审批人名单**
+
+- `OPS_LEAD`（运营负责人）与 `DEPT_MANAGER`（部门经理）各一个标签编辑器：`el-input`（占位「输入工号后回车，或
+  点「添加」」）+「添加」；回车或按钮把草稿 trim 后入列表，重复/空值给 warning；`el-tag` 可关闭删除；空列表显示
+  「未配置」。
+- 保存时把两个输入框里**尚未点「添加」的草稿**也并入（先 trim/去重），再 `PUT /api/v1/settings/approvers`
+  （`{opsLead, deptManager}`）；成功后回填、清空草稿并 toast「审批人名单已保存」。
+- 块内三条提示（原文）：①「留空 = 由系统负责人兜底（该角色无人时沿用既有审批兜底），不会阻断发版。」；
+  ②「保存会把 `user_role` 中该角色的成员整体替换为名单，审批权限即时生效。接口回显的是生效名单：存储名单为空时
+  回退显示角色当前成员，因此保存空名单后通常回显也为空。」；③「工号需存在于 `app_user` 且为启用状态；提交前
+  自动去除首尾空格并去重。」
+- **空名单的真实行为**：空数组/省略字段都合法；保存会清空该角色的 `user_role` 行，因此保存空名单后立即 GET
+  通常也是空（不是种子用户）。只有在角色行被种回或运维 SQL 恢复时，空存储的 GET 才会重新显示成员。
+
+**锁超时**
+
+- 一个 `el-input`（`inputmode="numeric"`，后缀「小时」，占位 `168`），客户端校验整数 1–8760；0/8761/小数/空值
+  直接 `ElMessage.warning('暂停上限需为 1–8760 之间的整数小时')`，**不发 PUT**；服务端 40000 仍是权威校验。
+- 提示原文：「默认 168 小时（7 天），可填 1–8760 的整数。」「发布挂起超过该小时数视为放弃，单元租约由巡检任务在
+  下一轮释放；修改在下一轮巡检生效。」「租约本身仍为 **4 小时**（TTL 是代码常量，不随此项变化）。」
+- 保存 `PUT /api/v1/settings/lock`（`{pauseBoundHours: number}`），成功回填 + toast「锁超时设置已保存」。
+
+**只读态（无 `setting:manage`）**
+
+- 三块各自显示 `restricted`：「**需要平台管理员权限**」+ 一句块级原因（门禁决定执行哪些检查 / 审批人决定由谁
+  审批 / 暂停上限影响租约回收…「当前账号无权读取该配置」），不渲染保存按钮、复选框、输入框。
+- **不发任何设置 GET**：三块加载器先查 `/me`，无权限直接结束（探测用 `ops-lead` 实测 `settingsGets=0`）。代价是
+  页面多一次 `/me`；`ops-lead` 看不到已存值，只看到原因。
+- 注：`SettingsView.vue` 里有一行注释写「the endpoints answer 403」，与实现不符——`GET` 无权限实际是
+  **HTTP 200 信封 + code 40009**（见技术方案 §12.2.11）；页面「无权限不请求」的行为不受影响。
+
+**API / 类型**
+
+- `web/src/api/index.ts`：`getGateSetting()`、`saveGateSetting({enabledChecks})`、`getApproverSetting()`、
+  `saveApproverSetting({opsLead,deptManager})`、`getLockSetting()`、`saveLockSetting({pauseBoundHours})`。
+- `web/src/api/types.ts`：`GateSettingView {enabledChecks,updatedBy?,updatedAt?}`、
+  `ApproverSettingView {opsLead,deptManager,updatedBy?,updatedAt?}`、
+  `LockSettingView {pauseBoundHours,updatedBy?,updatedAt?}`。
+
+**探针与截图（`scripts/verify-p6b-ui.mjs`）**
+
+- 运行（从仓库根拷到 `%TEMP%\rp-shot-tools` 执行，Edge + Puppeteer，双主题）：
+  `node %TEMP%\rp-shot-tools\verify-p6b-ui.mjs http://127.0.0.1:5173 --shots docs/design/shots`。
+- 覆盖（亮/暗各一遍）：三块标题/默认值/7 个机器值/全开/阶段说明/常驻提示；停用 `DB_NORM`（确认框）→ 保存 →
+  API 6 项 → 再启用（不再弹确认）→ API 7 项；状态 chip 与副标题「6 / 7 项启用」；审批人添加 `ops-lead` → 保存 →
+  API 有值 → 关闭标签 → 空名单保存 → API 为空；锁 0/8761 被页面拒绝且 API 仍 168 → 200 保存并回读；保存后
+  恢复默认（7 / 空 / 168）并重开页面断言默认态；`ops-lead` 只读、无控件、`settingsGets=0`；双主题 0 console error；
+  截图前断言三块都在 1440×900 视口内。
+- 探针输出（任务报告记录的最终一次运行）：
+
+  ```text
+  initial GET: checks=7 approvers=ops-lead|dept-manager lock=168
+  p6b-light: sections=3 checks=7 gateToggle=6->7 approvers=1->0 lockGuard=0/8761 lockSaved=200 restored=7/0/168 readonly=yes settingsGets=0 errors=0
+  p6b-dark: sections=3 checks=7 gateToggle=6->7 approvers=1->0 lockGuard=0/8761 lockSaved=200 restored=7/0/168 readonly=yes settingsGets=0 errors=0
+  restored: checks=7 approvers=0/0 lock=168
+  OK all P6-B settings assertions passed
+  ```
+
+**验收（P6-B）**
+
+- `cd web; npm run build`（`vue-tsc -b && vite build`）通过：`✓ built in 1.02s`（exit 0，无新依赖）。
+- 探针双主题 `OK all P6-B settings assertions passed`，0 console error；两张 1440×900 截图入库。
+- 后端 API 实测（本机 live）：三段 GET `code 0`（7 项 / `ops-lead`+`dept-manager` / 168）；
+  `ops-lead` → `code 40009`；非法 PUT → `code 40000` 且 GET 不变（见技术方案 §12.2.11）。
+
+**与设计不一致（前端，代码为准）**
+
+1. **三块共享一次 `/me` + `Promise.allSettled`**：设计只说「无权限只读」；CODING/消息通知各自查 `/me`，三段因
+   同属一个设置切片改为一次，代价是一次性加载三块、单块失败不阻塞其余。
+2. **审批人的「空名单回显」与设计预期不同**：设计说默认空 = 沿用 `user_role` 种子；实现 GET 确实回退读角色成员，
+   但 PUT 空名单同时删除角色行，所以保存后 GET 通常为空。页面提示按 API 实际行为写成「保存空名单后通常回显也
+   为空」，不再承诺显示种子审批人。
+3. **锁超时用 `el-input`（`inputmode="numeric"`）而非 `el-input-number`**：与 P6-C 超时输入同款——数字框失焦会把
+   越界值自动夹到边界，「页面拒绝 0/8761」就无法稳定断言；文本输入 + 整数/范围校验让拒绝发生在发 PUT 之前。
+4. **检查项中文名是页面本地只读映射**：`format.ts` 没有检查枚举映射，`GATE_CHECKS` 只用于展示（机器值是契约）；
+   服务端新增的检查项会以原值渲染、原样提交，页面不因未知枚举报错。设计未规定标签来源。
+5. **二次确认只在「停用已启用项」时弹**：设计只说保存时二次确认；代码只在 diff 出「已保存 → 本次不勾」时弹，
+   避免每次保存都打断；重新启用/首次保存不弹。
+6. **审批人草稿在保存时自动并入**：设计只说「多选用户输入」；实现允许先输入工号再直接点保存（不等「添加」），
+   保存前 trim/去重，标签随后显示实际发送内容。
+7. **状态 chip、副标题、块内提示的具体中文是实现的补充**：设计只给要点；探针断言了副标题、默认态、只读与回显的
+   关键片段，其余文案以代码为准。
+8. **探针恢复默认会清空 `user_role` 种子审批角色**：`restoreDefaults` 的 PUT 空名单会删除 `OPS_LEAD`/
+   `DEPT_MANAGER` 行，`ops-lead` 探针账号因此只剩 `OPS`（无 `setting:manage`、无 `control:approve`）；后续联调
+   需要种子审批人时，重新保存 `ops-lead`/`dept-manager`（此时存储名单非空）或种回 `user_role`。
+9. **元数据不能通过 API 还原为「未保存」**：每次 PUT 都写 `updatedBy/updatedAt`，恢复默认值后三段仍显示 `dev` +
+   本次时间；配置值是默认值，但「默认态」只能靠直接改库（`updated_by=NULL`）或首次部署的种子行呈现。
+10. **`settingsGets=0` 只统计只读阶段的页面请求**：探针在切到 `ops-lead` 前清空监听数组，只监听
+    `/api/v1/settings/{gate,approvers,lock}`；`/me`、CODING、通知与页面其他请求不计入。
+
+**未做（P6-B 前端明确不做）**
+
+- **没有字典、角色权限页面板**：DICT 无消费者、`role_permission` 编辑属权限模型变更（技术方案 §8.14）。
+- **没有租约 TTL 输入**：只开放暂停上限；4h TTL 是常量，页面只做提示。
+- **没有按系统/单元指定审批人**：两个角色仍是平台级（Q2 未定）。
+- **没有「恢复默认」按钮、没有 DELETE**：恢复默认只能逐块 PUT 默认值（探针即如此）或直接改库。
+- **没有前端单测**：覆盖靠 `scripts/verify-p6b-ui.mjs` 的双主题 DOM 断言；截图**未人眼复核**（实现模型无图像输入）。
+- **通知渠道/窗口/封板/CODING 设置未改动**：它们已在前序切片交付，本切片不重复。
+
 ## 20. P6-C · 单元流水线配置（2026-11-26）
 
 > **编号说明**：§19 预留给 P6-B（平台设置）页面章节，其文档收口尚未执行（前端 `9a13915` 已落地）；本节按计划

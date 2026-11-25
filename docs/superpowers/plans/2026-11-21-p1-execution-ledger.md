@@ -505,3 +505,70 @@ Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有�
 - Ruling R98: 存量行的缺列/越界值**降级为默认常量**（build 60、deploy 8、批次 `FORWARD`、开关 null=开），
   **不是夹到 5/240、1/120 边界**；`UnitPipelineConfig` 构造器里的 `clamp` 因此名不副实（范围内保留、否则回退默认），
   目的是外来行不能安装荒谬 deadline。写入侧仍严格 40000，只有手工改库才会触发降级。`40b2b27`
+
+## R99+（P6-B 平台设置，补写，2026-11-26）
+
+> **编号与补写说明**：P6-B 的代码先于文档合并（后端 `5827141`、web `9a13915`），其文档收口一直未执行；P6-C 的
+> R90–R98 已占用 R90+，其编号说明写明「P6-B 若补写，从本节最后一条之后续号」。本次补写因此从 **R99** 续号，
+> 不改写 R90–R98，也不改动 P6-C 的三节正文（技术方案 §8.15、§12.2.12、前端设计 §20）。
+>
+> **来源**：代码以 `5827141`（后端 18 文件，+1994/−37，全量 909 绿 = 基线 892 + 17）与 `9a13915`（前端 6 文件，
+> 含两张截图；`npm run build` 绿、`verify-p6b-ui.mjs` 双主题通过）为准；任务报告在
+> `.superpowers/sdd/p6b-settings/{task-1-report.md,task-2-report.md}`（`.gitignore` 的 `.superpowers/` 下，未进
+> 提交）；契约与计划为 `docs/superpowers/{specs,plans}/2026-11-26-p6b-settings*.md`（`9f188e1`）。lead 复核：909 绿、
+> build 绿、探针双主题绿并恢复默认（7 项 / 空名单 / 168）；探针会清空 `user_role` 的种子审批角色，复核时已手工
+> 种回 `ops-lead`/`dept-manager`（见 R110）。
+
+- Ruling R99: 平台设置用**一张通用 `app_setting`（V30）**、一段一行（`setting_key` 主键 + `value_json` JSON +
+  `updated_by`/`updated_at`），不建 per-section 表；三段为 `GATE`（`enabledChecks`）、`APPROVER`
+  （`opsLead`/`deptManager`）、`LOCK`（`pauseBoundHours`）。没有 DICT/`role_permission` 行，因为无消费者/属权限模型
+  变更；JSON 在 PO 层保持 `String`（同 `AuditLogPO`），由应用 `ObjectMapper` 解析。`5827141`
+- Ruling R100: GATE 的**写入严格、读取容错**：写入经 `CheckType.fromName`（trim、大小写不敏感）校验，去重后按枚举
+  顺序落库，空数组/未知项/缺字段 **40000**（payload 带 `enabledChecks`）；读取时行缺失、JSON 非法、无数组、空集或
+  全是本版本不认识的检查名，一律回退**七项全开**并 WARN——配置读失败只能让门禁更严，不能更松。`5827141`
+- Ruling R101: GATE 的**效果边界**：只影响新建实例（`createOnline`）与重跑（`createRerun`，重跑也是新实例），
+  `VERIFY` 只预生成启用项的 CHECK 任务；停用项的 `gate_check` 历史行**保留不删**，评估前过滤、面板显示并标
+  「已停用」（`disabled`/`disabledLabel` 追加在 `CheckView` 末尾）；与在途实例立即相关（评估忽略），在新实例上
+  不补跑。手动 `refresh` 仍允许（保留历史证据入口），结果在评估时被忽略。P6-C 之后实际集合是「平台启用集 ∩
+  单元环境检查开关」，见 R90–R98 与 §8.15；`imageMismatches` 仍只按平台集合。`5827141`
+- Ruling R102: LIB 的**三项制品检查也受平台开关过滤**（`LibSecurityNodeHandler#start` 只触发启用项，
+  `libSecuritySatisfied` 的完整性守卫只要求启用项）。三项全停用时 `libSecurityBlockedReason` 直接给出
+  「二方库安全检查已全部停用…」让 `LIB_SECURITY` **快速失败**，而不是零行完整性守卫把发布挂死。这不是 **40011**：
+  40011 是 P6-C 在发布/重跑时对「平台 ∩ 单元」空交集的拒绝（R91），两者不在同一路径。`5827141`
+- Ruling R103: `APPROVER` 的权威仍是 `user_role`，保存是「角色成员名单的整体替换」：在同一事务里写 JSON 并
+  `DELETE`/重插**仅** `OPS_LEAD`、`DEPT_MANAGER` 两角色行，其他角色行不动；id 需 trim、去重、≤32 字符、用户存在且
+  `ACTIVE`，空数组合法 = 清空该角色。`JdbcAuthProvider` 每请求读表，保存后新审批人下一请求即获得
+  `control:approve`、被移除者立即失去（用真实用户验证）；不写 `role_permission`、不做按系统/单元指定审批人（Q2 未定）。
+  GET 返回**生效名单**：存储列表为空时回退读 `user_role` 当前成员；但 PUT 空名单同时删角色行，所以保存后立即
+  GET 通常为空，只有角色行被种回时才重新回显。`5827141`
+- Ruling R104: `LOCK.pauseBoundHours` 1–8760（缺/越界 40000），GET 对缺失/非法行回 **168**；消费侧
+  `pauseBoundHours(fallback)` 用部署的 `release.unit-lease.max-paused-hours`（默认 168）作回退（fallback 自身越界时
+  再用 168）。`UnitLeaseRenewJob` **每轮**读配置，保存下一轮生效；租约 **TTL 4h 仍是代码常量**，本切片不改锁契约，
+  通知与日志使用当轮 bound。`5827141`
+- Ruling R105: 接口是 **6 条固定路径** `GET/PUT /api/v1/settings/{gate,approvers,lock}`，没有通用
+  `/settings/{key}`；请求只带值（actor/time 由服务端补），PUT 返回保存后的视图（GATE 已按规范顺序排列）；
+  响应统一 `ApiResponse`，三段均带 `updatedBy`/`updatedAt`。设计 §5.1 的「未知 key 40000」没有对应请求形状：未知
+  检查名 40000、未知 URL 由框架 **404**（实测 `/api/v1/settings/nope` → 404）。种子 `updated_by=NULL`、
+  `updated_at=NOW(3)`，因此 GET 会回种子时间戳；页面用 `updatedBy` 是否为空区分「默认/已保存」。计划里的
+  `ApplicationSettings` 聚合记录未落地（三个视图各服务一个端点，无消费者）。`5827141`
+- Ruling R106: 6 个端点（**含 GET**）全部 `@RequirePerm(setting:manage)`；无身份/无权限是 **40009**（HTTP 200 信封，
+  payload `perm:"setting:manage"`），不是 403——页面据此在无权限时**连 GET 都不发**。平台级设置**没有数据范围**：
+  任何 `setting:manage` 账号可读写全平台三段；数据范围只约束审计可见性（R107）。`5827141`
+- Ruling R107: 每次**成功保存**写**一行** `SETTING_UPDATE`：`object_type=SETTING`、`object_id=GATE|APPROVER|LOCK`、label 为
+  「门禁规则设置/审批人名单设置/锁超时设置」、`before_json`/`after_json` 是**整段** section（APPROVER 的 before 是
+  生效视图，可能来自 `user_role` 回退）、两个 `scope_*` 为空 = 平台级，只有 `ALL` 范围审计读者可见。APPROVER 的
+  JSON + `user_role` 在同一事务，审计仍走既有 `REQUIRES_NEW` 吞异常口径（审计失败不改保存结果）；GATE/LOCK 的写库
+  与审计不在同一事务。`5827141`
+- Ruling R108: **明确不做**（设计 §6）：字典 `DICT`（无消费者）、`role_permission` 页面/编辑（权限模型变更）、租约
+  TTL 可配（4h 常量）、按系统/单元指定审批人（Q2 未定）、检查等级阈值（GAP-08 原文提到，但本切片只做启用/停用）。
+  通知渠道、发布窗口/封板、CODING 连接/任务映射**已在前序切片交付**，本切片不改。`5827141`
+- Ruling R109: 前端三块在设置页「消息通知」之后，共享**一次** `/me` + `Promise.allSettled` 并发三段 GET；无
+  `setting:manage` 时三块只读、无控件/保存按钮且**零设置请求**。门禁保存只在「停用已保存项」时二次确认；检查中文名
+  是页面本地只读映射（机器值是契约，未知值原样保留/提交）；锁超时用 `el-input`（`inputmode=numeric`）而非数字框，
+  1–8760 在发 PUT 前客户端拒绝；审批人空名单合法，页面提示按 API 实际行为写「保存空名单后通常回显也为空」。
+  `9a13915`
+- Ruling R110: 证据口径与坑：`verify-p6b-ui.mjs` 的恢复默认是**经 API** PUT 7 项/空名单/168，因此会删掉
+  `user_role` 的 `OPS_LEAD`/`DEPT_MANAGER` 种子行（`ops-lead` 只剩 `OPS`，无 `setting:manage`/`control:approve`）；
+  联调前需重新保存审批人或种回角色行。PUT 还会把 `updatedBy/updatedAt` 写成 `dev` + 本次时间，配置值虽恢复默认，
+  元数据无法通过 API 还原为 `null`。前端**无单测**、截图未人眼复核；没有「改配置 → 真发布 → 观察新实例」的端到端
+  取证，效果由 17 个后端测试（真实 DB + stub 引擎）覆盖。`9a13915` / `5827141`
