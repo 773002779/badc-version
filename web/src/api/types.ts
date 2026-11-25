@@ -154,6 +154,15 @@ export interface ReleaseDetail {
   itemId?: number | null
   /** The deployment unit owning the item; the rollback drawer needs it. */
   unitId?: number | null
+  /**
+   * J11 (P6-D §3): the machine word `"true"`/`"false"` — the server sends a string, not a JSON
+   * boolean, so the page compares it as one. The other three are null until an administrator used
+   * 紧急放行 on the order.
+   */
+  emergencyRelease?: string
+  emergencyReason?: string | null
+  emergencyBy?: string | null
+  emergencyAt?: string | null
 }
 
 export interface ReleaseRecord {
@@ -504,6 +513,11 @@ export interface ReleaseRecordRow {
   executedBy?: string | null
   pipelineNo?: string | null
   pipelineStatus?: string | null
+  /** J11 (P6-D §3): same string machine word as the detail; the record chip needs it. */
+  emergencyRelease?: string
+  emergencyReason?: string | null
+  emergencyBy?: string | null
+  emergencyAt?: string | null
 }
 
 // --------------------------------------------------- notification centre (P4-B)
@@ -670,6 +684,17 @@ export interface ControlResult {
   status?: string | null
   itemStatus: string
   terminatedPipelineNo?: string | null
+}
+
+/**
+ * The answer of 紧急放行 (P6-D §3): the order's new status and the item's, plus `emergency:true`.
+ * Unlike the read fields this one is a real JSON boolean; the reason/operator/time come back on the
+ * following detail read.
+ */
+export interface EmergencyResult {
+  status: string
+  itemStatus: string
+  emergency: boolean
 }
 
 /** The answer of archive: the task status and the cascade counts the page reports. */

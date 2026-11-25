@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
+  emergencyRelease,
   exitRelease,
   getAdmission,
   getItemGate,
@@ -50,6 +51,8 @@ const admissionLoaded = ref(false)
 const stopOpen = ref(false)
 const exitOpen = ref(false)
 const controlBusy = ref(false)
+const emergencyOpen = ref(false)
+const emergencyBusy = ref(false)
 let timer: number | undefined
 
 // ---- second-party library (P6-A) ------------------------------------------
@@ -156,6 +159,53 @@ const busy = computed(() => {
   const s = detail.value?.status
   return s === 'RUNNING' || s === 'PENDING'
 })
+
+// ------------------------------------------------------- emergency release (P6-D)
+// J11 is narrower than any permission point: only the ADMIN role may use it (design §1/§3), so the
+// button is absent — not disabled — for everyone else. A caller whose status is not eligible still
+// sees the door with the reason in its title, because a missing button reads as "no such feature".
+const isAdmin = computed(() => me.value?.roles.includes('ADMIN') ?? false)
+const isEmergency = computed(() => detail.value?.emergencyRelease === 'true')
+
+const EMERGENCY_ITEM_STATUSES = new Set(['SUBMITTED', 'PENDING_APPROVAL'])
+
+/** Why 紧急放行 is unavailable; empty when the status allows it. */
+const emergencyBlock = computed(() => {
+  if (!meLoaded.value) return '正在读取权限'
+  if (!me.value) return '无法读取当前身份（GET /me）'
+  if (!admissionLoaded.value) return '正在读取变更项状态'
+  if (!itemStatus.value) return '无法读取变更项状态（GET admission）'
+  if (isEmergency.value) return '该发布单已紧急放行；不可撤销，再次发布请走重跑'
+  if (itemStatus.value === 'READY') return '已经是待执行状态，无需紧急放行'
+  if (!EMERGENCY_ITEM_STATUSES.has(itemStatus.value)) {
+    return `当前状态「${statusLabel(itemStatus.value)}」不可紧急放行；仅「已提交」「待审批」可用，其它状态请先正常提交或重跑`
+  }
+  return ''
+})
+
+async function onEmergency(reason: string) {
+  emergencyBusy.value = true
+  try {
+    const result = await emergencyRelease(publishNo, reason)
+    ElMessage.warning(
+      `已紧急放行：变更项 ${statusLabel(result.itemStatus)}，审批链已作废；执行时门禁、镜像与豁免仍复核`
+    )
+    emergencyOpen.value = false
+    await load(true)
+  } catch (e) {
+    // A 40001 means the item moved while the dialog was open: close it and re-read the status, like
+    // the other stop-loss actions, so the stale action is not left clickable.
+    if (e instanceof ApiError && e.code === 40001) {
+      ElMessage.error(e.message)
+      emergencyOpen.value = false
+      await load(true)
+    } else {
+      ElMessage.error(e instanceof ApiError ? e.message : '紧急放行失败')
+    }
+  } finally {
+    emergencyBusy.value = false
+  }
+}
 
 const gateStatusHint = computed(() => detail.value?.statusReason ?? '（未记录原因）')
 
@@ -287,6 +337,16 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
   <div>
     <PageHeader :title="`发布内容 ${publishNo}`" :description="detail ? `流水单 ${detail.pipelineNo}` : ''">
       <el-button
+        v-if="isAdmin"
+        class="emergency-release"
+        type="danger"
+        :disabled="!!emergencyBlock || emergencyBusy"
+        :title="emergencyBlock || '仅管理员：作废待签审批并置为「待执行」；不绕过门禁、镜像与豁免复核'"
+        @click="emergencyOpen = true"
+      >
+        紧急放行
+      </el-button>
+      <el-button
         v-if="!isLib"
         class="stop-release"
         type="danger"
@@ -322,6 +382,23 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
         进入生产回滚
       </el-button>
     </PageHeader>
+
+    <!-- J11 trail: the release page must keep saying that the approvals no longer exist (P6-D §4). -->
+    <div v-if="isEmergency && detail" class="emergency-banner" role="alert">
+      <span class="emergency-badge">已紧急放行</span>
+      <span class="emergency-item">
+        <span class="weak small">理由</span>
+        <span class="strong">{{ detail.emergencyReason || '—' }}</span>
+      </span>
+      <span class="emergency-item">
+        <span class="weak small">操作人</span>
+        <span class="mono">{{ detail.emergencyBy || '—' }}</span>
+      </span>
+      <span class="emergency-item">
+        <span class="weak small">时间</span>
+        <span class="mono">{{ formatDateTime(detail.emergencyAt) }}</span>
+      </span>
+    </div>
 
     <el-alert v-if="error" type="error" :closable="false" show-icon :title="error" style="margin-bottom: 16px" />
 
@@ -408,10 +485,12 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
             </div>
             <div v-else-if="node.nodeType === 'PROD_DEPLOY' && detail.itemId" class="verify-slot">
               <AdmissionPanel
+                :key="isEmergency ? 'admission-emergency' : 'admission-normal'"
                 :publish-no="publishNo"
                 :running="busy || detail.status === 'PAUSED'"
                 :paused="detail.status === 'PAUSED'"
                 :rerun="isProductionRerun"
+                :emergency="isEmergency"
                 @changed="load(true)"
               />
             </div>
@@ -527,6 +606,19 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
     </div>
 
     <ReasonDialog
+      v-model="emergencyOpen"
+      title="紧急放行"
+      :message="`将紧急放行发布单 ${publishNo}：作废审批链上全部待签步骤（留痕「紧急放行：理由」），变更项置为「待执行」。`"
+      warning="仅管理员可用且不可撤销：会写红色标识、审计与通知。执行时只跳过审批与封板等待，门禁检查、镜像一致性与豁免有效期仍会复核。"
+      confirm-text="确认紧急放行"
+      placeholder="说明为什么紧急放行，例如：线上支付故障，需立即修复上线"
+      danger
+      warning-type="error"
+      :busy="emergencyBusy"
+      @confirm="onEmergency"
+    />
+
+    <ReasonDialog
       v-model="stopOpen"
       title="停止发布"
       :message="`将停止发布单 ${publishNo}：终止在途流水线与后续批次，变更项置为「已终止」，待签审批作废。`"
@@ -559,6 +651,44 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
 </template>
 
 <style scoped>
+/* J11: the permanent red trail of an emergency release. Only the existing --danger tokens. */
+.emergency-banner {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-weak);
+}
+.emergency-badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: var(--bg);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+}
+.emergency-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--danger);
+  min-width: 0;
+}
+.emergency-item .strong {
+  color: var(--danger);
+}
+.emergency-item .weak {
+  color: var(--danger);
+  opacity: 0.75;
+}
+
 .summary {
   display: flex;
   flex-wrap: wrap;

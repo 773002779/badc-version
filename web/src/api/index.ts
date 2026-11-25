@@ -13,6 +13,7 @@ import type {
   DailyDetailView,
   DailyPage,
   DailyStartResult,
+  EmergencyResult,
   EnvDeView,
   ExecuteResult,
   FreezeView,
@@ -405,6 +406,18 @@ export const resubmitProd = (
   api<AdmissionView>(`/api/v1/releases/${publishNo}/resubmit`, {
     method: 'POST',
     body: JSON.stringify(body)
+  })
+
+/**
+ * 紧急放行 (J11 / P6-D §3): the narrow ADMIN-only door that voids the pending approvals and puts the
+ * item in READY. The reason is mandatory (1–200) and becomes the audit/notification trail; the
+ * execution review still checks the gate, the image digest and waiver expiry. A non-ADMIN caller is
+ * refused with 40009 even when it holds `control:approve`.
+ */
+export const emergencyRelease = (publishNo: string, reason: string) =>
+  api<EmergencyResult>(`/api/v1/releases/${publishNo}/emergency-release`, {
+    method: 'POST',
+    body: JSON.stringify({ reason })
   })
 
 export const approveRelease = (publishNo: string, comment?: string) =>

@@ -21,6 +21,8 @@ const props = defineProps<{
   paused: boolean
   /** The newest instance is a rerun paused at PROD_DEPLOY (the backend's isProductionRerun). */
   rerun: boolean
+  /** J11 (P6-D §4): the order was emergency-released, so its approval chain is void. */
+  emergency?: boolean
 }>()
 
 const emit = defineEmits<{ (e: 'changed'): void }>()
@@ -327,7 +329,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="admission">
+  <div class="admission admission-panel">
     <div class="admission-head">
       <span class="admission-title">生产准入</span>
       <span class="chip" :class="`chip-${statusChip.tone}`">{{ statusChip.label }}</span>
@@ -350,6 +352,15 @@ onMounted(load)
     <div v-if="loading" style="padding: 12px 18px 18px"><el-skeleton :rows="3" animated /></div>
 
     <template v-else>
+      <el-alert
+        v-if="emergency"
+        class="admission-emergency"
+        type="error"
+        :closable="false"
+        show-icon
+        title="审批链已作废：该发布单已由管理员紧急放行，待签步骤不再需要审批；执行时门禁、镜像一致性与豁免有效期仍会复核。"
+        style="margin: 0 18px 12px"
+      />
       <el-alert
         v-if="freezeAlert"
         type="warning"
@@ -526,6 +537,13 @@ onMounted(load)
 <style scoped>
 .admission {
   border-top: 1px dashed var(--border);
+}
+/* Same binding as the emergency dialog: the red void notice uses the shared --danger tokens, not
+   Element Plus's separate --el-color-error palette. Scoped to this one alert. */
+.admission-emergency.el-alert--error {
+  --el-color-error: var(--danger);
+  --el-color-error-light-8: color-mix(in srgb, var(--danger) 20%, var(--bg));
+  --el-color-error-light-9: var(--danger-weak);
 }
 .admission-head {
   display: flex;

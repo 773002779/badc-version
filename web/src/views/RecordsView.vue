@@ -124,6 +124,19 @@ function onSizeChange() {
   load()
 }
 
+/**
+ * The hover text of the red 紧急放行 chip (P6-D §4): the reason and the administrator are the trail
+ * that matters, so the chip must not be a bare label. When a field is missing the chip falls back to
+ * the plain word instead of claiming a blank reason.
+ */
+function emergencyHint(row: ReleaseRecordRow): string {
+  const parts: string[] = []
+  if (row.emergencyReason) parts.push(`理由：${row.emergencyReason}`)
+  if (row.emergencyBy) parts.push(`操作人：${row.emergencyBy}`)
+  if (row.emergencyAt) parts.push(`时间：${formatDateTime(row.emergencyAt)}`)
+  return parts.length ? parts.join(' · ') : '紧急放行'
+}
+
 onMounted(() => {
   load()
   loadSubsystems()
@@ -195,11 +208,20 @@ onMounted(() => {
       </div>
 
       <el-table v-if="rows.length" :data="rows" row-key="publishNo" style="width: 100%">
-        <el-table-column label="发布单" min-width="190">
+        <el-table-column label="发布单" min-width="210">
           <template #default="{ row }">
-            <router-link :to="`/releases/${row.publishNo}`" class="mono strong">
-              {{ row.publishNo }}
-            </router-link>
+            <span class="publish-cell">
+              <router-link :to="`/releases/${row.publishNo}`" class="mono strong">
+                {{ row.publishNo }}
+              </router-link>
+              <el-tooltip
+                v-if="row.emergencyRelease === 'true'"
+                :content="emergencyHint(row)"
+                placement="top"
+              >
+                <span class="status-chip chip-danger emergency-chip">紧急放行</span>
+              </el-tooltip>
+            </span>
           </template>
         </el-table-column>
         <el-table-column prop="crid" label="CRID" min-width="170">
@@ -294,6 +316,16 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.publish-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.emergency-chip {
+  cursor: help;
+  font-weight: 600;
 }
 .status-chip {
   display: inline-flex;

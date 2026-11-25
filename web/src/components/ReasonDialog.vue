@@ -18,6 +18,11 @@ const props = withDefaults(
     message?: string
     /** The irreversible part, in the warning tone (kept batches, read-only task, …). */
     warning?: string
+    /**
+     * The alert tone of `warning`. Every stop-loss dialog keeps the yellow `warning`; 紧急放行 is the
+     * one action the design requires to be red (P6-D §4), because it voids approvals.
+     */
+    warningType?: 'warning' | 'error'
     confirmText?: string
     placeholder?: string
     /** Uses the danger button tone for 停止 / 归档; close/exit stay primary. */
@@ -28,6 +33,7 @@ const props = withDefaults(
   {
     message: '',
     warning: '',
+    warningType: 'warning',
     confirmText: '确认',
     placeholder: '请填写原因（1–200 字）',
     danger: false,
@@ -77,7 +83,7 @@ function submit() {
     <el-alert
       v-if="warning"
       class="reason-warning"
-      type="warning"
+      :type="warningType"
       :closable="false"
       show-icon
       :title="warning"
@@ -123,6 +129,14 @@ function submit() {
 }
 .reason-warning {
   margin-bottom: 12px;
+}
+/* Element Plus renders `type="error"` with its own --el-color-error palette, which the graphite
+   tokens do not define; bind the red emergency warning to the shared --danger tokens instead of
+   introducing a second red. Scoped to this alert so no other screen changes. */
+.reason-warning.el-alert--error {
+  --el-color-error: var(--danger);
+  --el-color-error-light-8: color-mix(in srgb, var(--danger) 20%, var(--bg));
+  --el-color-error-light-9: var(--danger-weak);
 }
 .reason-meta {
   display: flex;
