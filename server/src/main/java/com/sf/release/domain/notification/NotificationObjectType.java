@@ -12,5 +12,7 @@ public enum NotificationObjectType {
     UNIT,
     FREEZE,
     WAIVER,
-    INSTANCE
+    INSTANCE,
+    /** A 发布任务 (P5-B): the archive event is about the task, not about one of its releases. */
+    TASK
 }

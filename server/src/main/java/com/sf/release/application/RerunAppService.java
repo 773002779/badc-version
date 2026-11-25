@@ -22,12 +22,15 @@ import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.ItemStateMachine;
 import com.sf.release.domain.task.ItemStatus;
 import com.sf.release.domain.task.ReleaseItem;
+import com.sf.release.domain.task.TaskStatus;
 import com.sf.release.domain.task.TestStatus;
 import com.sf.release.infra.lock.UnitLockService;
 import com.sf.release.infra.repo.ReleaseItemMapper;
 import com.sf.release.infra.repo.ReleaseOrderMapper;
+import com.sf.release.infra.repo.ReleaseTaskMapper;
 import com.sf.release.infra.repo.po.ReleaseItemPO;
 import com.sf.release.infra.repo.po.ReleaseOrderPO;
+import com.sf.release.infra.repo.po.ReleaseTaskPO;
 import com.sf.release.infra.security.ScopeGuard;
 import com.sf.release.infra.security.UserContext;
 import org.slf4j.Logger;
@@ -93,6 +96,7 @@ public class RerunAppService {
 
     private final ReleaseItemMapper itemMapper;
     private final ReleaseOrderMapper orderMapper;
+    private final ReleaseTaskMapper releaseTaskMapper;
     private final PipelineRepository pipelineRepository;
     private final GitCommitProbe commitProbe;
     private final RerunPlanner rerunPlanner;
@@ -107,6 +111,7 @@ public class RerunAppService {
 
     public RerunAppService(ReleaseItemMapper itemMapper,
                            ReleaseOrderMapper orderMapper,
+                           ReleaseTaskMapper releaseTaskMapper,
                            PipelineRepository pipelineRepository,
                            GitCommitProbe commitProbe,
                            RerunPlanner rerunPlanner,
@@ -119,6 +124,7 @@ public class RerunAppService {
                            PlatformTransactionManager transactionManager) {
         this.itemMapper = itemMapper;
         this.orderMapper = orderMapper;
+        this.releaseTaskMapper = releaseTaskMapper;
         this.pipelineRepository = pipelineRepository;
         this.commitProbe = commitProbe;
         this.rerunPlanner = rerunPlanner;
@@ -149,6 +155,7 @@ public class RerunAppService {
     public RerunResult rerun(long itemId, boolean confirmRevokeTestPass) {
         ReleaseItem item = loadItem(itemId);
         ScopeGuard.assertUnitInScope(item.unitId());
+        requireTaskNotArchived(item);
         if (item.type() != UnitType.UNIT) {
             // The rerun decision is commit/module based and phase 1 only publishes online units;
             // a LIB rerun has a different pipeline shape and must not silently become ONLINE.
@@ -300,6 +307,27 @@ public class RerunAppService {
 
     /** Internal carrier: the business result plus the instance the caller must start. */
     private record Started(RerunResult result, long instanceId) {
+    }
+
+    /**
+     * 40001 when the owning task is archived (FR-T-05, P5-B design §1: an archived task is
+     * read-only). A rerun creates a new execution and moves the item, so it is refused before the
+     * unit lock is taken; production rollback of the same unit stays allowed.
+     */
+    private void requireTaskNotArchived(ReleaseItem item) {
+        if (item.taskId() == null) {
+            throw new BizException(BizError.PARAM_INVALID, "变更项所属任务不存在",
+                Map.of("itemId", item.id()));
+        }
+        ReleaseTaskPO task = releaseTaskMapper.selectById(item.taskId());
+        if (task == null) {
+            throw new BizException(BizError.PARAM_INVALID, "变更项所属任务不存在",
+                Map.of("itemId", item.id(), "taskId", item.taskId()));
+        }
+        if (TaskStatus.ARCHIVED.name().equals(task.getStatus())) {
+            throw new BizException(BizError.STATE_NOT_ALLOWED, "任务已归档，不能重新发布",
+                Map.of("itemId", item.id(), "taskId", item.taskId()));
+        }
     }
 
     private void requireRerunnable(ReleaseItem item) {

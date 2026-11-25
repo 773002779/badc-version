@@ -97,6 +97,45 @@ public class NotificationRecipientResolver {
         return List.copyOf(recipients);
     }
 
+    // ------------------------------------------------------------------ task events (P5-B)
+
+    /**
+     * The members of {@code roles} on one release task, plus the task creator. The task-scoped twin of
+     * {@link #taskRecipients(long, Set)}: the close and archive events know the task (or the item),
+     * not a 发布单, so they cannot go through the order.
+     */
+    public List<String> taskRecipientsOfTask(long taskId, Set<MemberRole> roles) {
+        ReleaseTaskPO task = taskMapper.selectById(taskId);
+        if (task == null) {
+            return List.of();
+        }
+        Set<String> recipients = new TreeSet<>(memberIds(taskId, roles));
+        addIfPresent(recipients, task.getCreator());
+        return List.copyOf(recipients);
+    }
+
+    /**
+     * The audience of {@code TASK_ARCHIVED} (P5-B design §5): every member of the task, its creator and
+     * the system owner as the fallback when the task has no member at all. The fallback exists for the
+     * same reason as the approval one: an archived task nobody was told about is exactly the silent
+     * loss the event is meant to prevent.
+     */
+    public List<String> taskArchivedRecipients(long taskId) {
+        // OWNER is folded into DEV by memberIds, so the full role set covers every stored member
+        // (including PRODUCT, who holds no permission point but is still a task member).
+        Set<String> recipients = new TreeSet<>(
+            memberIds(taskId, EnumSet.allOf(MemberRole.class)));
+        ReleaseTaskPO task = taskMapper.selectById(taskId);
+        if (task == null) {
+            return List.copyOf(recipients);
+        }
+        addIfPresent(recipients, task.getCreator());
+        if (recipients.isEmpty()) {
+            addIfPresent(recipients, systemOwner(task.getSubsystemId()));
+        }
+        return List.copyOf(recipients);
+    }
+
     // ------------------------------------------------------------------ approval (4.2)
 
     /**

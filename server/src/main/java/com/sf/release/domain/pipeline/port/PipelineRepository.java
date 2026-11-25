@@ -97,6 +97,36 @@ public interface PipelineRepository {
     /** Marks the still-{@code PENDING} tasks of one node {@code SKIPPED}, leaving other rows alone. */
     boolean skipPendingTasks(long instanceId, NodeType nodeType, Instant now);
 
+    /**
+     * {@code PENDING/RUNNING/PAUSED → TERMINATED} with the operator-facing reason stored in
+     * {@code status_reason} and {@code end_at} set (P5-B design §2).
+     *
+     * <p><strong>Why a separate method.</strong> {@link #finishInstance(long, InstanceStatus,
+     * Instant)} deliberately matches only {@code PENDING}/{@code RUNNING}: it is the normal
+     * completion path, and a paused instance is not "finishing". A stop/exit/close/archive must
+     * terminate a {@code PAUSED} instance too — that is exactly the state a release waiting for
+     * approval or an execution is in — so it needs this wider compare-and-set. Including
+     * {@code PAUSED} here does not weaken the normal path: nothing else calls this method.
+     *
+     * @return {@code true} when this call terminated the instance
+     */
+    boolean terminateInstance(long instanceId, String reason, Instant now);
+
+    /**
+     * Marks every unfinished task of an instance {@code SKIPPED}: the still-{@code PENDING} rows, and
+     * the {@code RUNNING}/{@code WAITING_EXTERNAL} rows whose engine job must be cancelled. Already
+     * {@code SUCCESS} (and {@code FAILED}/{@code TIMEOUT}) rows are never touched — a stop keeps the
+     * batches that already went online (P5-B design §1/§8, J8/J21). The skip writes the reason as the
+     * result summary so the row explains itself.
+     *
+     * <p>The engine identifiers are returned so the caller can cancel them <em>after</em> its
+     * transaction commits: an engine cancellation cannot be rolled back, and the database rows must
+     * not depend on it succeeding.
+     *
+     * @return the {@code external_id}s of the rows this call skipped, never {@code null}
+     */
+    List<String> skipUnfinishedTasks(long instanceId, String reason, Instant now);
+
     /** {@code PENDING/RUNNING → status} for the instance, setting {@code end_at}. */
     boolean finishInstance(long instanceId, InstanceStatus status, Instant now);
 

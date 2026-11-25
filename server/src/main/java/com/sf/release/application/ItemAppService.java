@@ -13,6 +13,7 @@ import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.ItemStateMachine;
 import com.sf.release.domain.task.ItemStatus;
 import com.sf.release.domain.task.ReleaseItem;
+import com.sf.release.domain.task.TaskStatus;
 import com.sf.release.infra.repo.CodingTaskBindingMapper;
 import com.sf.release.infra.repo.DeployUnitMapper;
 import com.sf.release.infra.repo.ReleaseItemMapper;
@@ -20,6 +21,7 @@ import com.sf.release.infra.repo.ReleaseTaskMapper;
 import com.sf.release.infra.repo.po.CodingTaskBindingPO;
 import com.sf.release.infra.repo.po.DeployUnitPO;
 import com.sf.release.infra.repo.po.ReleaseItemPO;
+import com.sf.release.infra.repo.po.ReleaseTaskPO;
 import com.sf.release.infra.security.ScopeGuard;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -159,14 +161,28 @@ public class ItemAppService {
         }
     }
 
+    /**
+     * 40001 when the task is archived (FR-T-05, P5-B design §1): an archived task is read-only, so
+     * no new 变更项 may be registered under it. The guard lives in the insert path shared by the HTTP
+     * create and the internal command, so both forms enforce it.
+     */
+    private static void requireTaskNotArchived(ReleaseTaskPO task) {
+        if (TaskStatus.ARCHIVED.name().equals(task.getStatus())) {
+            throw new BizException(BizError.STATE_NOT_ALLOWED, "任务已归档，不能新增变更项",
+                Map.of("taskId", task.getId(), "currentStatus", TaskStatus.ARCHIVED.name()));
+        }
+    }
+
     private ReleaseItemPO insert(long taskId, CreateItemCmd cmd) {
         if (cmd == null) {
             throw new BizException(BizError.PARAM_INVALID, "创建参数不能为空");
         }
-        if (taskMapper.selectById(taskId) == null) {
+        ReleaseTaskPO task = taskMapper.selectById(taskId);
+        if (task == null) {
             throw new BizException(BizError.PARAM_INVALID, "发布任务不存在",
                 Map.of("taskId", taskId));
         }
+        requireTaskNotArchived(task);
         if (cmd.unitId() == null) {
             throw new BizException(BizError.PARAM_INVALID, "部署单元不能为空",
                 Map.of("unitId", "不能为空"));

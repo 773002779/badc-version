@@ -258,6 +258,40 @@ public class MybatisPipelineRepository implements PipelineRepository {
     }
 
     /**
+     * {@code PENDING/RUNNING/PAUSED → TERMINATED} while recording why (P5-B design §2 step 2).
+     *
+     * <p>{@link #finishInstance(long, InstanceStatus, Instant)} is the normal completion path and
+     * matches only {@code PENDING}/{@code RUNNING}. A release waiting for approval or for production
+     * execution is {@code PAUSED}, and a stop/exit/close/archive must end it too, so this CAS widens
+     * the matched statuses instead of changing the completion path everybody else relies on.
+     */
+    @Override
+    public boolean terminateInstance(long instanceId, String reason, Instant now) {
+        return instanceMapper.update(null, Wrappers.<PipelineInstancePO>lambdaUpdate()
+            .eq(PipelineInstancePO::getId, instanceId)
+            .in(PipelineInstancePO::getStatus, InstanceStatus.PENDING.name(),
+                InstanceStatus.RUNNING.name(), InstanceStatus.PAUSED.name())
+            .set(PipelineInstancePO::getStatus, InstanceStatus.TERMINATED.name())
+            .set(PipelineInstancePO::getStatusReason,
+                truncate(reason == null ? "" : reason, MAX_STATUS_REASON_LENGTH))
+            .set(PipelineInstancePO::getEndAt, now)) == 1;
+    }
+
+    /**
+     * Marks the unfinished tasks of one instance {@code SKIPPED} and answers their engine jobs
+     * (P5-B design §2 step 3/4). The external ids are read first, so the caller can cancel them after
+     * its transaction commits; the successful batches are untouched by construction, because only
+     * {@code PENDING}/{@code RUNNING}/{@code WAITING_EXTERNAL} rows are updated.
+     */
+    @Override
+    public List<String> skipUnfinishedTasks(long instanceId, String reason, Instant now) {
+        List<String> externalIds = taskMapper.selectActiveExternalIds(instanceId);
+        String summary = truncate("已取消：" + (reason == null ? "" : reason), MAX_SUMMARY_LENGTH);
+        taskMapper.skipUnfinished(instanceId, summary, now);
+        return externalIds == null ? List.of() : List.copyOf(externalIds);
+    }
+
+    /**
      * {@code PENDING/RUNNING → FAILED} while recording why. Same status CAS as
      * {@link #finishInstance(long, InstanceStatus, Instant)}; the reason is what makes a failed
      * pipeline diagnosable from the row.

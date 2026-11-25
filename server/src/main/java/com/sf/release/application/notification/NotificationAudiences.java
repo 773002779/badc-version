@@ -53,4 +53,21 @@ public final class NotificationAudiences {
         return (resolver, baseBody) -> resolver.lockTimeoutRecipients(unitId).stream()
             .map(user -> new NotificationTarget(user, null)).toList();
     }
+
+    /**
+     * The members of {@code roles} of one release task plus its creator (P5-B close). The task-scoped
+     * twin of {@link #taskMembers(long, Set)}: a closed 变更项 knows its task, not a 发布单.
+     */
+    public static NotificationAudience taskMembersOfTask(long taskId, Set<MemberRole> roles) {
+        Set<MemberRole> wanted = roles == null || roles.isEmpty()
+            ? Set.of() : EnumSet.copyOf(roles);
+        return (resolver, baseBody) -> resolver.taskRecipientsOfTask(taskId, wanted).stream()
+            .map(user -> new NotificationTarget(user, null)).toList();
+    }
+
+    /** Every member of an archived task plus its creator, with the system-owner fallback (P5-B). */
+    public static NotificationAudience taskArchived(long taskId) {
+        return (resolver, baseBody) -> resolver.taskArchivedRecipients(taskId).stream()
+            .map(user -> new NotificationTarget(user, null)).toList();
+    }
 }

@@ -23,6 +23,7 @@ import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.ItemStateMachine;
 import com.sf.release.domain.task.ItemStatus;
 import com.sf.release.domain.task.ReleaseItem;
+import com.sf.release.domain.task.TaskStatus;
 import com.sf.release.infra.lock.UnitLockService;
 import com.sf.release.infra.repo.EnvDeMapper;
 import com.sf.release.infra.repo.NodeTaskMapper;
@@ -30,12 +31,14 @@ import com.sf.release.infra.repo.PipelineInstanceMapper;
 import com.sf.release.infra.repo.PipelineNodeMapper;
 import com.sf.release.infra.repo.ReleaseItemMapper;
 import com.sf.release.infra.repo.ReleaseOrderMapper;
+import com.sf.release.infra.repo.ReleaseTaskMapper;
 import com.sf.release.infra.repo.po.EnvDePO;
 import com.sf.release.infra.repo.po.NodeTaskPO;
 import com.sf.release.infra.repo.po.PipelineInstancePO;
 import com.sf.release.infra.repo.po.PipelineNodePO;
 import com.sf.release.infra.repo.po.ReleaseItemPO;
 import com.sf.release.infra.repo.po.ReleaseOrderPO;
+import com.sf.release.infra.repo.po.ReleaseTaskPO;
 import com.sf.release.infra.security.ScopeGuard;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -116,6 +119,7 @@ public class PublishAppService {
     private final ReleaseItemMapper itemMapper;
     private final EnvDeMapper envDeMapper;
     private final ReleaseOrderMapper orderMapper;
+    private final ReleaseTaskMapper releaseTaskMapper;
     private final PipelineInstanceMapper instanceMapper;
     private final PipelineNodeMapper nodeMapper;
     private final NodeTaskMapper taskMapper;
@@ -136,6 +140,7 @@ public class PublishAppService {
     public PublishAppService(ReleaseItemMapper itemMapper,
                              EnvDeMapper envDeMapper,
                              ReleaseOrderMapper orderMapper,
+                             ReleaseTaskMapper releaseTaskMapper,
                              PipelineInstanceMapper instanceMapper,
                              PipelineNodeMapper nodeMapper,
                              NodeTaskMapper taskMapper,
@@ -149,6 +154,7 @@ public class PublishAppService {
         this.itemMapper = itemMapper;
         this.envDeMapper = envDeMapper;
         this.orderMapper = orderMapper;
+        this.releaseTaskMapper = releaseTaskMapper;
         this.instanceMapper = instanceMapper;
         this.nodeMapper = nodeMapper;
         this.taskMapper = taskMapper;
@@ -173,6 +179,7 @@ public class PublishAppService {
     public PublishResult publish(long itemId) {
         ReleaseItem item = loadItem(itemId);
         ScopeGuard.assertUnitInScope(item.unitId());
+        requireTaskNotArchived(item);
         if (item.type() != UnitType.UNIT) {
             throw new BizException(BizError.STATE_NOT_ALLOWED,
                 "二方库发布流水线不在本期范围", Map.of("itemId", itemId, "type", item.type().name()));
@@ -222,6 +229,28 @@ public class PublishAppService {
             // update, so the row still belongs to the reserved sentinel.
             unitLockService.release(unitId, UnitLockService.UNBOUND_INSTANCE_ID);
             throw ex;
+        }
+    }
+
+    /**
+     * 40001 when the owning task is archived (FR-T-05, P5-B design §1: an archived task is
+     * read-only). Checked before the unit lock and before any write, so a refused publish reserves
+     * nothing. Staging/rollback are deliberately not guarded: a rollback of an archived task's unit
+     * stays the operations recovery path (design §8).
+     */
+    private void requireTaskNotArchived(ReleaseItem item) {
+        if (item.taskId() == null) {
+            throw new BizException(BizError.PARAM_INVALID, "变更项所属任务不存在",
+                Map.of("itemId", item.id()));
+        }
+        ReleaseTaskPO task = releaseTaskMapper.selectById(item.taskId());
+        if (task == null) {
+            throw new BizException(BizError.PARAM_INVALID, "变更项所属任务不存在",
+                Map.of("itemId", item.id(), "taskId", item.taskId()));
+        }
+        if (TaskStatus.ARCHIVED.name().equals(task.getStatus())) {
+            throw new BizException(BizError.STATE_NOT_ALLOWED, "任务已归档，不能发起发布",
+                Map.of("itemId", item.id(), "taskId", item.taskId()));
         }
     }
 

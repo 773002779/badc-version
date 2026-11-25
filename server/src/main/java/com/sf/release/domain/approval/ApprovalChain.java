@@ -179,4 +179,36 @@ public final class ApprovalChain {
         }
         return target;
     }
+
+    /**
+     * Cancels every still-{@link ApprovalStatus#PENDING} step of the chain, keeping the decided
+     * history untouched (P5-B design §3: "审批链作废").
+     *
+     * <p>The chain had no "cancel all" operation before: {@link #reject} cancels only the steps
+     * <em>after</em> the rejected one, which is the wrong shape for a stop/exit/close — nobody is
+     * rejecting anything there, the release itself is gone, so every expected signature becomes
+     * meaningless at once. The steps are cancelled instead of deleted on purpose: the chain is the
+     * evidence of who was still expected to sign.
+     *
+     * <p>The cancellation records when and why so the page can explain it; {@code decidedBy} stays
+     * {@code null}, because nobody signed. Idempotent: a chain with nothing pending is returned
+     * unchanged.
+     *
+     * @param reason why the pending signatures are void (stored on every cancelled step)
+     * @param at     the moment of the cancellation
+     * @return the same chain instance when nothing was pending, otherwise the updated chain
+     */
+    public ApprovalChain cancelPending(String reason, Instant at) {
+        List<ApprovalStep> next = new ArrayList<>(steps.size());
+        boolean changed = false;
+        for (ApprovalStep step : steps) {
+            if (step.pending()) {
+                next.add(step.decided(ApprovalStatus.CANCELED, null, at, reason));
+                changed = true;
+            } else {
+                next.add(step);
+            }
+        }
+        return changed ? new ApprovalChain(next) : this;
+    }
 }

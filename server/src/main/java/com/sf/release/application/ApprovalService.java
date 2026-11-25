@@ -245,6 +245,59 @@ public class ApprovalService {
         return removed;
     }
 
+    /**
+     * Cancels every still-pending step of one snapshot's chain (P5-B design §3): a stop/exit/close
+     * voids the signatures nobody has given yet, because the release they were for no longer exists.
+     *
+     * <p>The order row is locked first, exactly like {@link #ensureChain} and {@link #decide}: a
+     * cancellation must not interleave with a signature or a freeze-driven append of the same order.
+     * The chain itself is read with a locking read so a decision that committed a moment ago is seen
+     * (MySQL's {@code REPEATABLE READ} would otherwise keep the pre-decision snapshot).
+     *
+     * <p>Decided steps are never touched: an approval that happened stays as evidence. The cancelled
+     * step keeps its role and step number and records when and why it was voided.
+     *
+     * @return how many steps were cancelled
+     */
+    @Transactional
+    public int cancelPending(long orderId, long snapshotId, String reason) {
+        requireSnapshotId(snapshotId);
+        if (releaseOrderMapper.selectByIdForUpdate(orderId) == null) {
+            throw new IllegalStateException(
+                "approval cancellation requires an existing release_order: " + orderId);
+        }
+        List<ApprovalPO> stored = approvalMapper.selectBySnapshotForUpdate(snapshotId);
+        ApprovalChain chain = chainOf(stored);
+        int pending = (int) chain.steps().stream().filter(ApprovalStep::pending).count();
+        if (pending == 0) {
+            return 0;
+        }
+        Instant now = Instant.now();
+        String note = trimToNull(reason) == null ? "发布已停止，审批作废" : reason.trim();
+        ApprovalChain updated = chain.cancelPending(note, now);
+        persistDecisions(chain, updated, stored);
+        log.info("approval chain cancelled: orderId={}, snapshotId={}, steps={}, reason={}",
+            orderId, snapshotId, pending, note);
+        return pending;
+    }
+
+    /**
+     * Cancels the pending steps of the order's <em>newest</em> admission snapshot, which is the chain
+     * an operator is looking at. Used by the stop/exit/close cascades, which know the order but not its
+     * snapshot id.
+     *
+     * @return how many steps were cancelled (0 when the order was never submitted or has nothing
+     *     pending)
+     */
+    @Transactional
+    public int cancelPendingOfLatestSnapshot(long orderId, String reason) {
+        AdmissionSnapshotPO snapshot = snapshotMapper.selectLatestByOrder(orderId);
+        if (snapshot == null || snapshot.getId() == null) {
+            return 0;
+        }
+        return cancelPending(orderId, snapshot.getId(), reason);
+    }
+
     /** The whole chain of one snapshot, in signature order (empty when nothing was required). */
     public List<ApprovalStep> steps(long snapshotId) {
         requireSnapshotId(snapshotId);

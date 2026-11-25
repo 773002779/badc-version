@@ -12,10 +12,14 @@ import java.util.Locale;
  * and tasks, and {@link #SETTING_UPDATE} covers the CODING connection and the notification block —
  * which is why the command carries the object type as well.
  *
- * <p><strong>The enum grows with P5.</strong> The daily/exit/close/archive/force-unlock actions are
- * declared here already (their names are the contract) but no trigger writes them yet: the
- * corresponding use cases belong to GAP-05/GAP-04/GAP-11. Adding an action later is an enum value
- * and a trigger point; the table does not change.
+ * <p><strong>The enum grows with P5.</strong> The daily/stop/exit/close/archive actions are declared
+ * here and written by their use cases (P5-A daily start, P5-B stop/exit/close/archive); the
+ * force-unlock action is still a placeholder for GAP-11. Adding an action later is an enum value and
+ * a trigger point; the table does not change.
+ *
+ * <p>{@link #STOP} is the production-flow action ("停止发布") and is separate from {@link #DAILY_STOP}
+ * ("日常发布停止"): the two stop different pipelines with different cascades, so one row must not
+ * describe both.
  */
 public enum AuditAction {
 
@@ -46,9 +50,10 @@ public enum AuditAction {
     WINDOW_UPDATE("更新发布窗口", AuditObjectType.SETTING, true),
     RESOURCE_UPDATE("更新资源", AuditObjectType.SUBSYSTEM, false),
 
-    // ---------------------------------------------------------------- P5 placeholders (not wired)
+    // ---------------------------------------------------------------- P5 actions
     DAILY_START("日常发布开始", AuditObjectType.ORDER, false),
     DAILY_STOP("日常发布停止", AuditObjectType.ORDER, false),
+    STOP("停止发布", AuditObjectType.ORDER, false),
     EXIT("退出发布", AuditObjectType.ORDER, false),
     CLOSE("关闭发布", AuditObjectType.ORDER, false),
     ARCHIVE("归档发布", AuditObjectType.ORDER, false),

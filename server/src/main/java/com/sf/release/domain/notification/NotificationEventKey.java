@@ -1,8 +1,7 @@
 package com.sf.release.domain.notification;
 
 /**
- * The fourteen notification events of P4-B (design section 3) with their Chinese names and the
- * object type they point at.
+ * The notification events with their Chinese names and the object type they point at.
  *
  * <p>The name is part of the persisted contract ({@code notification.event_key}) and of the web
  * response ({@code eventKey}); the label is what the page and the WeCom markdown show. The
@@ -10,8 +9,8 @@ package com.sf.release.domain.notification;
  * object, and the dedupe key can be built without asking the caller.
  *
  * <p>The object type is a stable machine word and the page decides the click target from it (design
- * section 7): an ORDER row opens the 发布单, a UNIT row the deployment unit, a FREEZE row the 封板
- * page, a WAIVER row the gate section of its 发布单.
+ * section 7): an ORDER row opens the 发布单, an ITEM row the 变更项, a TASK row the 发布任务, a UNIT row
+ * the deployment unit, a FREEZE row the 封板 page, a WAIVER row the gate section of its 发布单.
  */
 public enum NotificationEventKey {
     BUILD_FAILED("构建失败", NotificationObjectType.ORDER),
@@ -27,7 +26,13 @@ public enum NotificationEventKey {
     ROLLBACK_DONE("回滚完成", NotificationObjectType.UNIT),
     FREEZE_APPLIED("封板生效", NotificationObjectType.FREEZE),
     FREEZE_RELEASED("封板解除", NotificationObjectType.FREEZE),
-    LOCK_TIMEOUT_RELEASED("锁超时释放", NotificationObjectType.UNIT);
+    LOCK_TIMEOUT_RELEASED("锁超时释放", NotificationObjectType.UNIT),
+    // P5-B stop / exit / close / archive (design §5): one event per action, so a recipient can tell
+    // "production was stopped" from "the pipeline was exited" without parsing the body.
+    RELEASE_STOPPED("发布单已停止", NotificationObjectType.ORDER),
+    RELEASE_EXITED("发布单已退出", NotificationObjectType.ORDER),
+    ITEM_CLOSED("变更项已关闭", NotificationObjectType.ITEM),
+    TASK_ARCHIVED("任务已归档", NotificationObjectType.TASK);
 
     private final String label;
     private final NotificationObjectType objectType;

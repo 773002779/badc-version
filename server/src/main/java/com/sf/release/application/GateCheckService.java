@@ -246,6 +246,36 @@ public class GateCheckService {
         return invalidated;
     }
 
+    /**
+     * Marks the checks that have not produced a result yet ({@code PENDING}/{@code RUNNING})
+     * {@code INVALID} (P5-B design §3): the release they belonged to has been exited or closed, so a
+     * result that arrives later must not be read as "this release passed".
+     *
+     * <p>Only unfinished rows are touched. A recorded {@code PASS}/{@code FAIL} is history — the same
+     * rule {@link #invalidateAll} follows for a rebuild — and stays readable. The down-stream node task
+     * mirror is left alone: no node runs any more, and the status of the check rows is what the gate
+     * reads.
+     *
+     * @return the number of rows invalidated
+     */
+    public int invalidateUnfinished(long itemId, String reason) {
+        Instant now = Instant.now();
+        String summary = reason == null || reason.isBlank() ? "变更项已关闭，检查结果失效" : reason;
+        int rows = checkMapper.update(null, Wrappers.<GateCheckPO>lambdaUpdate()
+            .eq(GateCheckPO::getItemId, itemId)
+            .in(GateCheckPO::getStatus, GateCheckStatus.PENDING.name(),
+                GateCheckStatus.RUNNING.name())
+            .set(GateCheckPO::getStatus, GateCheckStatus.INVALID.name())
+            .set(GateCheckPO::getSummary, summary)
+            .set(GateCheckPO::getFinishedAt, now)
+            .set(GateCheckPO::getUpdatedAt, now));
+        if (rows > 0) {
+            log.info("unfinished gate checks invalidated: itemId={}, count={}, reason={}", itemId,
+                rows, summary);
+        }
+        return rows;
+    }
+
     /** Every check row of one item, ordered by stage then kind. */
     public List<GateCheck> checks(long itemId) {
         List<GateCheck> rows = new ArrayList<>();

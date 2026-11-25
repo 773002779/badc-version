@@ -316,6 +316,31 @@ public class GateService {
         return decision.admits() && testPassed(po);
     }
 
+    /**
+     * Voids the checks of one 变更项 that have not finished yet and records
+     * {@link GateStatus#CHECK_INVALID} on the item (P5-B design §3). Called by the exit/close cascades
+     * inside their business transaction.
+     *
+     * <p>This is deliberately narrower than {@link GateCheckService#invalidateAll}: only
+     * {@code PENDING}/{@code RUNNING} rows change, so a {@code PASS}/{@code FAIL} that already happened
+     * stays as evidence, and the item's check dimension is recorded as invalid so a page cannot keep
+     * showing the old verdict. The main state is <em>not</em> moved: the caller's own transition
+     * ({@code CLOSE}/{@code EXIT}) owns that, and moving it here would fight the state machine.
+     *
+     * @return the number of invalidated check rows
+     */
+    public int invalidateUnfinished(long itemId, String reason) {
+        requireItem(itemId);
+        int invalidated = checkService.invalidateUnfinished(itemId, reason);
+        itemMapper.update(null, Wrappers.<ReleaseItemPO>lambdaUpdate()
+            .eq(ReleaseItemPO::getId, itemId)
+            .set(ReleaseItemPO::getGateStatus, GateStatus.CHECK_INVALID.name())
+            .set(ReleaseItemPO::getUpdatedAt, Instant.now()));
+        log.info("gate invalidated for an exited/closed item: itemId={}, checks={}, reason={}",
+            itemId, invalidated, reason);
+        return invalidated;
+    }
+
     // ------------------------------------------------------------------ test gate
 
     /**

@@ -29,6 +29,29 @@ public interface NodeTaskMapper extends BaseMapper<NodeTaskPO> {
                     @Param("now") Instant now);
 
     /**
+     * The engine identifiers of the tasks of one instance that are still in flight
+     * ({@code RUNNING}/{@code WAITING_EXTERNAL}). Read before {@link #skipUnfinished} so the caller can
+     * cancel the engine jobs after its business transaction committed (P5-B design §2 step 3/4).
+     */
+    @Select("SELECT external_id FROM node_task WHERE instance_id = #{instanceId}"
+        + " AND status IN ('RUNNING', 'WAITING_EXTERNAL') AND external_id IS NOT NULL")
+    List<String> selectActiveExternalIds(@Param("instanceId") long instanceId);
+
+    /**
+     * Marks every unfinished task of one instance {@code SKIPPED} with the cancellation reason as its
+     * result summary (P5-B design §2 step 3). Already terminal rows — in particular the
+     * {@code SUCCESS} batches that are already online — are never touched.
+     *
+     * @return the number of tasks skipped
+     */
+    @Update("UPDATE node_task SET status = 'SKIPPED', finished_at = #{now}, updated_at = #{now},"
+        + " result_summary = #{summary} WHERE instance_id = #{instanceId}"
+        + " AND status IN ('PENDING', 'RUNNING', 'WAITING_EXTERNAL')")
+    int skipUnfinished(@Param("instanceId") long instanceId,
+                       @Param("summary") String summary,
+                       @Param("now") Instant now);
+
+    /**
      * The {@code WAITING_EXTERNAL} tasks the reconcile loop must poll (tech design §6.3):
      * external jobs that have not been observed for {@code 90s}, plus every external job whose
      * deadline passed (a timeout must not be delayed by a recent observation).

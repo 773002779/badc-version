@@ -85,7 +85,8 @@ public class RollbackCompletionService {
     @EventListener
     @Transactional
     public void onInstanceFinished(InstanceFinishedEvent event) {
-        if (event.status() != InstanceStatus.DONE && event.status() != InstanceStatus.FAILED) {
+        if (event.status() != InstanceStatus.DONE && event.status() != InstanceStatus.FAILED
+                && event.status() != InstanceStatus.TERMINATED) {
             // A pause or a close is not a rollback result: the record stays RUNNING (an abandoned
             // rollback is visible as RUNNING, which is the truth).
             return;
