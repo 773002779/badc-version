@@ -25,6 +25,7 @@ import type {
   NotificationPage,
   NotificationSettingView,
   PageResult,
+  PipelineConfigView,
   ReleaseDetail,
   ReleaseRecord,
   ReleaseRecordRow,
@@ -152,6 +153,34 @@ export const addEnvDe = (
     deployBatchNo?: number
   }
 ) => api<number>(`/units/${unitId}/env-des`, { method: 'POST', body: JSON.stringify(body) })
+
+// ------------------------------------------- unit pipeline config (P6-C)
+
+/**
+ * The unit's pipeline configuration (design §3). A unit that never saved it answers the documented
+ * defaults with `configured:false`. Requires `setting:manage`; a non-manage caller is rejected.
+ */
+export const getPipelineConfig = (unitId: number) =>
+  api<PipelineConfigView>(`/api/v1/units/${unitId}/pipeline-config`)
+
+/**
+ * Full replacement of the four settings. The fields travel as strings because that is the request
+ * contract (the server parses and range-checks them: 5–240 / 1–120 / FORWARD|REVERSE); a rejected
+ * value answers 40000 with the server's Chinese message.
+ */
+export const savePipelineConfig = (
+  unitId: number,
+  body: {
+    envChecksEnabled: string
+    buildTimeoutMinutes: string
+    deployTimeoutMinutes: string
+    batchOrder: string
+  }
+) =>
+  api<PipelineConfigView>(`/api/v1/units/${unitId}/pipeline-config`, {
+    method: 'PUT',
+    body: JSON.stringify(body)
+  })
 
 // ------------------------------------------------- second-party library (P6-A)
 /**

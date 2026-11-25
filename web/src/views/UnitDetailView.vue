@@ -1,20 +1,31 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   addEnvDe,
   bindCodingTasks,
   getLibDependents,
+  getMe,
+  getPipelineConfig,
   getSubsystem,
   getUnit,
   listAudit,
   listCodingJobs,
   listCodingTasks,
   listEnvDes,
+  savePipelineConfig,
   updateUnit
 } from '../api'
-import type { AuditRow, BindingView, CodingJobView, EnvDeView, LibDependentsView, UnitView } from '../api/types'
+import type {
+  AuditRow,
+  BindingView,
+  CodingJobView,
+  EnvDeView,
+  LibDependentsView,
+  PipelineConfigView,
+  UnitView
+} from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
@@ -136,6 +147,148 @@ async function loadJobs() {
 }
 
 const optionLabel = (job: CodingJobView) => (job.name ? `${job.name} · ${job.taskId}` : job.taskId)
+
+// ---- pipeline configuration (P6-C) -----------------------------------------
+// The unit-level safe subset of GAP-09 (design §4): environment checks, build/deploy timeouts and the
+// batch order. Both endpoints require `setting:manage`, so a non-manage caller gets the read-only
+// branch with the reason and never calls them (the API rejects it with 40009) — the same pattern as
+// the settings page's blocks. `configured:false` means the unit never saved a row, so the form starts
+// on the documented defaults and the page says so.
+const pipelineView = ref<PipelineConfigView | null>(null)
+const pipelineCanManage = ref(false)
+const pipelineLoading = ref(false)
+const pipelineError = ref<string | null>(null)
+const pipelineSaving = ref(false)
+const pipelineForm = reactive({
+  envChecksEnabled: true,
+  buildTimeoutMinutes: '60',
+  deployTimeoutMinutes: '8',
+  batchOrder: 'FORWARD'
+})
+
+// Display-only names of the three environment checks (the same Chinese labels as the verification
+// panel) and the bounds of the two timeout fields. The machine values are the API contract; the page
+// keeps no copy of the check enum or of the batch-order enum (the server sends `batchOrderLabel`).
+const ENV_CHECKS = [
+  { value: 'SECURITY_DYNAMIC', label: '安全动态测试' },
+  { value: 'AUTO_TEST', label: '自动化测试' },
+  { value: 'DB_NORM', label: '数据库规范' }
+] as const
+const BUILD_LIMITS = { min: 5, max: 240 }
+const DEPLOY_LIMITS = { min: 1, max: 120 }
+
+const pipelineSubtitle = computed(() => {
+  if (pipelineLoading.value) return '读取中…'
+  if (!pipelineCanManage.value) return '仅平台管理员可见'
+  const view = pipelineView.value
+  if (!view || !view.configured) return '当前为默认配置'
+  const state = isLib.value
+    ? `构建超时 ${view.buildTimeoutMinutes} 分钟`
+    : `构建 ${view.buildTimeoutMinutes} / 部署 ${view.deployTimeoutMinutes} 分钟 · ${view.batchOrderLabel}`
+  return view.updatedBy ? `${state} · ${view.updatedBy} 更新于 ${formatDateTime(view.updatedAt)}` : state
+})
+
+const pipelineStatus = computed(() => {
+  if (pipelineLoading.value) return { label: '读取中…', tone: 'info' as const }
+  if (!pipelineCanManage.value) return { label: '只读', tone: 'info' as const }
+  return pipelineView.value?.configured
+    ? { label: '已保存', tone: 'success' as const }
+    : { label: '默认配置', tone: 'info' as const }
+})
+
+function fillPipeline(view: PipelineConfigView) {
+  pipelineView.value = view
+  pipelineForm.envChecksEnabled = view.envChecksEnabled
+  pipelineForm.buildTimeoutMinutes = String(view.buildTimeoutMinutes)
+  pipelineForm.deployTimeoutMinutes = String(view.deployTimeoutMinutes)
+  pipelineForm.batchOrder = view.batchOrder
+}
+
+async function loadPipeline() {
+  pipelineLoading.value = true
+  pipelineError.value = null
+  try {
+    const me = await getMe()
+    pipelineCanManage.value = me.perms.includes('setting:manage')
+    if (!pipelineCanManage.value) {
+      // No permission means no read either: the endpoint rejects it with 40009, so do not call it.
+      pipelineView.value = null
+      return
+    }
+    fillPipeline(await getPipelineConfig(id))
+  } catch (e) {
+    pipelineError.value = e instanceof ApiError ? e.message : '读取流水线配置失败'
+  } finally {
+    pipelineLoading.value = false
+  }
+}
+
+/** The client-side guard; the server repeats it and answers 40000 with the same Chinese message. */
+function minutesError(raw: string, label: string, min: number, max: number): string | null {
+  const value = raw.trim()
+  if (!value) return `${label}不能为空`
+  if (!/^\d+$/.test(value) || Number(value) < min || Number(value) > max) {
+    return `${label}需为 ${min}–${max} 之间的整数分钟`
+  }
+  return null
+}
+
+async function savePipeline() {
+  const buildError = minutesError(
+    pipelineForm.buildTimeoutMinutes,
+    '构建超时',
+    BUILD_LIMITS.min,
+    BUILD_LIMITS.max
+  )
+  if (buildError) {
+    ElMessage.warning(buildError)
+    return
+  }
+  if (!isLib.value) {
+    const deployError = minutesError(
+      pipelineForm.deployTimeoutMinutes,
+      '部署超时',
+      DEPLOY_LIMITS.min,
+      DEPLOY_LIMITS.max
+    )
+    if (deployError) {
+      ElMessage.warning(deployError)
+      return
+    }
+    // Turning REVERSE on is the high-risk save (design §4): the highest batch deploys first. Ask once,
+    // and only when the stored configuration was not already REVERSE — a save while it is on never
+    // re-prompts.
+    if (pipelineForm.batchOrder === 'REVERSE' && pipelineView.value?.batchOrder !== 'REVERSE') {
+      try {
+        await ElMessageBox.confirm(
+          '逆序批次是高风险：先高批后低批，且只影响此后新建的生产实例；' +
+            '测试部署不分批，回滚路径自带逆序、不受此项影响。',
+          '保存流水线配置',
+          { type: 'warning', confirmButtonText: '确认逆序', cancelButtonText: '取消' }
+        )
+      } catch {
+        return
+      }
+    }
+  }
+  pipelineSaving.value = true
+  try {
+    // Full replacement: a LIB sends its current hidden values back unchanged, so saving the visible
+    // build timeout never flips the switch or the batch order it cannot see.
+    const view = await savePipelineConfig(id, {
+      envChecksEnabled: String(pipelineForm.envChecksEnabled),
+      buildTimeoutMinutes: pipelineForm.buildTimeoutMinutes.trim(),
+      deployTimeoutMinutes: pipelineForm.deployTimeoutMinutes.trim(),
+      batchOrder: pipelineForm.batchOrder
+    })
+    fillPipeline(view)
+    ElMessage.success('流水线配置已保存')
+  } catch (e) {
+    ElMessage.error(e instanceof ApiError ? e.message : '保存流水线配置失败')
+  } finally {
+    pipelineSaving.value = false
+  }
+}
 
 // ---- edit dialog -----------------------------------------------------------
 const editDialog = ref(false)
@@ -317,12 +470,14 @@ function onAuditSizeChange() {
 
 function reloadAll() {
   load()
+  loadPipeline()
   loadAudit()
 }
 
 onMounted(() => {
   load()
   loadJobs()
+  loadPipeline()
   loadAudit()
 })
 
@@ -618,6 +773,123 @@ async function submitDe() {
             </template>
             <template v-else>首次发布需三类绑定齐全，缺少 BUILD 分支会在创建变更项时返回 40011。</template>
           </p>
+        </DataSection>
+
+        <DataSection class="unit-pipeline" title="流水线配置" :subtitle="pipelineSubtitle">
+          <template #actions>
+            <el-tag
+              v-if="!pipelineLoading"
+              class="pipeline-state"
+              size="small"
+              effect="plain"
+              :type="pipelineStatus.tone"
+            >{{ pipelineStatus.label }}</el-tag>
+            <el-button
+              v-if="pipelineCanManage"
+              type="primary"
+              class="pipeline-save"
+              :disabled="pipelineSaving"
+              :loading="pipelineSaving"
+              @click="savePipeline"
+            >保存</el-button>
+          </template>
+
+          <el-alert
+            v-if="pipelineError"
+            type="error"
+            :closable="false"
+            show-icon
+            :title="pipelineError"
+            style="margin-bottom: 12px"
+          />
+
+          <div v-if="!pipelineLoading && !pipelineCanManage" class="restricted">
+            <span class="strong">需要平台管理员权限</span>
+            <span class="weak small">
+              流水线配置决定该单元的检查、超时与批次顺序，只有具备 <code class="mono">setting:manage</code>
+              的账号可以查看和修改；当前账号无权读取该配置。
+            </span>
+          </div>
+
+          <template v-else-if="pipelineCanManage">
+            <p v-if="pipelineView && !pipelineView.configured" class="pipeline-default weak small">
+              当前为默认配置（构建 60 分钟 / 部署 8 分钟 / 顺序 / 环境检查开），本单元尚未保存过。
+            </p>
+
+            <div class="pipeline-grid">
+              <div v-if="!isLib" class="pipeline-field pipeline-env">
+                <span class="pipeline-label">环境级检查</span>
+                <span class="switch-row">
+                  <el-switch
+                    v-model="pipelineForm.envChecksEnabled"
+                    class="pipeline-env-switch"
+                    active-text="开启"
+                    inactive-text="关闭"
+                  />
+                  <span class="weak small">关闭后新实例不再生成下列检查任务。</span>
+                </span>
+                <span class="env-checks">
+                  <el-tag
+                    v-for="check in ENV_CHECKS"
+                    :key="check.value"
+                    size="small"
+                    effect="plain"
+                    :type="pipelineForm.envChecksEnabled ? 'success' : 'info'"
+                  >
+                    {{ check.label }} <code class="mono">{{ check.value }}</code>
+                  </el-tag>
+                </span>
+                <span class="weak small pipeline-env-note">
+                  <b>停用对在途评估立即生效</b>：已停用的检查在评估时被忽略且不会补跑；与平台级门禁规则取交集。
+                </span>
+              </div>
+
+              <label class="pipeline-field">
+                <span class="pipeline-label">构建超时</span>
+                <el-input
+                  v-model="pipelineForm.buildTimeoutMinutes"
+                  class="pipeline-build"
+                  inputmode="numeric"
+                  placeholder="60"
+                >
+                  <template #append>分钟</template>
+                </el-input>
+                <span class="weak small">5–240 分钟；BUILD 与 LIB_PUBLISH 的 deadline 取自此值，日常构建同用。</span>
+              </label>
+
+              <label v-if="!isLib" class="pipeline-field">
+                <span class="pipeline-label">部署超时</span>
+                <el-input
+                  v-model="pipelineForm.deployTimeoutMinutes"
+                  class="pipeline-deploy"
+                  inputmode="numeric"
+                  placeholder="8"
+                >
+                  <template #append>分钟</template>
+                </el-input>
+                <span class="weak small">1–120 分钟；测试 / 生产 / 日常部署共用，默认 8 分钟。</span>
+              </label>
+
+              <div v-if="!isLib" class="pipeline-field pipeline-order">
+                <span class="pipeline-label">批次顺序</span>
+                <el-radio-group v-model="pipelineForm.batchOrder" class="pipeline-order-group">
+                  <el-radio-button label="FORWARD">顺序</el-radio-button>
+                  <el-radio-button label="REVERSE">逆序</el-radio-button>
+                </el-radio-group>
+                <span class="weak small">
+                  顺序：先低批后高批（默认）。逆序：先高批后低批（<b>高风险</b>，保存时二次确认）；只影响新建的
+                  生产实例，测试部署不分批，回滚路径不受此项影响。
+                </span>
+              </div>
+            </div>
+
+            <p v-if="isLib" class="weak small pipeline-lib-note">
+              二方库没有 VERIFY 节点与生产部署，环境级检查与批次顺序对它不适用，只保留构建超时（部署超时同样隐藏）。
+            </p>
+            <p v-if="pipelineView?.updatedBy" class="weak small pipeline-audit">
+              最近保存：{{ pipelineView.updatedBy }} · {{ formatDateTime(pipelineView.updatedAt) }}
+            </p>
+          </template>
         </DataSection>
 
         <DataSection v-if="!isLib" title="发布前置条件" :subtitle="missing ? `缺 ${missing} 项` : '已就绪'">
@@ -941,6 +1213,67 @@ async function submitDe() {
   line-height: 1.6;
 }
 
+/* 流水线配置 (P6-C): the safe subset of GAP-09, a field grid like the settings-page blocks. */
+.pipeline-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 18px;
+}
+.pipeline-env {
+  grid-column: 1 / -1;
+}
+.pipeline-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pipeline-label {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.switch-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.env-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.env-checks code {
+  color: var(--text-3);
+}
+.pipeline-env-note {
+  line-height: 1.7;
+}
+.pipeline-default {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+}
+.pipeline-order-group {
+  align-self: flex-start;
+}
+.pipeline-audit,
+.pipeline-lib-note {
+  margin: 10px 0 0;
+  line-height: 1.6;
+}
+.restricted {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
 /* 操作日志: a full-width table under the two-column overview, matching the records page. */
 .unit-audit {
   margin-top: 16px;
@@ -966,6 +1299,9 @@ async function submitDe() {
 
 @media (max-width: 960px) {
   .grid {
+    grid-template-columns: 1fr !important;
+  }
+  .pipeline-grid {
     grid-template-columns: 1fr !important;
   }
 }

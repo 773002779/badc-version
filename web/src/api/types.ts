@@ -716,3 +716,24 @@ export interface TodoBoardView {
   execute: TodoGroupView
   mine: TodoGroupView
 }
+
+// ---------------------------------------- unit pipeline config (P6-C)
+
+/**
+ * The 「流水线配置」 block of one unit (P6-C design §1/§3). The four settings are the safe subset of
+ * GAP-09: environment checks, build/deploy timeouts, batch order. `batchOrder` is the machine value
+ * (the request contract) and `batchOrderLabel` the server's Chinese label, so the web keeps no copy
+ * of the enum. `configured:false` means the unit never saved a row: the values are then the
+ * documented defaults (environment checks on, build 60, deploy 8, FORWARD) with null metadata.
+ */
+export interface PipelineConfigView {
+  unitId: number
+  envChecksEnabled: boolean
+  buildTimeoutMinutes: number
+  deployTimeoutMinutes: number
+  batchOrder: string
+  batchOrderLabel: string
+  configured: boolean
+  updatedBy?: string | null
+  updatedAt?: string | null
+}
