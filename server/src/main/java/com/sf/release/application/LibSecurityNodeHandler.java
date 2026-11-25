@@ -6,6 +6,7 @@ import com.sf.release.domain.pipeline.NodeHandler;
 import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineNode;
+import com.sf.release.domain.pipeline.UnitPipelineConfig;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -84,7 +85,10 @@ public final class LibSecurityNodeHandler implements NodeHandler {
         }
         // The platform gate switches apply to the library path too: a disabled artifact check is
         // not triggered (P6-B design §2.1/§5.2). The gate's completeness guard ignores it as well.
-        Set<CheckType> enabled = checkService.enabledChecks();
+        // P6-C: the unit's environment-check switch is intersected as well; it can only remove
+        // environment checks, and a library has none, so the artifact checks are unaffected.
+        Set<CheckType> enabled = UnitPipelineConfig.effectiveChecks(checkService.enabledChecks(),
+            repository.pipelineConfigOf(current.id()));
         int started = 0;
         for (CheckType type : CheckType.libSecurityChecks()) {
             if (!enabled.contains(type) || existing.contains(type)) {

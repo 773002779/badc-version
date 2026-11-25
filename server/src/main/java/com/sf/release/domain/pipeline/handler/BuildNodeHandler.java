@@ -13,6 +13,7 @@ import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineNode;
 import com.sf.release.domain.pipeline.TaskType;
+import com.sf.release.domain.pipeline.UnitPipelineConfig;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.pipeline.port.TransactionRunner;
 import org.slf4j.Logger;
@@ -155,9 +156,12 @@ public final class BuildNodeHandler implements NodeHandler {
             throw ex;
         }
         Instant now = Instant.now();
+        // P6-C: the unit's build timeout, read when this step enters the engine. A task already
+        // WAITING_EXTERNAL keeps the deadline it was given; nothing is recalculated.
+        Duration deadline = buildDeadlineOf(instance.id());
         boolean stored = transactionRunner.inTransaction(() -> {
             boolean marked = repository.markTaskWaitingExternal(task.id(), result.externalId(),
-                result.externalUrl(), now.plus(BUILD_DEADLINE), now);
+                result.externalUrl(), now.plus(deadline), now);
             if (result.commitSha() != null) {
                 // Later steps build the same commit, not the branch head again.
                 repository.recordCommit(instance.id(), result.commitSha());
@@ -168,6 +172,16 @@ public final class BuildNodeHandler implements NodeHandler {
             log.warn("task was not moved to WAITING_EXTERNAL: instanceId={}, taskId={},"
                 + " externalId={}", instance.id(), task.id(), result.externalId());
         }
+    }
+
+    /**
+     * The build timeout of this pipeline (P6-C design §2): the unit's configured value, or the
+     * pre-P6-C constant when there is no row/readable row. The daily pipeline resolves the same
+     * way (through the instance's own unit id), so both build paths share it.
+     */
+    private Duration buildDeadlineOf(long instanceId) {
+        UnitPipelineConfig config = repository.pipelineConfigOf(instanceId);
+        return config == null ? BUILD_DEADLINE : config.buildDeadline();
     }
 
     /**

@@ -22,6 +22,7 @@ import com.sf.release.domain.pipeline.NodeTaskStatus;
 import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.TaskType;
+import com.sf.release.domain.pipeline.UnitPipelineConfig;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.infra.repo.GateCheckMapper;
 import com.sf.release.infra.repo.NodeTaskMapper;
@@ -165,7 +166,11 @@ public class GateCheckService {
         if (instance == null || instance.id() == null) {
             return 0;
         }
-        Set<CheckType> enabled = enabledChecks();
+        // P6-C: the platform switches intersected with the unit's environment-check switch. A
+        // disabled environment check is not triggered for a new run (its historical rows stay
+        // readable and are ignored by the gate evaluation).
+        UnitPipelineConfig config = repository.pipelineConfigOf(instance.id());
+        Set<CheckType> enabled = UnitPipelineConfig.effectiveChecks(enabledChecks(), config);
         CheckContext context = contextOf(instance);
         if (context.missingObject() != null) {
             // Never start a check without the object it must scan: an empty scan would either fail

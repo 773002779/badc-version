@@ -6,6 +6,7 @@ import com.sf.release.domain.pipeline.NodeTask;
 import com.sf.release.domain.pipeline.NodeTaskStatus;
 import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
+import com.sf.release.domain.pipeline.UnitPipelineConfig;
 
 import java.time.Instant;
 import java.util.List;
@@ -234,6 +235,18 @@ public interface PipelineRepository {
      * into an explicit task failure instead of triggering the engine with a null task.
      */
     LibPublishContext libPublishContextOf(long instanceId);
+
+    /**
+     * The unit-level pipeline configuration behind an instance (P6-C design §2): the unit is
+     * resolved through the same order → item → unit path every online context uses, or from the
+     * instance's own {@code unit_id} for the order-less daily pipeline.
+     *
+     * <p>Returns {@code null} when there is no row, when no unit can be resolved, or when the row
+     * cannot be read. Callers treat {@code null} as "use the handler/build constants", so a broken
+     * configuration row can never block or shorten a pipeline. In-flight deadline rows are never
+     * rewritten: the value is only read when a task is about to be triggered.
+     */
+    UnitPipelineConfig pipelineConfigOf(long instanceId);
 
     /**
      * Durably claims the once-only {@code TestEnvReadyEvent} publication of an instance: the

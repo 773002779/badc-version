@@ -4,10 +4,13 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.sf.release.application.audit.AuditCommand;
 import com.sf.release.application.audit.AuditService;
+import com.sf.release.application.settings.PipelineConfigService;
 import com.sf.release.application.settings.SettingsService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.domain.audit.AuditAction;
+import com.sf.release.domain.pipeline.BatchOrder;
+import com.sf.release.domain.pipeline.CheckType;
 import com.sf.release.domain.pipeline.NodeTask;
 import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineFactory;
@@ -16,6 +19,7 @@ import com.sf.release.domain.pipeline.PipelineNode;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.ReleaseOrder;
 import com.sf.release.domain.pipeline.TriggerType;
+import com.sf.release.domain.pipeline.UnitPipelineConfig;
 import com.sf.release.domain.pipeline.port.GitCommitProbe;
 import com.sf.release.domain.resource.EnvDe;
 import com.sf.release.domain.resource.EnvKind;
@@ -58,6 +62,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -133,6 +138,7 @@ public class PublishAppService {
     private final PipelineOrchestrator orchestrator;
     private final AuditService audit;
     private final SettingsService settings;
+    private final PipelineConfigService pipelineConfigs;
     private final TransactionTemplate transactionTemplate;
 
     /**
@@ -156,6 +162,7 @@ public class PublishAppService {
                              PipelineOrchestrator orchestrator,
                              AuditService audit,
                              SettingsService settings,
+                             PipelineConfigService pipelineConfigs,
                              @Value("${release.pipeline.auto-start:true}") boolean autoStart,
                              PlatformTransactionManager transactionManager) {
         this.itemMapper = itemMapper;
@@ -172,6 +179,7 @@ public class PublishAppService {
         this.orchestrator = orchestrator;
         this.audit = audit;
         this.settings = settings;
+        this.pipelineConfigs = pipelineConfigs;
         this.autoStart = autoStart;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -339,13 +347,36 @@ public class PublishAppService {
     private Published publishInTransaction(long itemId, long unitId, List<EnvDe> envDes,
                                                String baseCommit) {
         PublishStart start = beginPublish(itemId, baseCommit);
+        // P6-C: the platform's enabled set intersected with the unit's environment-check switch,
+        // plus the unit's batch order. Before this slice every check was enabled and the order was
+        // forward, which is exactly what an absent row still resolves to.
+        UnitPipelineConfig config = pipelineConfigs.configOfUnit(unitId);
+        Set<CheckType> enabledChecks =
+            UnitPipelineConfig.effectiveChecks(settings.enabledChecks(), config);
+        requireExecutableChecks(unitId, enabledChecks);
+        BatchOrder batchOrder = config == null ? BatchOrder.FORWARD : config.batchOrder();
         PipelineInstance instance = PipelineFactory.createOnline(start.order(), start.item(),
-            envDes, settings.enabledChecks());
+            envDes, enabledChecks, batchOrder);
         long instanceId = persistInstance(instance, unitId, itemId);
         log.info("release published: itemId={}, unitId={}, publishNo={}, pipelineNo={}",
             itemId, unitId, start.order().publishNo(), instance.pipelineNo());
         return new Published(new PublishResult(start.order().publishNo(), instance.pipelineNo(),
             UnitType.UNIT.name()), instanceId);
+    }
+
+    /**
+     * Refuses a pipeline with no executable check. The platform settings already reject an empty
+     * set, but the unit's environment switch can empty it (the platform enables only environment
+     * checks and the unit disables them). Pre-generating an empty {@code VERIFY} node would either
+     * stall the release or let the gate pass on no evidence, so this is an explicit 40011 instead.
+     */
+    private static void requireExecutableChecks(long unitId, Set<CheckType> enabledChecks) {
+        if (!enabledChecks.isEmpty()) {
+            return;
+        }
+        throw new BizException(BizError.UNIT_NOT_CONFIGURED,
+            "平台仅启用了环境级检查，而单元又停用了环境级检查，没有可执行的检查项",
+            Map.of("unitId", unitId, "enabledChecks", List.of()));
     }
 
     /**
@@ -441,8 +472,16 @@ public class PublishAppService {
                                                 String imageDigest, String commitSha,
                                                 PipelineInstance previous) {
         List<EnvDe> envDes = loadEnvDes(unitId);
+        // P6-C: a rerun is a new instance, so it applies the same effective check set and batch
+        // order as a fresh publish. The completed production batches are carried over by DE
+        // target inside the factory, so the renumbering cannot skip the wrong batch.
+        UnitPipelineConfig config = pipelineConfigs.configOfUnit(unitId);
+        Set<CheckType> enabledChecks =
+            UnitPipelineConfig.effectiveChecks(settings.enabledChecks(), config);
+        requireExecutableChecks(unitId, enabledChecks);
+        BatchOrder batchOrder = config == null ? BatchOrder.FORWARD : config.batchOrder();
         PipelineInstance instance = PipelineFactory.createRerun(order, item, envDes,
-            triggerType, fromNode, imageDigest, commitSha, previous, settings.enabledChecks());
+            triggerType, fromNode, imageDigest, commitSha, previous, enabledChecks, batchOrder);
         long instanceId = persistInstance(instance, unitId, item.id());
         log.info("rerun pipeline created: itemId={}, unitId={}, publishNo={}, pipelineNo={},"
                 + " triggerType={}, fromNode={}, imageDigest={}",

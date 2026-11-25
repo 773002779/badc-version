@@ -61,23 +61,40 @@ public final class PipelineFactory {
      */
     public static PipelineInstance createOnline(ReleaseOrder order, ReleaseItem item,
                                                 List<EnvDe> envDes) {
-        return createOnline(order, item, envDes, Set.of(CheckType.values()));
+        return createOnline(order, item, envDes, Set.of(CheckType.values()), BatchOrder.FORWARD);
+    }
+
+    /**
+     * The pre-P6-C overload: every check and the forward batch order. Kept for callers (and tests)
+     * that have no settings context.
+     */
+    public static PipelineInstance createOnline(ReleaseOrder order, ReleaseItem item,
+                                                List<EnvDe> envDes, Set<CheckType> enabledChecks) {
+        return createOnline(order, item, envDes, enabledChecks, BatchOrder.FORWARD);
     }
 
     /**
      * Pre-generates an online instance whose {@code VERIFY} node carries one {@code CHECK} task per
-     * <em>enabled</em> check type (P6-B design §2.1).
+     * <em>enabled</em> check type (P6-B design §2.1), and whose production tasks carry the unit's
+     * batch order (P6-C design §2).
      *
      * <p>A disabled check produces no new task: the switch is a configuration of what a new
      * pipeline should run, not a deletion of history. Existing instances keep their rows; the gate
      * ignores the rows of a disabled check when it evaluates (see {@code GateService}).
      *
+     * <p><strong>Reverse batches.</strong> With {@link BatchOrder#REVERSE} a production task's batch
+     * number becomes {@code maxBatch + 1 - originalBatch} (the rollback transformation), so the
+     * handler's lowest-batch-first rule runs the highest original batch first. The test-deploy
+     * node has no batch (0) and is not affected, and nothing about an existing instance changes.
+     *
      * @param enabledChecks the enabled check types; {@code null} means "all", an empty set is a
      *                      programming error because the settings service refuses to save zero
      *                      checks (the design routes "run nothing" through the explicit waiver path)
+     * @param batchOrder    the production batch order; {@code null} means {@link BatchOrder#FORWARD}
      */
     public static PipelineInstance createOnline(ReleaseOrder order, ReleaseItem item,
-                                                List<EnvDe> envDes, Set<CheckType> enabledChecks) {
+                                                List<EnvDe> envDes, Set<CheckType> enabledChecks,
+                                                BatchOrder batchOrder) {
         Objects.requireNonNull(order, "order must not be null");
         Objects.requireNonNull(item, "item must not be null");
         if (item.type() != UnitType.UNIT) {
@@ -103,9 +120,20 @@ public final class PipelineFactory {
             .filter(de -> de.envKind() == EnvKind.TEST)
             .sorted(deOrder)
             .toList();
+        BatchOrder batchOrderOrDefault =
+            batchOrder == null ? BatchOrder.FORWARD : batchOrder;
+        int maxBatch = des.stream()
+            .filter(PipelineFactory::isProductionFamily)
+            .mapToInt(EnvDe::deployBatchNo)
+            .max().orElse(0);
         List<EnvDe> prodDes = des.stream()
             .filter(PipelineFactory::isProductionFamily)
-            .sorted(deOrder)
+            // Reverse numbering runs the highest original batch first; the pre-generation order
+            // follows the effective batch number so the persisted rows are already deterministic.
+            .sorted(batchOrderOrDefault == BatchOrder.REVERSE
+                ? Comparator.comparingInt((EnvDe de) -> reversedBatch(de, maxBatch))
+                    .thenComparing(de -> de.id() == null ? 0L : de.id())
+                : deOrder)
             .toList();
 
         List<PipelineNode> nodes = new ArrayList<>(4);
@@ -134,7 +162,9 @@ public final class PipelineFactory {
         List<NodeTask> prodTasks = new ArrayList<>(prodDes.size());
         for (EnvDe de : prodDes) {
             prodTasks.add(NodeTask.pending(NodeType.PROD_DEPLOY, TaskType.DEPLOY,
-                de.deployBatchNo(), targetId(de)));
+                batchOrderOrDefault == BatchOrder.REVERSE
+                    ? reversedBatch(de, maxBatch) : de.deployBatchNo(),
+                targetId(de)));
         }
         nodes.add(PipelineNode.pending(NodeType.PROD_DEPLOY, 3, prodTasks));
 
@@ -211,7 +241,7 @@ public final class PipelineFactory {
                                                NodeType fromNode, String imageDigest,
                                                String commitSha, PipelineInstance previous) {
         return createRerun(order, item, envDes, triggerType, fromNode, imageDigest, commitSha,
-            previous, null);
+            previous, null, BatchOrder.FORWARD);
     }
 
     /**
@@ -224,21 +254,38 @@ public final class PipelineFactory {
                                                NodeType fromNode, String imageDigest,
                                                String commitSha, PipelineInstance previous,
                                                Set<CheckType> enabledChecks) {
+        return createRerun(order, item, envDes, triggerType, fromNode, imageDigest, commitSha,
+            previous, enabledChecks, BatchOrder.FORWARD);
+    }
+
+    /**
+     * The P6-C-aware rerun (P6-C design §2): the new instance carries the unit's batch order, so a
+     * rerun resumes in the same order as a fresh publish. The previous execution's completed
+     * production batches are carried over <em>by DE target</em>, not by batch number: reversing is
+     * a renumbering, and a batch number read from the previous (possibly differently numbered)
+     * instance would point at the wrong batch.
+     */
+    public static PipelineInstance createRerun(ReleaseOrder order, ReleaseItem item,
+                                               List<EnvDe> envDes, TriggerType triggerType,
+                                               NodeType fromNode, String imageDigest,
+                                               String commitSha, PipelineInstance previous,
+                                               Set<CheckType> enabledChecks,
+                                               BatchOrder batchOrder) {
         Objects.requireNonNull(fromNode, "fromNode must not be null");
-        PipelineInstance base = createOnline(order, item, envDes, enabledChecks);
+        PipelineInstance base = createOnline(order, item, envDes, enabledChecks, batchOrder);
         PipelineNode start = base.node(fromNode);
         if (start == null) {
             throw new IllegalArgumentException(
                 "the online pipeline has no node " + fromNode);
         }
-        Set<Integer> completedBatches = fromNode == NodeType.PROD_DEPLOY && previous != null
-            ? completedProductionBatches(previous) : Set.of();
+        Set<Long> completedTargets = fromNode == NodeType.PROD_DEPLOY && previous != null
+            ? completedProductionTargets(previous) : Set.of();
         List<PipelineNode> nodes = new ArrayList<>(base.nodes().size());
         for (PipelineNode node : base.nodes()) {
             if (node.seq() < start.seq()) {
                 nodes.add(skipped(node, fromNode, base.createdAt()));
-            } else if (node.nodeType() == NodeType.PROD_DEPLOY && !completedBatches.isEmpty()) {
-                nodes.add(skipCompletedBatches(node, completedBatches, base.createdAt()));
+            } else if (node.nodeType() == NodeType.PROD_DEPLOY && !completedTargets.isEmpty()) {
+                nodes.add(skipCompletedBatches(node, completedTargets, base.createdAt()));
             } else {
                 nodes.add(node);
             }
@@ -375,12 +422,12 @@ public final class PipelineFactory {
             null, now, tasks);
     }
 
-    /** The node stays current; only the batches that already succeeded are marked skipped. */
+    /** The node stays current; only the DEs of batches that already succeeded are marked skipped. */
     private static PipelineNode skipCompletedBatches(PipelineNode node,
-                                                      Set<Integer> completedBatches,
+                                                      Set<Long> completedTargets,
                                                       Instant now) {
         List<NodeTask> tasks = node.tasks().stream()
-            .map(task -> completedBatches.contains(task.batchNo())
+            .map(task -> completedTargets.contains(task.targetId())
                 ? skippedTask(task, "上一轮该批次已成功，重新发布不重复部署", now)
                 : task)
             .toList();
@@ -395,11 +442,16 @@ public final class PipelineFactory {
     }
 
     /**
-     * Production batches whose latest attempt of every deploy task is {@code SUCCESS} (a latest
-     * {@code SKIPPED} is neutral, mirroring the orchestrator's completion fold). A batch with a
-     * failed/incomplete latest task is not returned, so the whole batch is retried.
+     * The DE targets whose production batch already succeeded: every latest attempt in the batch
+     * is {@code SUCCESS} (a latest {@code SKIPPED} is neutral, mirroring the orchestrator's
+     * completion fold). A batch with a failed/incomplete latest task is not returned, so the whole
+     * batch is retried.
+     *
+     * <p>The result is deliberately expressed as <em>target ids</em>, not batch numbers: the new
+     * instance may renumber its batches (P6-C {@code REVERSE}) while the DE identity does not
+     * change, so carrying the previous batch numbers over would skip the wrong tasks.
      */
-    private static Set<Integer> completedProductionBatches(PipelineInstance previous) {
+    private static Set<Long> completedProductionTargets(PipelineInstance previous) {
         PipelineNode node = previous.node(NodeType.PROD_DEPLOY);
         if (node == null) {
             return Set.of();
@@ -425,7 +477,13 @@ public final class PipelineFactory {
             }
         }
         succeeded.removeAll(notSucceeded);
-        return succeeded;
+        Set<Long> targets = new HashSet<>();
+        for (NodeTask task : latest.values()) {
+            if (succeeded.contains(task.batchNo())) {
+                targets.add(task.targetId());
+            }
+        }
+        return targets;
     }
 
     /** Latest-attempt identity of one production deploy task. */
@@ -437,6 +495,15 @@ public final class PipelineFactory {
         return de.envKind() == EnvKind.PROD
             || de.envKind() == EnvKind.DR
             || de.envKind() == EnvKind.BLUE;
+    }
+
+    /**
+     * The reverse batch number of one production DE: {@code maxBatch + 1 - original}. It is the
+     * same transformation {@link #createRollback} uses, applied here to a <em>new</em> online
+     * instance only (P6-C design §2), so the highest original batch runs first.
+     */
+    private static int reversedBatch(EnvDe de, int maxBatch) {
+        return maxBatch + 1 - de.deployBatchNo();
     }
 
     private static long targetId(EnvDe de) {

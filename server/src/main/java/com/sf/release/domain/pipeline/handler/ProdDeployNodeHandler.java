@@ -16,6 +16,7 @@ import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineNode;
 import com.sf.release.domain.pipeline.TaskType;
 import com.sf.release.domain.pipeline.TriggerType;
+import com.sf.release.domain.pipeline.UnitPipelineConfig;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.pipeline.port.ProductionBoundaryProbe;
 import com.sf.release.domain.pipeline.port.TransactionRunner;
@@ -188,7 +189,7 @@ public final class ProdDeployNodeHandler implements NodeHandler {
                 // leaving the remaining deploys PENDING forever.
                 throw new IllegalStateException(reason);
             }
-            trigger(current, context, target, task);
+            trigger(current, context, target, task, deployDeadlineOf(current.id()));
         }
     }
 
@@ -230,7 +231,8 @@ public final class ProdDeployNodeHandler implements NodeHandler {
      * transaction.
      */
     private void trigger(PipelineInstance instance, PipelineRepository.DeployContext context,
-                         PipelineRepository.DeployTarget target, NodeTask task) {
+                         PipelineRepository.DeployTarget target, NodeTask task,
+                         Duration deadline) {
         DeployCmd cmd = new DeployCmd(context.unitId(), context.planId(), target.envKind(),
             target.deName(), instance.imageDigest(), instance.pipelineNo(), task.attempt());
         TriggerResult result;
@@ -242,11 +244,20 @@ public final class ProdDeployNodeHandler implements NodeHandler {
         }
         Instant now = Instant.now();
         boolean stored = transactionRunner.inTransaction(() -> repository.markTaskWaitingExternal(
-            task.id(), result.externalId(), result.externalUrl(), now.plus(DEPLOY_DEADLINE), now));
+            task.id(), result.externalId(), result.externalUrl(), now.plus(deadline), now));
         if (!stored) {
             log.warn("production task was not moved to WAITING_EXTERNAL: instanceId={}, taskId={},"
                 + " externalId={}", instance.id(), task.id(), result.externalId());
         }
+    }
+
+    /**
+     * The deploy timeout of this pipeline (P6-C design §2): the unit's configured value, or the
+     * pre-P6-C constant when there is no row/readable row.
+     */
+    private Duration deployDeadlineOf(long instanceId) {
+        UnitPipelineConfig config = repository.pipelineConfigOf(instanceId);
+        return config == null ? DEPLOY_DEADLINE : config.deployDeadline();
     }
 
     /**

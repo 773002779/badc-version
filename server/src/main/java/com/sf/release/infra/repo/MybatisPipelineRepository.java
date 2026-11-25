@@ -12,6 +12,7 @@ import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineNode;
 import com.sf.release.domain.pipeline.TaskType;
+import com.sf.release.domain.pipeline.UnitPipelineConfig;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.resource.EnvKind;
 import com.sf.release.domain.resource.TaskKind;
@@ -23,6 +24,9 @@ import com.sf.release.infra.repo.po.PipelineInstancePO;
 import com.sf.release.infra.repo.po.PipelineNodePO;
 import com.sf.release.infra.repo.po.ReleaseItemPO;
 import com.sf.release.infra.repo.po.ReleaseOrderPO;
+import com.sf.release.infra.repo.po.UnitPipelineConfigPO;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Repository;
 
 import java.time.Duration;
@@ -38,6 +42,8 @@ import java.util.Map;
  */
 @Repository
 public class MybatisPipelineRepository implements PipelineRepository {
+
+    private static final Logger log = LoggerFactory.getLogger(MybatisPipelineRepository.class);
 
     private static final List<String> TERMINAL_TASK_STATUSES = List.of(
         NodeTaskStatus.SUCCESS.name(), NodeTaskStatus.FAILED.name(),
@@ -69,6 +75,7 @@ public class MybatisPipelineRepository implements PipelineRepository {
     private final CodingTaskBindingMapper bindingMapper;
     private final EnvDeMapper envDeMapper;
     private final DeployUnitMapper unitMapper;
+    private final UnitPipelineConfigMapper pipelineConfigMapper;
 
     public MybatisPipelineRepository(PipelineInstanceMapper instanceMapper,
                                      PipelineNodeMapper nodeMapper,
@@ -77,7 +84,8 @@ public class MybatisPipelineRepository implements PipelineRepository {
                                      ReleaseItemMapper itemMapper,
                                      CodingTaskBindingMapper bindingMapper,
                                      EnvDeMapper envDeMapper,
-                                     DeployUnitMapper unitMapper) {
+                                     DeployUnitMapper unitMapper,
+                                     UnitPipelineConfigMapper pipelineConfigMapper) {
         this.instanceMapper = instanceMapper;
         this.nodeMapper = nodeMapper;
         this.taskMapper = taskMapper;
@@ -86,6 +94,7 @@ public class MybatisPipelineRepository implements PipelineRepository {
         this.bindingMapper = bindingMapper;
         this.envDeMapper = envDeMapper;
         this.unitMapper = unitMapper;
+        this.pipelineConfigMapper = pipelineConfigMapper;
     }
 
     @Override
@@ -491,6 +500,51 @@ public class MybatisPipelineRepository implements PipelineRepository {
             unit == null ? null : trimToNull(unit.getArtifactGroupId()),
             unit == null ? null : trimToNull(unit.getArtifactArtifactId()),
             trimToNull(item.getVersion()));
+    }
+
+    /**
+     * The unit pipeline configuration of an instance (P6-C design §2), resolved through the same
+     * order → item → unit path as the other contexts, or from the instance's own {@code unit_id}
+     * when it has no order (the daily pipeline).
+     *
+     * <p><strong>Never throws to the pipeline.</strong> No row, no resolvable unit and a failed
+     * read all answer {@code null}; the handlers then use their documented constants. This is the
+     * "读失败/无行回退常量默认" rule of the design, enforced at the one place every consumer calls.
+     */
+    @Override
+    public UnitPipelineConfig pipelineConfigOf(long instanceId) {
+        try {
+            long unitId = unitIdOfInstance(instanceId);
+            if (unitId <= 0) {
+                return null;
+            }
+            UnitPipelineConfigPO po = pipelineConfigMapper.selectById(unitId);
+            return po == null ? null : po.toDomain();
+        } catch (RuntimeException ex) {
+            log.warn("unit pipeline config could not be read; the handler defaults are used:"
+                + " instanceId={}, reason={}", instanceId, ex.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * The deployment unit behind an instance: the order → item → unit path for an online-style
+     * execution, the row's own {@code unit_id} (V28) for a daily execution.
+     */
+    private long unitIdOfInstance(long instanceId) {
+        PipelineInstancePO instance = instanceMapper.selectById(instanceId);
+        if (instance == null) {
+            return 0L;
+        }
+        if (instance.getOrderId() != null && instance.getOrderId() > 0) {
+            ReleaseOrderPO order = orderMapper.selectById(instance.getOrderId());
+            if (order == null || order.getItemId() == null) {
+                return 0L;
+            }
+            ReleaseItemPO item = itemMapper.selectById(order.getItemId());
+            return item == null || item.getUnitId() == null ? 0L : item.getUnitId();
+        }
+        return instance.getUnitId() == null ? 0L : instance.getUnitId();
     }
 
     /**

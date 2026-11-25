@@ -14,6 +14,7 @@ import com.sf.release.domain.pipeline.NodeType;
 import com.sf.release.domain.pipeline.PipelineInstance;
 import com.sf.release.domain.pipeline.PipelineNode;
 import com.sf.release.domain.pipeline.TaskType;
+import com.sf.release.domain.pipeline.UnitPipelineConfig;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.pipeline.port.TransactionRunner;
 import org.slf4j.Logger;
@@ -124,8 +125,11 @@ public final class LibPublishNodeHandler implements NodeHandler {
             throw ex;
         }
         Instant now = Instant.now();
+        // P6-C: an artifact upload is a build-family step, so it uses the unit's build timeout
+        // (the design's safe subset leaves LIB unaffected otherwise).
+        Duration deadline = buildDeadlineOf(instance.id());
         boolean stored = transactionRunner.inTransaction(() -> repository.markTaskWaitingExternal(
-            task.id(), result.externalId(), result.externalUrl(), now.plus(PUBLISH_DEADLINE), now));
+            task.id(), result.externalId(), result.externalUrl(), now.plus(deadline), now));
         if (!stored) {
             log.warn("library publish task was not moved to WAITING_EXTERNAL: instanceId={},"
                 + " taskId={}, externalId={}", instance.id(), task.id(), result.externalId());
@@ -133,6 +137,15 @@ public final class LibPublishNodeHandler implements NodeHandler {
         log.info("library artifact publish triggered: instanceId={}, artifact={}:{},"
                 + " version={}, externalId={}", instance.id(), context.groupId(),
             context.artifactId(), context.version(), result.externalId());
+    }
+
+    /**
+     * The publish timeout of this pipeline (P6-C design §2: {@code LIB_PUBLISH} uses the build
+     * timeout): the unit's configured value, or the P6-A constant when there is no row.
+     */
+    private Duration buildDeadlineOf(long instanceId) {
+        UnitPipelineConfig config = repository.pipelineConfigOf(instanceId);
+        return config == null ? PUBLISH_DEADLINE : config.buildDeadline();
     }
 
     /**

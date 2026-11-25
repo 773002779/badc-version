@@ -22,6 +22,7 @@ import com.sf.release.domain.gate.Severity;
 import com.sf.release.domain.notification.NotificationEventKey;
 import com.sf.release.domain.pipeline.CheckType;
 import com.sf.release.domain.pipeline.PipelineInstance;
+import com.sf.release.domain.pipeline.UnitPipelineConfig;
 import com.sf.release.domain.pipeline.port.PipelineAdvancer;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.task.GateStatus;
@@ -271,7 +272,7 @@ public class GateService {
         ReleaseItemPO po = requireItem(itemId);
         ReleaseItem item = po.toDomain();
         List<GateCheck> checks = checkService.checks(itemId);
-        Set<CheckType> enabled = checkService.enabledChecks();
+        Set<CheckType> enabled = effectiveChecksFor(instance.id());
         for (CheckType type : CheckType.libSecurityChecks()) {
             if (!enabled.contains(type)) {
                 continue;
@@ -298,7 +299,7 @@ public class GateService {
         }
         ReleaseItemPO po = requireItem(itemId);
         ReleaseItem item = po.toDomain();
-        Set<CheckType> enabled = checkService.enabledChecks();
+        Set<CheckType> enabled = effectiveChecksFor(instance.id());
         boolean anyArtifactCheck = CheckType.libSecurityChecks().stream()
             .anyMatch(enabled::contains);
         if (!anyArtifactCheck) {
@@ -319,9 +320,22 @@ public class GateService {
 
     /** The item's current check decision against the latest instance snapshot. */
     private GateDecision decide(ReleaseItem item, Snapshot snapshot) {
-        Set<CheckType> enabled = checkService.enabledChecks();
+        // P6-C: the unit's environment-check switch is applied on top of the platform set, on
+        // every evaluation. A null config (absent row/unreadable) means "the switch is on".
+        Set<CheckType> enabled = effectiveChecksFor(snapshot.instanceId());
         return GateEvaluator.evaluate(enabledChecks(checkService.checks(item.id()), enabled),
             snapshot.waiver(), Instant.now(), snapshot.commitSha(), snapshot.imageDigest());
+    }
+
+    /**
+     * The effective check set of one instance (P6-C design §2): the platform's enabled checks
+     * intersected with the unit's environment-check switch. {@code effectiveChecks} treats a
+     * {@code null} config as "switch on", so an absent/unreadable row changes nothing.
+     */
+    private Set<CheckType> effectiveChecksFor(long instanceId) {
+        UnitPipelineConfig config = instanceId > 0
+            ? repository.pipelineConfigOf(instanceId) : null;
+        return UnitPipelineConfig.effectiveChecks(checkService.enabledChecks(), config);
     }
 
     /**
@@ -691,7 +705,7 @@ public class GateService {
         GateDecision decision = decide(item, snapshot);
         Admission admission = admission(itemId);
         List<GateCheck> checks = checkService.checks(itemId);
-        Set<CheckType> enabled = checkService.enabledChecks();
+        Set<CheckType> enabled = effectiveChecksFor(snapshot.instanceId());
         List<CheckGroup> groups = new ArrayList<>(2);
         for (CheckType.CheckStage stage : CheckType.CheckStage.values()) {
             List<CheckView> views = new ArrayList<>();
