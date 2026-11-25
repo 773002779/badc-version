@@ -1,9 +1,20 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { addEnvDe, bindCodingTasks, getSubsystem, getUnit, listAudit, listCodingJobs, listCodingTasks, listEnvDes, updateUnit } from '../api'
-import type { AuditRow, BindingView, CodingJobView, EnvDeView, UnitView } from '../api/types'
+import {
+  addEnvDe,
+  bindCodingTasks,
+  getLibDependents,
+  getSubsystem,
+  getUnit,
+  listAudit,
+  listCodingJobs,
+  listCodingTasks,
+  listEnvDes,
+  updateUnit
+} from '../api'
+import type { AuditRow, BindingView, CodingJobView, EnvDeView, LibDependentsView, UnitView } from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
@@ -12,6 +23,7 @@ import KeyValue from '../components/KeyValue.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { formatDateTime } from '../utils/format'
 import { shortTraceId } from '../utils/audit'
+import { ARTIFACT_COORDINATE_HINT, artifactCoordinateError } from '../utils/artifact'
 
 const route = useRoute()
 const id = Number(route.params.id)
@@ -25,17 +37,26 @@ const error = ref<string | null>(null)
 const savingBindings = ref(false)
 
 const KINDS = ['BUILD', 'TEST_DEPLOY', 'PROD_DEPLOY', 'DAILY_DEPLOY'] as const
-type Kind = (typeof KINDS)[number]
+type Kind = (typeof KINDS)[number] | 'LIB_PUBLISH'
+
+const isLib = computed(() => unit.value?.type === 'LIB')
 
 const bindings = reactive({
   BUILD: { taskId: '', branch: '' },
   TEST_DEPLOY: { taskId: '' },
   PROD_DEPLOY: { taskId: '' },
-  DAILY_DEPLOY: { taskId: '' }
+  DAILY_DEPLOY: { taskId: '' },
+  // LIB only (P6-A design §3): the artifact upload task the 入库 node invokes.
+  LIB_PUBLISH: { taskId: '' }
 })
 
 const hasBinding = (kind: Kind) => Boolean(savedBindings.value[kind]?.taskId)
 const bindingSummary = computed(() => {
+  // A library has no deployment bindings: only BUILD and the artifact upload apply (P6-A §1).
+  if (isLib.value) {
+    const bound = (['BUILD', 'LIB_PUBLISH'] as Kind[]).filter(hasBinding).length
+    return bound ? `已绑定 ${bound} / 2` : '尚未绑定'
+  }
   const bound = KINDS.filter(hasBinding).length
   return bound ? `已绑定 ${bound} / 4` : '尚未绑定'
 })
@@ -53,6 +74,37 @@ const checks = computed(() => [
   }
 ])
 const missing = computed(() => checks.value.filter((c) => !c.ok).length)
+
+// ---- second-party library (P6-A) ------------------------------------------
+// A LIB unit additionally shows its artifact coordinates and the documented dependents heuristic.
+// The dependents call is only made for a LIB; a UNIT keeps the page exactly as before.
+const libInfo = ref<LibDependentsView | null>(null)
+const libLoading = ref(false)
+const libError = ref<string | null>(null)
+
+const coordinateText = computed(() => {
+  const group = unit.value?.artifactGroupId
+  const artifact = unit.value?.artifactArtifactId
+  return group && artifact ? `${group}:${artifact}` : '—'
+})
+
+async function loadLib() {
+  if (!isLib.value) {
+    libInfo.value = null
+    libError.value = null
+    return
+  }
+  libLoading.value = true
+  libError.value = null
+  try {
+    libInfo.value = await getLibDependents(id)
+  } catch (e) {
+    libInfo.value = null
+    libError.value = e instanceof ApiError ? e.message : '加载依赖单元失败'
+  } finally {
+    libLoading.value = false
+  }
+}
 
 const deDialog = ref(false)
 const deForm = reactive({ envKind: 'TEST', deName: '', envTag: '', deployBatchNo: 0 })
@@ -102,8 +154,22 @@ const editForm = reactive({
   modulePath: '',
   deployType: '',
   imageType: '',
-  imageName: ''
+  imageName: '',
+  artifactGroupId: '',
+  artifactArtifactId: ''
 })
+
+// Switching the type to UNIT drops coordinates: the backend nulls them for a UNIT, so carrying a
+// stale value here would only be misleading (P6-A design §4).
+watch(
+  () => editForm.type,
+  (type) => {
+    if (type !== 'LIB') {
+      editForm.artifactGroupId = ''
+      editForm.artifactArtifactId = ''
+    }
+  }
+)
 
 function openEdit() {
   const u = unit.value
@@ -122,6 +188,8 @@ function openEdit() {
   editForm.deployType = u.deployType ?? ''
   editForm.imageType = u.imageType ?? ''
   editForm.imageName = u.imageName ?? ''
+  editForm.artifactGroupId = u.artifactGroupId ?? ''
+  editForm.artifactArtifactId = u.artifactArtifactId ?? ''
   editDialog.value = true
 }
 
@@ -133,6 +201,15 @@ async function submitEdit() {
   if (!editForm.ownerId.trim()) {
     ElMessage.warning('负责人必填')
     return
+  }
+  if (editForm.type === 'LIB') {
+    const coordinateError =
+      artifactCoordinateError(editForm.artifactGroupId, '制品 groupId') ??
+      artifactCoordinateError(editForm.artifactArtifactId, '制品 artifactId')
+    if (coordinateError) {
+      ElMessage.warning(coordinateError)
+      return
+    }
   }
   saving.value = true
   try {
@@ -150,7 +227,9 @@ async function submitEdit() {
       modulePath: editForm.modulePath.trim() || undefined,
       deployType: editForm.deployType.trim() || undefined,
       imageType: editForm.imageType.trim() || undefined,
-      imageName: editForm.imageName.trim() || undefined
+      imageName: editForm.imageName.trim() || undefined,
+      artifactGroupId: editForm.type === 'LIB' ? editForm.artifactGroupId.trim() : undefined,
+      artifactArtifactId: editForm.type === 'LIB' ? editForm.artifactArtifactId.trim() : undefined
     })
     editDialog.value = false
     ElMessage.success('部署单元已保存')
@@ -170,6 +249,7 @@ function applyBindings(list: BindingView[]) {
   for (const kind of KINDS) {
     bindings[kind].taskId = map[kind]?.taskId ?? ''
   }
+  bindings.LIB_PUBLISH.taskId = map.LIB_PUBLISH?.taskId ?? ''
   bindings.BUILD.branch = ''
   try {
     const params = map.BUILD?.paramsJson ? JSON.parse(map.BUILD.paramsJson) : null
@@ -187,6 +267,7 @@ async function load() {
     unit.value = u
     envDes.value = des
     applyBindings(bs)
+    await loadLib()
     if (u.subsystemId) {
       getSubsystem(u.subsystemId)
         .then((s) => (subsystemName.value = s.name))
@@ -256,6 +337,9 @@ async function saveBindings() {
     if (taskId) {
       list.push({ taskKind: kind, taskId })
     }
+  }
+  if (isLib.value && bindings.LIB_PUBLISH.taskId.trim()) {
+    list.push({ taskKind: 'LIB_PUBLISH', taskId: bindings.LIB_PUBLISH.taskId.trim() })
   }
   if (!list.length) {
     ElMessage.warning('至少填写一个 CODING 任务 ID')
@@ -330,7 +414,49 @@ async function submitDe() {
           <KeyValue label="创建时间" :value="formatDateTime(unit?.createdAt)" mono />
         </DataSection>
 
-        <DataSection title="环境 DE" :subtitle="`${envDes.length} 个`">
+        <DataSection v-if="isLib" class="lib-coordinates" title="制品坐标" subtitle="Maven">
+          <KeyValue label="groupId" :value="unit?.artifactGroupId" mono />
+          <KeyValue label="artifactId" :value="unit?.artifactArtifactId" mono />
+          <p class="lib-coordinate mono">{{ coordinateText }}</p>
+          <p class="weak small lib-note">发布时版本取自变更项的 version；本阶段不接私服，只记录坐标与入库结果。</p>
+        </DataSection>
+
+        <DataSection
+          v-if="isLib"
+          class="lib-dependents"
+          title="依赖单元"
+          :subtitle="libInfo ? `${libInfo.dependents.length} 个` : undefined"
+        >
+          <p v-if="libError" class="lib-error small">{{ libError }}</p>
+          <template v-else>
+            <p class="weak small lib-source">
+              依赖来源 <code class="mono">{{ libInfo?.source ?? 'MODULE_PATH' }}</code>：启发式，同系统内
+              module_path 等于制品 artifactId 的部署单元；接口能力确定后替换实现不改契约。
+            </p>
+            <div v-if="libInfo && libInfo.dependents.length" class="lib-dependent-table">
+              <el-table :data="libInfo.dependents" row-key="unitId" style="width: 100%">
+                <el-table-column label="单元名" min-width="150">
+                  <template #default="{ row }">
+                    <router-link :to="`/units/${row.unitId}`" class="strong">{{ row.name }}</router-link>
+                  </template>
+                </el-table-column>
+                <el-table-column label="module_path" min-width="150">
+                  <template #default="{ row }">
+                    <span class="mono">{{ row.modulePath || '—' }}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+            <EmptyState
+              v-else-if="!libLoading"
+              title="暂无依赖单元"
+              hint="同系统内没有 module_path 等于制品 artifactId 的部署单元。"
+            />
+            <div v-else class="loading-block"><el-skeleton :rows="2" animated /></div>
+          </template>
+        </DataSection>
+
+        <DataSection v-if="!isLib" title="环境 DE" :subtitle="`${envDes.length} 个`">
           <template #actions>
             <el-button text @click="deDialog = true">添加</el-button>
           </template>
@@ -384,7 +510,30 @@ async function submitDe() {
                 </template>
                 <el-input v-model="bindings.BUILD.branch" placeholder="release/202611" />
               </el-form-item>
-              <el-form-item>
+              <el-form-item v-if="isLib">
+                <template #label>
+                  <span class="field-label">入库发布任务 <span class="req">*</span>
+                    <span v-if="hasBinding('LIB_PUBLISH')" class="bound">已绑定</span>
+                  </span>
+                </template>
+                <el-select
+                  v-model="bindings.LIB_PUBLISH.taskId"
+                  filterable
+                  allow-create
+                  default-first-option
+                  :loading="jobsLoading"
+                  placeholder="选择制品上传（publish.start）任务"
+                  style="width: 100%"
+                >
+                  <el-option
+                    v-for="job in jobOptions.DEPLOY"
+                    :key="job.taskId"
+                    :label="optionLabel(job)"
+                    :value="job.taskId"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item v-if="!isLib">
                 <template #label>
                   <span class="field-label">测试部署任务 <span class="req">*</span>
                     <span v-if="hasBinding('TEST_DEPLOY')" class="bound">已绑定</span>
@@ -407,7 +556,7 @@ async function submitDe() {
                   />
                 </el-select>
               </el-form-item>
-              <el-form-item>
+              <el-form-item v-if="!isLib">
                 <template #label>
                   <span class="field-label">生产部署任务 <span class="req">*</span>
                     <span v-if="hasBinding('PROD_DEPLOY')" class="bound">已绑定</span>
@@ -430,7 +579,7 @@ async function submitDe() {
                   />
                 </el-select>
               </el-form-item>
-              <el-form-item>
+              <el-form-item v-if="!isLib">
                 <template #label>
                   <span class="field-label">日常部署任务
                     <span v-if="hasBinding('DAILY_DEPLOY')" class="bound">已绑定</span>
@@ -460,14 +609,18 @@ async function submitDe() {
           <p v-if="jobsHint" class="jobs-hint small">{{ jobsHint }}</p>
           <p v-else class="weak small" style="margin: 4px 0 0">
             候选来自所属系统的 CODING 项目；列表里没有的任务可以直接输入任务 ID。
-            构建唯一、部署按环境分开；保存按类型覆盖，留空的类型保留原有绑定。
+            <template v-if="isLib">二方库只有构建与制品上传（LIB_PUBLISH）两类绑定。</template>
+            <template v-else>构建唯一、部署按环境分开；保存按类型覆盖，留空的类型保留原有绑定。</template>
           </p>
           <p class="weak small" style="margin: 4px 0 0">
-            首次发布需三类绑定齐全，缺少 BUILD 分支会在创建变更项时返回 40011。
+            <template v-if="isLib">
+              二方库发布需「制品坐标 + 构建任务 + 入库发布任务」齐全；缺少 BUILD 分支会在创建变更项时返回 40011。
+            </template>
+            <template v-else>首次发布需三类绑定齐全，缺少 BUILD 分支会在创建变更项时返回 40011。</template>
           </p>
         </DataSection>
 
-        <DataSection title="发布前置条件" :subtitle="missing ? `缺 ${missing} 项` : '已就绪'">
+        <DataSection v-if="!isLib" title="发布前置条件" :subtitle="missing ? `缺 ${missing} 项` : '已就绪'">
           <div class="check-list">
             <div v-for="c in checks" :key="c.label" class="check-row">
               <span class="check-mark" :class="c.ok ? 'ok' : 'no'" />
@@ -575,6 +728,12 @@ async function submitDe() {
               <el-option label="INACTIVE" value="INACTIVE" />
             </el-select>
           </el-form-item>
+          <el-form-item v-if="editForm.type === 'LIB'" label="制品 groupId" required class="lib-coord-group">
+            <el-input v-model="editForm.artifactGroupId" class="lib-group-input" maxlength="128" placeholder="例如 com.sf.demo" />
+          </el-form-item>
+          <el-form-item v-if="editForm.type === 'LIB'" label="制品 artifactId" required class="lib-coord-artifact">
+            <el-input v-model="editForm.artifactArtifactId" class="lib-artifact-input" maxlength="128" placeholder="例如 demo-sdk" />
+          </el-form-item>
           <el-form-item label="模块（仅筛选/标签）">
             <el-input v-model="editForm.module" placeholder="例如 配额、计费" />
           </el-form-item>
@@ -603,6 +762,9 @@ async function submitDe() {
             <el-input v-model="editForm.imageType" placeholder="IMAGE" />
           </el-form-item>
         </div>
+        <p v-if="editForm.type === 'LIB'" class="weak small coord-hint">
+          二方库必须填写制品坐标；groupId 与 artifactId 分别匹配 {{ ARTIFACT_COORDINATE_HINT }}。
+        </p>
         <el-form-item label="镜像名称">
           <el-input v-model="editForm.imageName" placeholder="quota-api:latest" />
         </el-form-item>
@@ -612,6 +774,7 @@ async function submitDe() {
         </el-form>
         <p class="weak small" style="margin: -4px 0 0">
           保存是整体替换：留空的可选字段会被清空。模块与标签只用于筛选和展示，不进入构建/部署参数。
+          <template v-if="editForm.type === 'LIB'">二方库的制品坐标必填；切回 UNIT 时坐标会被清空。</template>
         </p>
       </div>
       <template #footer>
@@ -745,6 +908,37 @@ async function submitDe() {
   max-height: 62vh;
   overflow-y: auto;
   padding-right: 6px;
+}
+
+/* LIB blocks (P6-A): coordinates and the heuristic dependents table. */
+.lib-coordinate {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: 13px;
+  word-break: break-all;
+}
+.lib-note,
+.lib-source {
+  margin: 8px 0 0;
+  line-height: 1.6;
+}
+.lib-source code {
+  color: var(--text-2);
+}
+.lib-dependent-table {
+  margin-top: 8px;
+}
+.lib-error {
+  margin: 4px 0;
+  color: var(--danger);
+}
+.coord-hint {
+  margin: -2px 0 12px;
+  line-height: 1.6;
 }
 
 /* 操作日志: a full-width table under the two-column overview, matching the records page. */

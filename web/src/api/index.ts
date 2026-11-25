@@ -17,6 +17,7 @@ import type {
   FreezeView,
   ItemGate,
   ItemView,
+  LibDependentsView,
   MeView,
   NotificationPage,
   NotificationSettingView,
@@ -96,6 +97,9 @@ export const updateUnit = (
     imageName?: string
     module?: string
     tag?: string
+    /** LIB only: required by the backend for a LIB and ignored for a UNIT. */
+    artifactGroupId?: string
+    artifactArtifactId?: string
   }
 ) => api<void>(`/units/${id}`, { method: 'PUT', body: JSON.stringify(body) })
 
@@ -111,6 +115,9 @@ export const createUnit = (body: {
   deployType?: string
   imageType?: string
   imageName?: string
+  /** LIB only: required by the backend for a LIB and ignored for a UNIT. */
+  artifactGroupId?: string
+  artifactArtifactId?: string
 }) => api<number>('/units', { method: 'POST', body: JSON.stringify(body) })
 
 export const listCodingTasks = (unitId: number) =>
@@ -142,6 +149,14 @@ export const addEnvDe = (
     deployBatchNo?: number
   }
 ) => api<number>(`/units/${unitId}/env-des`, { method: 'POST', body: JSON.stringify(body) })
+
+// ------------------------------------------------- second-party library (P6-A)
+/**
+ * The documented dependents heuristic of a LIB unit: deployment units of the same system whose
+ * `modulePath` equals the library's artifactId. A non-LIB unit answers 40001.
+ */
+export const getLibDependents = (unitId: number) =>
+  api<LibDependentsView>(`/api/v1/libs/${unitId}/dependents`)
 
 // --------------------------------------------------------------------- tasks
 export const listTasks = (

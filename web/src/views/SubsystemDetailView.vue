@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { createUnit, getMe, getSubsystem, listUnits, updateSubsystem } from '../api'
@@ -10,6 +10,7 @@ import DataSection from '../components/DataSection.vue'
 import EmptyState from '../components/EmptyState.vue'
 import KeyValue from '../components/KeyValue.vue'
 import StatusDot from '../components/StatusDot.vue'
+import { ARTIFACT_COORDINATE_HINT, artifactCoordinateError } from '../utils/artifact'
 
 const route = useRoute()
 const id = Number(route.params.id)
@@ -23,7 +24,39 @@ const dialog = ref(false)
 const projectDialog = ref(false)
 const projectDraft = ref('')
 const savingProject = ref(false)
-const form = reactive({ name: '', ownerId: 'dev', type: 'UNIT', modulePath: '', frameworkTemplate: 'spring-boot' })
+const form = reactive({
+  name: '',
+  ownerId: 'dev',
+  type: 'UNIT',
+  modulePath: '',
+  frameworkTemplate: 'spring-boot',
+  artifactGroupId: '',
+  artifactArtifactId: ''
+})
+
+// A UNIT has no artifact (P6-A design §1); switching back clears what was typed so the form never
+// carries hidden coordinates into a UNIT create.
+watch(
+  () => form.type,
+  (type) => {
+    if (type !== 'LIB') {
+      form.artifactGroupId = ''
+      form.artifactArtifactId = ''
+    }
+  }
+)
+
+/** The LIB coordinate rule shared with the edit dialog; a UNIT is never checked. */
+function libCoordinatesValid(): boolean {
+  const error =
+    artifactCoordinateError(form.artifactGroupId, '制品 groupId') ??
+    artifactCoordinateError(form.artifactArtifactId, '制品 artifactId')
+  if (error) {
+    ElMessage.warning(error)
+    return false
+  }
+  return true
+}
 
 async function load() {
   loading.value = true
@@ -80,6 +113,7 @@ async function submit() {
     ElMessage.warning('名称必填')
     return
   }
+  if (form.type === 'LIB' && !libCoordinatesValid()) return
   try {
     await createUnit({
       subsystemId: id,
@@ -87,10 +121,14 @@ async function submit() {
       ownerId: form.ownerId.trim() || 'dev',
       type: form.type,
       modulePath: form.modulePath || undefined,
-      frameworkTemplate: form.frameworkTemplate || undefined
+      frameworkTemplate: form.frameworkTemplate || undefined,
+      artifactGroupId: form.type === 'LIB' ? form.artifactGroupId.trim() : undefined,
+      artifactArtifactId: form.type === 'LIB' ? form.artifactArtifactId.trim() : undefined
     })
     dialog.value = false
     form.name = ''
+    form.artifactGroupId = ''
+    form.artifactArtifactId = ''
     ElMessage.success('部署单元已创建')
     await load()
   } catch (e) {
@@ -158,10 +196,10 @@ async function submit() {
       <el-form label-position="top">
         <div class="grid grid-2">
           <el-form-item label="名称" required>
-            <el-input v-model="form.name" placeholder="例如 quota-api" maxlength="128" />
+            <el-input v-model="form.name" class="unit-name-input" placeholder="例如 quota-api" maxlength="128" />
           </el-form-item>
           <el-form-item label="类型">
-            <el-select v-model="form.type" style="width: 100%">
+            <el-select v-model="form.type" class="unit-type-select" style="width: 100%">
               <el-option label="部署单元" value="UNIT" />
               <el-option label="二方库" value="LIB" />
             </el-select>
@@ -169,10 +207,19 @@ async function submit() {
           <el-form-item label="owner 工号">
             <el-input v-model="form.ownerId" maxlength="32" />
           </el-form-item>
+          <el-form-item v-if="form.type === 'LIB'" label="制品 groupId" required class="lib-coord-group">
+            <el-input v-model="form.artifactGroupId" class="lib-group-input" maxlength="128" placeholder="例如 com.sf.demo" />
+          </el-form-item>
+          <el-form-item v-if="form.type === 'LIB'" label="制品 artifactId" required class="lib-coord-artifact">
+            <el-input v-model="form.artifactArtifactId" class="lib-artifact-input" maxlength="128" placeholder="例如 demo-sdk" />
+          </el-form-item>
           <el-form-item label="模块路径（共库时用于 commit 比对）">
             <el-input v-model="form.modulePath" maxlength="255" />
           </el-form-item>
         </div>
+        <p v-if="form.type === 'LIB'" class="weak small coord-hint">
+          二方库必须填写制品坐标；groupId 与 artifactId 分别匹配 {{ ARTIFACT_COORDINATE_HINT }}。
+        </p>
         <el-form-item label="框架模板">
           <el-input v-model="form.frameworkTemplate" maxlength="64" />
         </el-form-item>
@@ -197,6 +244,11 @@ async function submit() {
 </template>
 
 <style scoped>
+.coord-hint {
+  margin: -2px 0 12px;
+  line-height: 1.6;
+}
+
 @media (max-width: 960px) {
   .grid {
     grid-template-columns: 1fr !important;

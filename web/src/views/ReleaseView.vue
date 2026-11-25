@@ -5,13 +5,15 @@ import { ElMessage } from 'element-plus'
 import {
   exitRelease,
   getAdmission,
+  getItemGate,
   getMe,
   getRelease,
   getReleaseRecords,
+  getUnit,
   resumeRelease,
   stopRelease
 } from '../api'
-import type { AdmissionView, MeView, ReleaseDetail, ReleaseRecord } from '../api/types'
+import type { AdmissionView, GateCheck, ItemGate, MeView, ReleaseDetail, ReleaseRecord, UnitView } from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
@@ -49,6 +51,52 @@ const stopOpen = ref(false)
 const exitOpen = ref(false)
 const controlBusy = ref(false)
 let timer: number | undefined
+
+// ---- second-party library (P6-A) ------------------------------------------
+// A LIB release has a three-node pipeline (BUILD → LIB_SECURITY → LIB_PUBLISH) and no production
+// gate, testers, image or rollback. The unit is fetched only for a LIB to show its coordinates;
+// the node types themselves already identify the pipeline (they exist even while PENDING).
+const unitType = ref<string | null>(null)
+const libUnit = ref<UnitView | null>(null)
+const libGate = ref<ItemGate | null>(null)
+
+const nodesAreLib = computed(() =>
+  (detail.value?.nodes ?? []).some(
+    (node) => node.nodeType === 'LIB_SECURITY' || node.nodeType === 'LIB_PUBLISH'
+  )
+)
+const isLib = computed(() => unitType.value === 'LIB' || nodesAreLib.value)
+
+/** The three artifact checks of LIB_SECURITY; the other gate checks do not apply to a library. */
+const LIB_CHECK_KINDS = ['SONAR', 'COMPONENT_VULN', 'VERSION_DEFECT']
+
+const libChecks = computed<GateCheck[]>(() =>
+  (libGate.value?.groups ?? [])
+    .flatMap((group) => group.checks)
+    .filter((check) => LIB_CHECK_KINDS.includes(check.kind))
+)
+
+// A check row stays FAIL when waived (the backend has no WAIVED check status); the approved waiver
+// lifts the aggregate conclusion to WAIVED, which is what the 豁免入库 marker reports. The
+// conclusion is the exact predicate: an active waiver that no longer matches the snapshot does not
+// count, so `waiver.active` alone would over-report.
+const libWaived = computed(() => libGate.value?.conclusion === 'WAIVED')
+const libWaiver = computed(() => libGate.value?.waiver ?? null)
+
+const libCoordinateText = computed(() => {
+  const group = libUnit.value?.artifactGroupId
+  const artifact = libUnit.value?.artifactArtifactId
+  return group && artifact ? `${group}:${artifact}` : '—'
+})
+
+/** Gate status words to the shared status dot vocabulary (PASS/FAIL are not item statuses). */
+function libCheckDotStatus(status: string): string {
+  if (status === 'PASS') return 'SUCCESS'
+  if (status === 'FAIL') return 'FAILED'
+  if (status === 'WAIVED') return 'PAUSED'
+  if (status === 'RUNNING') return 'RUNNING'
+  return 'PENDING'
+}
 
 /**
  * The rollback entry is a header door, always visible: a caller without `rollback:execute` (or a
@@ -139,6 +187,21 @@ async function load(silent = false) {
     detail.value = d
     records.value = r
     admission.value = a
+    // LIB-only read models: the artifact coordinates of the unit and the three security checks.
+    // Both are best-effort — the node list alone still proves the pipeline shape.
+    if (nodesAreLib.value) {
+      const [unit, gate] = await Promise.all([
+        d.unitId ? getUnit(d.unitId).catch(() => null) : Promise.resolve(null),
+        d.itemId ? getItemGate(d.itemId).catch(() => null) : Promise.resolve(null)
+      ])
+      libUnit.value = unit
+      unitType.value = unit?.type ?? null
+      libGate.value = gate
+    } else {
+      libUnit.value = null
+      unitType.value = null
+      libGate.value = null
+    }
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : '加载失败'
   } finally {
@@ -224,6 +287,7 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
   <div>
     <PageHeader :title="`发布内容 ${publishNo}`" :description="detail ? `流水单 ${detail.pipelineNo}` : ''">
       <el-button
+        v-if="!isLib"
         class="stop-release"
         type="danger"
         plain
@@ -250,6 +314,7 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
       </el-button>
       <el-button :loading="loading" @click="load()">刷新</el-button>
       <el-button
+        v-if="!isLib"
         :disabled="!!rollbackBlock"
         :title="rollbackBlock || '按部署单元回滚生产镜像'"
         @click="rollbackOpen = true"
@@ -262,7 +327,7 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
 
     <el-tabs v-model="tab">
       <el-tab-pane label="发布内容" name="content">
-        <div v-if="detail" class="stack">
+        <div v-if="detail" class="stack" :class="{ 'lib-release': isLib }">
           <section class="panel panel-pad">
             <StepBar :nodes="detail.nodes" />
             <div class="summary">
@@ -278,25 +343,37 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
                 <span class="weak small">触发方式</span>
                 <span class="small">{{ statusLabel(detail.triggerType) }}</span>
               </div>
-              <div class="summary-item">
-                <span class="weak small">门禁（检查）</span>
-                <StatusDot
-                  :status="detail.gateStatus === 'CHECK_FAIL' || detail.gateStatus === 'CHECK_INVALID' ? 'FAILED' : detail.gateStatus === 'CHECK_RUNNING' || !detail.gateStatus ? 'PENDING' : 'SUCCESS'"
-                  :pulse="detail.gateStatus === 'CHECK_RUNNING'"
-                />
-              </div>
-              <div class="summary-item">
-                <span class="weak small">门禁（测试）</span>
-                <span class="small">{{ statusLabel(detail.testStatus ?? 'TEST_PENDING') }}</span>
-              </div>
-              <div class="summary-item">
-                <span class="weak small">镜像摘要</span>
-                <span class="mono">{{ shortSha(detail.imageDigest) }}</span>
-              </div>
-              <div class="summary-item">
-                <span class="weak small">commit</span>
-                <span class="mono">{{ shortSha(detail.commitSha) }}</span>
-              </div>
+              <template v-if="isLib">
+                <div class="summary-item lib-kind">
+                  <span class="weak small">发布类型</span>
+                  <span class="small">二方库 · 制品发布</span>
+                </div>
+                <div class="summary-item lib-coordinates-summary">
+                  <span class="weak small">制品坐标</span>
+                  <span class="mono">{{ libCoordinateText }}</span>
+                </div>
+              </template>
+              <template v-else>
+                <div class="summary-item">
+                  <span class="weak small">门禁（检查）</span>
+                  <StatusDot
+                    :status="detail.gateStatus === 'CHECK_FAIL' || detail.gateStatus === 'CHECK_INVALID' ? 'FAILED' : detail.gateStatus === 'CHECK_RUNNING' || !detail.gateStatus ? 'PENDING' : 'SUCCESS'"
+                    :pulse="detail.gateStatus === 'CHECK_RUNNING'"
+                  />
+                </div>
+                <div class="summary-item">
+                  <span class="weak small">门禁（测试）</span>
+                  <span class="small">{{ statusLabel(detail.testStatus ?? 'TEST_PENDING') }}</span>
+                </div>
+                <div class="summary-item">
+                  <span class="weak small">镜像摘要</span>
+                  <span class="mono">{{ shortSha(detail.imageDigest) }}</span>
+                </div>
+                <div class="summary-item">
+                  <span class="weak small">commit</span>
+                  <span class="mono">{{ shortSha(detail.commitSha) }}</span>
+                </div>
+              </template>
             </div>
           </section>
 
@@ -309,6 +386,16 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
               <span class="node-index mono">{{ String(node.seqNo + 1).padStart(2, '0') }}</span>
               <span class="panel-title">{{ statusLabel(node.nodeType) }}</span>
               <StatusDot :status="node.status" domain="node" pulse />
+              <el-tag
+                v-if="isLib && node.nodeType === 'LIB_SECURITY' && libWaived"
+                class="lib-waiver"
+                size="small"
+                type="warning"
+                effect="plain"
+                :title="libWaiver?.expireAt ? `豁免到期 ${formatDateTime(libWaiver.expireAt)}；到期不自动下架，仅标注` : '存在已批准的安全检查豁免'"
+              >
+                豁免入库
+              </el-tag>
               <span class="topbar-spacer" />
               <span class="weak small mono">
                 {{ formatDateTime(node.startedAt) }}
@@ -327,6 +414,37 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
                 :rerun="isProductionRerun"
                 @changed="load(true)"
               />
+            </div>
+            <div v-else-if="node.nodeType === 'LIB_SECURITY'" class="lib-checks">
+              <div class="lib-check-head">
+                <span class="weak small">制品安全检测：三条检查通过或豁免后才允许入库</span>
+                <span class="weak small mono">gate_check</span>
+              </div>
+              <div v-if="libChecks.length" class="lib-check-list">
+                <div v-for="check in libChecks" :key="check.kind" class="lib-check-row">
+                  <StatusDot :status="libCheckDotStatus(check.status)" :label="check.statusLabel" />
+                  <span class="lib-check-label">{{ check.label }}</span>
+                  <span class="weak small mono">{{ check.kind }}</span>
+                  <span v-if="libWaived && check.status === 'FAIL'" class="weak small lib-waived-check">已豁免</span>
+                  <span class="topbar-spacer" />
+                  <span class="weak small">{{ check.severityLabel }}</span>
+                  <span v-if="check.summary" class="lib-check-summary truncate" :title="check.summary">
+                    {{ check.summary }}
+                  </span>
+                  <a v-if="check.reportUrl" :href="check.reportUrl" target="_blank" rel="noreferrer" class="small">
+                    报告
+                  </a>
+                </div>
+              </div>
+              <EmptyState
+                v-else
+                title="安全检查尚未回传"
+                hint="BUILD 完成后进入本节点，三项制品检查结果会显示在这里。"
+              />
+              <p v-if="libWaived" class="lib-waiver-note small">
+                存在有效豁免（豁免入库），允许制品入库；豁免到期不自动下架，只在此标注。
+                <span v-if="libWaiver?.expireAt" class="weak">到期 {{ formatDateTime(libWaiver.expireAt) }}</span>
+              </p>
             </div>
             <div v-else-if="node.status !== 'PENDING' && node.tasks.length" class="task-list">
               <div v-for="(t, i) in node.tasks" :key="`${t.taskType}-${t.batchNo}-${t.targetId}-${i}`" class="task-row">
@@ -390,10 +508,17 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
         <KeyValue label="流水单号" :value="detail.pipelineNo" mono />
         <KeyValue label="OA 工单" :value="detail.order?.oaTicketNo" mono />
         <KeyValue label="计划发布时间" :value="formatDateTime(detail.order?.plannedReleaseTime)" mono />
-        <KeyValue label="重跑起点" :value="detail.rerunFromNode ? statusLabel(detail.rerunFromNode) : null" />
-        <KeyValue label="全量重跑" :value="detail.fullRerun ? '是' : '否'" />
+        <template v-if="!isLib">
+          <KeyValue label="重跑起点" :value="detail.rerunFromNode ? statusLabel(detail.rerunFromNode) : null" />
+          <KeyValue label="全量重跑" :value="detail.fullRerun ? '是' : '否'" />
+        </template>
       </div>
-      <p class="weak small" style="margin: 12px 0 0">
+      <p v-if="isLib" class="weak small" style="margin: 12px 0 0">
+        二方库流水线：构建（CODE_CHECK → PKG_BUILD，不产镜像）→ 安全检测（SONAR / 组件漏洞 / 版本缺陷）
+        → 入库（制品上传）。不进入生产准入，也没有测试部署、生产部署与回滚。
+        没有配置 CODING 连接时，构建会以 <code class="mono">ENGINE_UNAVAILABLE</code> 失败，这是预期结果。
+      </p>
+      <p v-else class="weak small" style="margin: 12px 0 0">
         没有配置 CODING 连接时，构建会以 <code class="mono">ENGINE_UNAVAILABLE</code> 失败，这是预期结果。
         接入真实 CODING 后，流水线会继续构建与测试部署，进入「验证确认」：七项检查回传、测试人员判定，
         两道门禁同时满足才允许提交生产；生产部署由 P3 交付，所以当前会停在
@@ -484,5 +609,48 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
   color: var(--text-3);
   font-family: ui-monospace, Consolas, monospace;
   font-size: 11px;
+}
+
+/* LIB release (P6-A): the security node's three checks and the waiver marker. */
+.lib-checks {
+  padding: 6px 18px 14px;
+}
+.lib-check-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0 6px;
+}
+.lib-check-list {
+  display: flex;
+  flex-direction: column;
+}
+.lib-check-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 13px;
+}
+.lib-check-row:last-child {
+  border-bottom: none;
+}
+.lib-check-label {
+  color: var(--text);
+  min-width: 96px;
+}
+.lib-check-summary {
+  max-width: 320px;
+  color: var(--text-3);
+  font-size: 11px;
+}
+.lib-waived-check {
+  color: var(--warn);
+}
+.lib-waiver-note {
+  margin: 10px 0 0;
+  color: var(--warn);
+  line-height: 1.6;
 }
 </style>

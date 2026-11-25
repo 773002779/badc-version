@@ -43,7 +43,10 @@ const LABELS: Record<string, string> = {
   TEST_DEPLOY: '测试部署',
   VERIFY: '验证确认',
   PROD_DEPLOY: '生产部署',
-  DAILY_DEPLOY: '日常部署'
+  DAILY_DEPLOY: '日常部署',
+  // second-party library pipeline (P6-A): three nodes, no image or production
+  LIB_SECURITY: '安全检测',
+  LIB_PUBLISH: '入库'
 }
 
 export type StatusDomain = 'item' | 'node' | 'task'

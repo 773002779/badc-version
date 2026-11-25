@@ -36,8 +36,27 @@ export interface UnitView {
   /** Filter-only labels (V16): never part of a build or deploy payload. */
   module?: string | null
   tag?: string | null
+  /** LIB only (P6-A/V29): the Maven coordinates of the produced artifact; null for a UNIT. */
+  artifactGroupId?: string | null
+  artifactArtifactId?: string | null
   createdAt?: string
   updatedAt?: string
+}
+
+/** One deployment unit that depends on a library by `modulePath == artifactId` (heuristic). */
+export interface LibDependentView {
+  unitId: number
+  name: string
+  modulePath?: string | null
+}
+
+/** The dependents response of `GET /api/v1/libs/{unitId}/dependents` (P6-A design §4). */
+export interface LibDependentsView {
+  libUnitId: number
+  artifactId: string
+  /** The only source this slice implements: `MODULE_PATH` (a documented heuristic). */
+  source: string
+  dependents: LibDependentView[]
 }
 
 export interface EnvDeView {
