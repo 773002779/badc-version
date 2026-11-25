@@ -2,8 +2,16 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getMe, getRelease, getReleaseRecords, resumeRelease } from '../api'
-import type { MeView, ReleaseDetail, ReleaseRecord } from '../api/types'
+import {
+  exitRelease,
+  getAdmission,
+  getMe,
+  getRelease,
+  getReleaseRecords,
+  resumeRelease,
+  stopRelease
+} from '../api'
+import type { AdmissionView, MeView, ReleaseDetail, ReleaseRecord } from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
@@ -14,7 +22,15 @@ import KeyValue from '../components/KeyValue.vue'
 import VerifyPanel from '../components/VerifyPanel.vue'
 import AdmissionPanel from '../components/AdmissionPanel.vue'
 import RollbackDialog from '../components/RollbackDialog.vue'
-import { formatDateTime, formatDuration, shortSha, statusLabel } from '../utils/format'
+import ReasonDialog from '../components/ReasonDialog.vue'
+import {
+  formatDateTime,
+  formatDuration,
+  isStoppableItemStatus,
+  isTerminalItemStatus,
+  shortSha,
+  statusLabel
+} from '../utils/format'
 
 const route = useRoute()
 const publishNo = String(route.params.publishNo)
@@ -27,6 +43,11 @@ const tab = ref<'content' | 'records'>('content')
 const me = ref<MeView | null>(null)
 const meLoaded = ref(false)
 const rollbackOpen = ref(false)
+const admission = ref<AdmissionView | null>(null)
+const admissionLoaded = ref(false)
+const stopOpen = ref(false)
+const exitOpen = ref(false)
+const controlBusy = ref(false)
 let timer: number | undefined
 
 /**
@@ -41,6 +62,45 @@ const rollbackBlock = computed(() => {
   }
   if (!detail.value) return '发布单尚未加载'
   if (!detail.value.unitId) return '该发布单没有关联部署单元，暂不可回滚'
+  return ''
+})
+
+/**
+ * The 变更项 status drives the two stop-loss doors (design §1); the instance status does not (a
+ * PAUSED instance is still PROD_DEPLOYING on the item). `GET .../admission` answers `itemStatus`
+ * even when the release was never submitted, so this is the one source for the header.
+ */
+const itemStatus = computed(() => admission.value?.itemStatus ?? null)
+
+const hasPerm = (perm: string) => me.value?.perms.includes(perm) ?? false
+
+/** Why 停止发布 is unavailable; empty when enabled. */
+const stopBlock = computed(() => {
+  if (!meLoaded.value) return '正在读取权限'
+  if (!me.value) return '无法读取当前身份（GET /me）'
+  if (!hasPerm('control:execute-prod')) {
+    return '只有运维可以停止生产发布（control:execute-prod）'
+  }
+  if (!admissionLoaded.value) return '正在读取变更项状态'
+  if (!itemStatus.value) return '无法读取变更项状态（GET admission）'
+  if (!isStoppableItemStatus(itemStatus.value)) {
+    return `当前状态「${statusLabel(itemStatus.value)}」不在生产流程中，停止只适用于生产流程；请使用「退出流水线」`
+  }
+  return ''
+})
+
+/** Why 退出流水线 is unavailable; empty when enabled. */
+const exitBlock = computed(() => {
+  if (!meLoaded.value) return '正在读取权限'
+  if (!me.value) return '无法读取当前身份（GET /me）'
+  if (!hasPerm('release:publish') && !hasPerm('control:execute-prod')) {
+    return '退出流水线需要 release:publish 或 control:execute-prod'
+  }
+  if (!admissionLoaded.value) return '正在读取变更项状态'
+  if (!itemStatus.value) return '无法读取变更项状态（GET admission）'
+  if (isTerminalItemStatus(itemStatus.value)) {
+    return `变更项已是终态（${statusLabel(itemStatus.value)}），不能退出`
+  }
   return ''
 })
 
@@ -71,12 +131,18 @@ async function load(silent = false) {
   if (!silent) loading.value = true
   error.value = null
   try {
-    const [d, r] = await Promise.all([getRelease(publishNo), getReleaseRecords(publishNo).catch(() => [])])
+    const [d, r, a] = await Promise.all([
+      getRelease(publishNo),
+      getReleaseRecords(publishNo).catch(() => []),
+      getAdmission(publishNo).catch(() => null)
+    ])
     detail.value = d
     records.value = r
+    admission.value = a
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : '加载失败'
   } finally {
+    admissionLoaded.value = true
     loading.value = false
   }
 }
@@ -90,6 +156,45 @@ async function doResume() {
     ElMessage.warning(e instanceof ApiError ? e.message : '恢复失败')
   }
 }
+
+/**
+ * Shared stop/exit submit. A 40001 means the item moved while the dialog was open, so the page
+ * closes the dialog and re-reads the status instead of leaving a stale action clickable; the server
+ * sentence (which names `currentStatus`) is shown as-is.
+ */
+async function submitControl(kind: 'stop' | 'exit', reason: string) {
+  controlBusy.value = true
+  try {
+    const result = kind === 'stop'
+      ? await stopRelease(publishNo, reason)
+      : await exitRelease(publishNo, reason)
+    const terminated = result.terminatedPipelineNo
+      ? `，已终止实例 ${result.terminatedPipelineNo}`
+      : '，没有在途实例'
+    if (kind === 'stop') {
+      ElMessage.success(`已停止发布：变更项 ${statusLabel(result.itemStatus)}${terminated}；已上线批次保留`)
+    } else {
+      ElMessage.success(`已退出流水线：变更项 ${statusLabel(result.itemStatus)}${terminated}`)
+    }
+    stopOpen.value = false
+    exitOpen.value = false
+    await load(true)
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 40001) {
+      ElMessage.error(e.message)
+      stopOpen.value = false
+      exitOpen.value = false
+      await load(true)
+    } else {
+      ElMessage.error(e instanceof ApiError ? e.message : kind === 'stop' ? '停止失败' : '退出失败')
+    }
+  } finally {
+    controlBusy.value = false
+  }
+}
+
+const onStop = (reason: string) => submitControl('stop', reason)
+const onExit = (reason: string) => submitControl('exit', reason)
 
 function schedule() {
   if (timer) window.clearInterval(timer)
@@ -119,6 +224,24 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
   <div>
     <PageHeader :title="`发布内容 ${publishNo}`" :description="detail ? `流水单 ${detail.pipelineNo}` : ''">
       <el-button
+        class="stop-release"
+        type="danger"
+        plain
+        :disabled="!!stopBlock || controlBusy"
+        :title="stopBlock || '终止在途生产流水线；已上线批次保留，不回滚'"
+        @click="stopOpen = true"
+      >
+        停止发布
+      </el-button>
+      <el-button
+        class="exit-release"
+        :disabled="!!exitBlock || controlBusy"
+        :title="exitBlock || '退出任意非终态流水线，作废待签审批与未完成检查'"
+        @click="exitOpen = true"
+      >
+        退出流水线
+      </el-button>
+      <el-button
         v-if="detail?.status === 'PAUSED' && !isProdPause"
         :title="`当前挂起原因：${gateStatusHint}`"
         @click="doResume"
@@ -146,6 +269,10 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
               <div class="summary-item">
                 <span class="weak small">实例状态</span>
                 <StatusDot :status="detail.status" pulse />
+              </div>
+              <div class="summary-item">
+                <span class="weak small">变更项状态</span>
+                <StatusDot :status="itemStatus" pulse />
               </div>
               <div class="summary-item">
                 <span class="weak small">触发方式</span>
@@ -273,6 +400,29 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
         <code class="mono">PROD_DEPLOY / PAUSED</code>。
       </p>
     </div>
+
+    <ReasonDialog
+      v-model="stopOpen"
+      title="停止发布"
+      :message="`将停止发布单 ${publishNo}：终止在途流水线与后续批次，变更项置为「已终止」，待签审批作废。`"
+      warning="已上线（成功）批次保留，不回滚；镜像回滚是独立的运维动作。"
+      confirm-text="停止发布"
+      placeholder="说明为什么停止，例如：生产批次 2 发现接口 5xx 上升"
+      danger
+      :busy="controlBusy"
+      @confirm="onStop"
+    />
+
+    <ReasonDialog
+      v-model="exitOpen"
+      title="退出流水线"
+      :message="`将退出发布单 ${publishNo} 的流水线：终止在途实例，变更项置为「已终止」，未完成检查置为失效，待签审批作废。`"
+      warning="已上线批次保留；退出后该发布单不可恢复执行，如需回退请使用生产回滚。"
+      confirm-text="退出流水线"
+      placeholder="说明为什么退出，例如：需求取消，不再继续本次发布"
+      :busy="controlBusy"
+      @confirm="onExit"
+    />
 
     <RollbackDialog
       v-model="rollbackOpen"

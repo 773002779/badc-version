@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { listReleases, listSubsystems, listUnits } from '../api'
 import type { ReleaseRecordRow, SubsystemView, UnitView } from '../api/types'
 import { ApiError } from '../api/http'
@@ -34,6 +35,8 @@ const ORDER_STATUSES: Array<{ value: string; label: string }> = [
   { value: 'ROLLED_BACK', label: '已回滚' }
 ]
 
+const route = useRoute()
+
 const rows = ref<ReleaseRecordRow[]>([])
 const total = ref(0)
 const pageNo = ref(1)
@@ -45,7 +48,8 @@ const subsystems = ref<SubsystemView[]>([])
 const units = ref<UnitView[]>([])
 
 const filters = reactive({
-  keyword: '',
+  // The archived-task row action links here with ?keyword=CRID (P5-B design §6 keeps the record door).
+  keyword: typeof route.query.keyword === 'string' ? route.query.keyword : '',
   status: '',
   systemId: undefined as number | undefined,
   unitId: undefined as number | undefined

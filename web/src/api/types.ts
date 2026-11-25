@@ -608,3 +608,23 @@ export interface DailyStartResult {
   pipelineNo: string
   instanceId: number
 }
+
+// ------------------------------------------------- stop / exit / close (P5-B)
+
+/**
+ * The answer of stop/exit/close (design §4): the object's latest status, the item's status and the
+ * pipeline number of the instance this call terminated ({@code null} when none was active).
+ * {@code status} is null for an item whose close had no 发布单 to mirror on.
+ */
+export interface ControlResult {
+  status?: string | null
+  itemStatus: string
+  terminatedPipelineNo?: string | null
+}
+
+/** The answer of archive: the task status and the cascade counts the page reports. */
+export interface ArchiveResult {
+  taskStatus: string
+  closedItems: number
+  terminatedInstances: number
+}

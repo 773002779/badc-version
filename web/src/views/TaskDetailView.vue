@@ -4,12 +4,15 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   addTaskMembers,
+  archiveTask,
+  closeItem,
   createItem,
   getDaily,
   getMe,
   getTask,
   listCodingTasks,
   listDaily,
+  listReleases,
   listTaskItems,
   listUnits,
   publishItem,
@@ -29,7 +32,8 @@ import DataSection from '../components/DataSection.vue'
 import EmptyState from '../components/EmptyState.vue'
 import StatusDot from '../components/StatusDot.vue'
 import KeyValue from '../components/KeyValue.vue'
-import { formatDateTime, shortSha, statusLabel } from '../utils/format'
+import ReasonDialog from '../components/ReasonDialog.vue'
+import { formatDateTime, isTerminalItemStatus, shortSha, statusLabel } from '../utils/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -41,6 +45,16 @@ const units = ref<UnitView[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const publishing = ref<number | null>(null)
+
+// ------------------------------------------------ stop-loss actions (P5-B)
+const closeOpen = ref(false)
+const closeTarget = ref<ItemView | null>(null)
+const closeBusy = ref(false)
+const archiveOpen = ref(false)
+const archiveBusy = ref(false)
+/** The cascade preview of 归档: in-flight instances counted from the release records. */
+const archiveInFlight = ref<number | null>(null)
+const archiveCounting = ref(false)
 
 // --------------------------------------------------------------- daily (P5-A)
 const me = ref<MeView | null>(null)
@@ -86,6 +100,61 @@ const memberForm = reactive({ userId: '', role: 'TEST' })
 
 const task = computed(() => detail.value?.task)
 const ratePercent = computed(() => Math.round((task.value?.rate ?? 0) * 100))
+
+/** An archived task is read-only (P5-B design §1/§6): it keeps its records and rollback entry. */
+const isArchived = computed(() => task.value?.status === 'ARCHIVED')
+const hasPerm = (perm: string) => me.value?.perms.includes(perm) ?? false
+const canPublish = computed(() => hasPerm('release:publish'))
+const canClose = canPublish
+const canArchive = computed(
+  () =>
+    hasPerm('task:create') &&
+    !!me.value &&
+    (task.value?.creator === me.value.userId || me.value.roles.includes('ADMIN'))
+)
+
+/** Why 归档任务 is unavailable; empty when enabled. */
+const archiveBlock = computed(() => {
+  if (!detail.value) return '任务尚未加载'
+  if (isArchived.value) return '任务已归档（只读）'
+  if (!me.value) return '无法读取当前身份（GET /me）'
+  if (!hasPerm('task:create')) return '归档任务需要 task:create'
+  if (!canArchive.value) return '只有任务创建人或管理员可以归档任务'
+  return ''
+})
+
+const unfinishedItems = computed(() => items.value.filter((it) => !isTerminalItemStatus(it.status)))
+
+const closeTargetLabel = computed(() =>
+  closeTarget.value
+    ? `${closeTarget.value.crid} · ${closeTarget.value.unitName ?? closeTarget.value.unitId} / ${closeTarget.value.version}`
+    : ''
+)
+const closeMessage = computed(
+  () => `将关闭变更项「${closeTargetLabel.value}」：终止其活动实例，待签审批与未完成检查作废。`
+)
+
+const archiveMessage = computed(() => {
+  const count = unfinishedItems.value.length
+  const instances = archiveInFlight.value
+  const suffix = instances === null
+    ? archiveCounting.value ? '，正在统计在途实例…' : ''
+    : `，终止 ${instances} 个在途实例`
+  return `将归档任务「${task.value?.name ?? ''}」：级联关闭 ${count} 个未完成变更项${suffix}。`
+})
+
+const archiveWarning = computed(
+  () =>
+    '归档后任务只读：新增变更项、发布、日常与重跑均不可用；发布记录与回滚入口保留。此操作不可撤销。'
+)
+
+/** The row action reason for 关闭; empty when the action is available. */
+function closeBlock(row: ItemView): string {
+  if (isArchived.value) return '任务已归档，只读'
+  if (!canClose.value) return '关闭变更项需要 release:publish'
+  if (isTerminalItemStatus(row.status)) return `当前状态「${statusLabel(row.status)}」不可关闭`
+  return ''
+}
 
 async function load() {
   loading.value = true
@@ -215,6 +284,105 @@ async function openDaily(pipelineNo: string) {
   }
 }
 
+// --------------------------------------------------- close item / archive task
+
+function openClose(row: ItemView) {
+  if (closeBlock(row)) return
+  closeTarget.value = row
+  closeOpen.value = true
+}
+
+/** 关闭变更项: the server owns the cascade; a 40001 closes the dialog and re-reads the list. */
+async function submitClose(reason: string) {
+  const target = closeTarget.value
+  if (!target) return
+  closeBusy.value = true
+  try {
+    const result = await closeItem(target.id, reason)
+    closeOpen.value = false
+    const terminated = result.terminatedPipelineNo
+      ? `，已终止实例 ${result.terminatedPipelineNo}`
+      : ''
+    ElMessage.success(`已关闭变更项「${target.crid}」（${statusLabel(result.itemStatus)}）${terminated}`)
+    await load()
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 40001) {
+      ElMessage.error(e.message)
+      closeOpen.value = false
+      await load()
+    } else {
+      ElMessage.error(e instanceof ApiError ? e.message : '关闭失败')
+    }
+  } finally {
+    closeBusy.value = false
+  }
+}
+
+function openArchive() {
+  if (archiveBlock.value) return
+  archiveInFlight.value = null
+  archiveOpen.value = true
+  countInFlight()
+}
+
+/**
+ * The archive prompt names how many in-flight instances the cascade will terminate (design §6).
+ * The task detail has no pipeline count of its own, so the latest pipeline status of the unfinished
+ * items' orders is read from the release records (one query per distinct unit, scoped by the server).
+ */
+async function countInFlight() {
+  const ids = new Set(unfinishedItems.value.map((it) => it.id))
+  if (!ids.size) {
+    archiveInFlight.value = 0
+    return
+  }
+  archiveCounting.value = true
+  try {
+    const unitIds = Array.from(new Set(unfinishedItems.value.map((it) => it.unitId)))
+    const pages = await Promise.all(
+      unitIds.map((unitId) => listReleases({ page: 1, size: 100, unitId }).catch(() => null))
+    )
+    let count = 0
+    for (const page of pages) {
+      if (!page) continue
+      for (const row of page.records) {
+        if (
+          ids.has(row.itemId) &&
+          !!row.pipelineStatus &&
+          ['PENDING', 'RUNNING', 'PAUSED'].includes(row.pipelineStatus)
+        ) {
+          count++
+        }
+      }
+    }
+    archiveInFlight.value = count
+  } finally {
+    archiveCounting.value = false
+  }
+}
+
+async function submitArchive(reason: string) {
+  archiveBusy.value = true
+  try {
+    const result = await archiveTask(taskId, reason)
+    archiveOpen.value = false
+    ElMessage.success(
+      `任务已归档：关闭 ${result.closedItems} 个变更项，终止 ${result.terminatedInstances} 个在途实例；发布记录与回滚入口保留`
+    )
+    await load()
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 40001) {
+      ElMessage.error(e.message)
+      archiveOpen.value = false
+      await load()
+    } else {
+      ElMessage.error(e instanceof ApiError ? e.message : '归档失败')
+    }
+  } finally {
+    archiveBusy.value = false
+  }
+}
+
 function openItemDialog() {
   itemForm.unitId = units.value[0]?.id
   itemForm.version = ''
@@ -337,10 +505,39 @@ async function submitMember() {
   <div>
     <PageHeader :title="task?.name ?? '任务详情'" :description="task ? `${task.subsystemName ?? ''} · 创建人 ${task.creator}` : ''">
       <el-button @click="load">刷新</el-button>
-      <el-button type="primary" :disabled="!units.length" @click="openItemDialog">新建变更项</el-button>
+      <el-button
+        v-if="!isArchived"
+        type="primary"
+        :disabled="!units.length"
+        @click="openItemDialog"
+      >
+        新建变更项
+      </el-button>
+      <el-button
+        v-if="!isArchived"
+        class="archive-task"
+        type="danger"
+        plain
+        :disabled="!!archiveBlock || archiveBusy"
+        :title="archiveBlock || '归档任务：级联关闭未完成变更项并终止在途实例，之后只读'"
+        @click="openArchive"
+      >
+        归档任务
+      </el-button>
     </PageHeader>
 
     <el-alert v-if="error" type="error" :closable="false" show-icon :title="error" style="margin-bottom: 16px" />
+
+    <el-alert
+      v-if="isArchived"
+      class="archive-readonly"
+      type="info"
+      :closable="false"
+      show-icon
+      title="任务已归档（只读）"
+      description="新增变更项、发布、日常与重跑均不可用；发布记录与回滚入口保留（发布记录 → 发布单 → 进入生产回滚）。"
+      style="margin-bottom: 16px"
+    />
 
     <div class="grid" style="grid-template-columns: minmax(0, 1fr) 320px">
       <div class="stack">
@@ -384,18 +581,32 @@ async function submitMember() {
                 <StatusDot :status="row.gateStatus" />
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="176" fixed="right">
+            <el-table-column label="操作" width="248" fixed="right">
               <template #default="{ row }">
                 <div class="row-actions">
                   <el-button
+                    v-if="!isArchived"
                     link
                     type="primary"
                     :loading="publishing === row.id"
+                    :disabled="!canPublish"
+                    :title="canPublish ? '发布该变更项' : '当前账号缺少 release:publish 权限，无法发布'"
                     @click="publish(row)"
                   >
                     发布
                   </el-button>
-                  <template v-if="row.type !== 'LIB'">
+                  <el-button
+                    v-if="!isArchived"
+                    link
+                    type="danger"
+                    class="close-item"
+                    :disabled="!!closeBlock(row)"
+                    :title="closeBlock(row) || '关闭变更项（不可再发布）'"
+                    @click="openClose(row)"
+                  >
+                    关闭
+                  </el-button>
+                  <template v-if="!isArchived && row.type !== 'LIB'">
                     <el-button
                       link
                       type="primary"
@@ -411,6 +622,21 @@ async function submitMember() {
                       记录
                     </el-button>
                   </template>
+                  <el-button
+                    v-if="isArchived && row.type !== 'LIB'"
+                    link
+                    class="daily-open"
+                    @click="openDailyRecords(row)"
+                  >
+                    记录
+                  </el-button>
+                  <router-link
+                    class="release-records"
+                    :to="{ path: '/records', query: { keyword: row.crid } }"
+                    title="在发布记录中查看该变更项（归档后仍保留）"
+                  >
+                    发布记录
+                  </router-link>
                 </div>
               </template>
             </el-table-column>
@@ -560,6 +786,30 @@ async function submitMember() {
       </div>
     </div>
 
+    <ReasonDialog
+      v-model="closeOpen"
+      title="关闭变更项"
+      :message="closeMessage"
+      warning="关闭后该变更项不可再发布；活动实例终止，待签审批与未完成检查作废；发布记录保留。"
+      confirm-text="关闭变更项"
+      placeholder="说明为什么关闭，例如：需求取消，本次不再上线"
+      danger
+      :busy="closeBusy"
+      @confirm="submitClose"
+    />
+
+    <ReasonDialog
+      v-model="archiveOpen"
+      title="归档任务"
+      :message="archiveMessage"
+      :warning="archiveWarning"
+      confirm-text="确认归档"
+      placeholder="说明为什么归档，例如：版本已全量上线，任务收口"
+      danger
+      :busy="archiveBusy"
+      @confirm="submitArchive"
+    />
+
     <el-dialog v-model="itemDialog" title="新建变更项" width="520px">
       <el-form label-position="top">
         <el-form-item label="部署单元" required>
@@ -698,7 +948,15 @@ async function submitMember() {
 .row-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.release-records {
+  font-size: 12px;
+  color: var(--accent);
+}
+.release-records:hover {
+  text-decoration: underline;
 }
 .daily-item-select {
   width: 208px;

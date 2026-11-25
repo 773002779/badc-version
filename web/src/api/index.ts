@@ -1,12 +1,14 @@
 import { ApiError, api, currentUser, qs } from './http'
 import type {
   AdmissionView,
+  ArchiveResult,
   AuditFilter,
   AuditPage,
   BindingView,
   CodingConnView,
   CodingJobView,
   CodingProbeView,
+  ControlResult,
   DailyDetailView,
   DailyPage,
   DailyStartResult,
@@ -220,6 +222,42 @@ export const resumeRelease = (publishNo: string) =>
     `/api/v1/releases/${publishNo}/resume`,
     { method: 'POST' }
   )
+
+// ------------------------------------------------ stop / exit / close / archive (P5-B)
+
+/**
+ * 停止发布 (design §1/§4): ends the production pipeline of the 发布单, keeps the batches already
+ * online and terminates the item. Production-flow states only; `control:execute-prod`.
+ */
+export const stopRelease = (publishNo: string, reason: string) =>
+  api<ControlResult>(`/api/v1/releases/${publishNo}/stop`, {
+    method: 'POST',
+    body: JSON.stringify({ reason })
+  })
+
+/**
+ * 退出流水线 (design §1/§4): ends any non-terminal release, voids the pending approvals and
+ * invalidates the unfinished checks. `release:publish` or `control:execute-prod`.
+ */
+export const exitRelease = (publishNo: string, reason: string) =>
+  api<ControlResult>(`/api/v1/releases/${publishNo}/exit`, {
+    method: 'POST',
+    body: JSON.stringify({ reason })
+  })
+
+/** 关闭变更项: a closed item can never be published again; its active instances are terminated. */
+export const closeItem = (itemId: number, reason: string) =>
+  api<ControlResult>(`/api/v1/items/${itemId}/close`, {
+    method: 'POST',
+    body: JSON.stringify({ reason })
+  })
+
+/** 归档任务: the task becomes read-only; `closedItems`/`terminatedInstances` are the cascade counts. */
+export const archiveTask = (taskId: number, reason: string) =>
+  api<ArchiveResult>(`/api/v1/tasks/${taskId}/archive`, {
+    method: 'POST',
+    body: JSON.stringify({ reason })
+  })
 
 // ------------------------------------------------------------------- gate (P2)
 export const getMe = () => api<MeView>('/api/v1/me')

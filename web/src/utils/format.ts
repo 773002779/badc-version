@@ -21,9 +21,10 @@ const LABELS: Record<string, string> = {
   SUCCESS: '成功',
   TIMEOUT: '超时',
   SKIPPED: '已跳过',
-  // lifecycle of a unit / subsystem
+  // lifecycle of a unit / subsystem / task
   ACTIVE: '启用',
   INACTIVE: '停用',
+  ARCHIVED: '已归档',
   // gate
   TEST_PENDING: '待测试',
   TEST_PASS: '测试通过',
@@ -88,6 +89,31 @@ export function statusTone(status?: string | null): Tone {
 export function isBusyStatus(status?: string | null): boolean {
   return status === 'RUNNING' || status === 'BUILDING' || status === 'TESTING' ||
     status === 'PROD_DEPLOYING'
+}
+
+/**
+ * The 变更项 states that can no longer be stopped/exited/closed (P5-B design §1). `DONE` is a
+ * terminal success and keeps its release records; it is never a stop-loss target.
+ */
+const TERMINAL_ITEM_STATUSES = new Set(['DONE', 'CLOSED', 'TERMINATED', 'ROLLED_BACK'])
+
+export function isTerminalItemStatus(status?: string | null): boolean {
+  return !!status && TERMINAL_ITEM_STATUSES.has(status)
+}
+
+/**
+ * 停止 applies to the production flow only (P5-B design §1); every other non-terminal state is a
+ * 退出. Keeping the set in one place means the page and the probe agree on the boundary.
+ */
+const STOPPABLE_ITEM_STATUSES = new Set([
+  'SUBMITTED',
+  'PENDING_APPROVAL',
+  'READY',
+  'PROD_DEPLOYING'
+])
+
+export function isStoppableItemStatus(status?: string | null): boolean {
+  return !!status && STOPPABLE_ITEM_STATUSES.has(status)
 }
 
 export function formatDateTime(value?: string | null): string {
