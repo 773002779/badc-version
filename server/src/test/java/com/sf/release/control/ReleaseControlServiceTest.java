@@ -192,6 +192,35 @@ class ReleaseControlServiceTest {
     }
 
     @Test
+    void stop_voids_the_signatures_it_still_waits_for_and_keeps_the_recorded_checks() {
+        // Independent review of the first P5-B round: a stop moved the item to TERMINATED but left
+        // the pending approval steps alive, so approvers kept seeing a release that no longer
+        // exists. A stop now voids them too; the recorded checks stay (what was tested is kept).
+        Published published = publish("release/stop-approval");
+        long orderId = orderIdOf(published.publishNo());
+        setItemStatus(published.itemId(), "PENDING_APPROVAL");
+        setGateStatus(published.itemId(), "CHECK_PASS");
+        pauseAtProdDeploy(published.instanceId());
+        long snapshotId = ControlFixtures.givenSnapshot(jdbc, orderId, published.itemId(), DEV);
+        ControlFixtures.givenApproval(jdbc, orderId, snapshotId, 1, "OPS_LEAD", "PENDING");
+        ControlFixtures.givenApproval(jdbc, orderId, snapshotId, 2, "DEPT_MANAGER", "PENDING");
+
+        asStopper();
+        ControlResult result = control.stop(published.publishNo(), REASON);
+
+        assertThat(result.itemStatus()).isEqualTo("TERMINATED");
+        assertThat(jdbc.queryForList("SELECT status FROM approval WHERE snapshot_id = ?",
+            String.class, snapshotId)).containsOnly("CANCELED");
+        assertThat(jdbc.queryForObject("SELECT comment FROM approval WHERE step_no = 1",
+            String.class)).isEqualTo(REASON);
+        assertThat(jdbc.queryForObject("SELECT decided_by FROM approval WHERE step_no = 1",
+            String.class)).as("nobody signed a voided step").isNull();
+        assertThat(gateStatus(published.itemId()))
+            .as("a stop keeps what was tested: only an exit invalidates the checks")
+            .isEqualTo("CHECK_PASS");
+    }
+
+    @Test
     void stop_mid_prod_deploy_keeps_the_successful_batch_and_cancels_the_in_flight_one() {
         Published published = publish("release/stop-deploying");
         runningProdDeploy(published.itemId(), published.instanceId());

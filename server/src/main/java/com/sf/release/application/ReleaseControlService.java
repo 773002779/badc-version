@@ -197,9 +197,9 @@ public class ReleaseControlService {
 
     /**
      * Shared stop/exit body: one transaction that moves the item to {@code TERMINATED}, mirrors it on
-     * the order, terminates the order's in-flight instances and — for an exit — voids the pending
-     * approvals and the unfinished checks; then the best-effort engine/lock work, the audit row and
-     * the notification.
+     * the order, terminates the order's in-flight instances and voids the pending approvals (nobody
+     * needs to sign a release that no longer exists); an exit additionally invalidates the unfinished
+     * checks; then the best-effort engine/lock work, the audit row and the notification.
      */
     private ControlResult endRelease(ReleaseOrderPO order, ReleaseItemPO item, String reason,
                                      AuditAction action, NotificationEventKey event,
@@ -215,8 +215,12 @@ public class ReleaseControlService {
             syncOrderStatus(orderId, ItemStatus.TERMINATED.name());
             List<PipelineTerminationService.Terminated> ended =
                 termination.terminateOrder(orderId, reason);
+            // A stopped or exited release never needs another signature: void the pending steps so
+            // approvers stop being notified about a release that no longer exists (the state machine
+            // would refuse the signature anyway). The checks stay for a stop (what was tested is
+            // kept) and are invalidated for an exit.
+            cancelApprovals(orderId, reason);
             if (voidApprovalsAndChecks) {
-                cancelApprovals(orderId, reason);
                 gateService.invalidateUnfinished(itemId, reason);
             }
             return ended;
