@@ -6,5 +6,13 @@ package com.sf.release.domain.task;
  */
 public enum TaskStatus {
     ACTIVE,
-    ARCHIVED
+    ARCHIVED;
+
+    /** Chinese label for the API/page; the enum name stays the machine value. */
+    public String label() {
+        return switch (this) {
+            case ACTIVE -> "进行中";
+            case ARCHIVED -> "已归档";
+        };
+    }
 }
