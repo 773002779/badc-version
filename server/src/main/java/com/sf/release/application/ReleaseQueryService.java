@@ -4,11 +4,13 @@ import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.domain.pipeline.NodeStatus;
 import com.sf.release.domain.pipeline.TriggerType;
+import com.sf.release.domain.task.MemberRole;
 import com.sf.release.infra.repo.ReleaseQueryMapper;
 import com.sf.release.infra.repo.po.NodeTaskPO;
 import com.sf.release.infra.repo.po.PipelineInstancePO;
 import com.sf.release.infra.repo.po.PipelineNodePO;
 import com.sf.release.infra.repo.po.ReleaseHeadRow;
+import com.sf.release.infra.repo.po.ReleaseMemberRow;
 import com.sf.release.infra.security.ScopeGuard;
 import org.springframework.stereotype.Service;
 
@@ -18,6 +20,7 @@ import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -31,9 +34,11 @@ import java.util.Set;
  * therefore shows the <em>newest</em> execution (the page follows the current run), while
  * {@link #records(String)} lists all of them newest first.
  *
- * <p><strong>Query budget.</strong> The detail is assembled from at most three statements — one
- * header join, one node read, one task read — and the tasks are grouped by node in memory; there
- * is no per-node query. The history costs one ownership lookup plus one instance list.
+ * <p><strong>Query budget.</strong> The detail is assembled from at most four statements — one
+ * header join (with the owning task id), one member read, one node read and one task read — and
+ * the tasks are grouped by node in memory; there is no per-node or per-member query. The member
+ * read feeds the P6-F 人员列 ({@code testers}/{@code deployers}). The history costs one ownership
+ * lookup plus one instance list.
  *
  * <p><strong>Gate fields.</strong> {@code gateStatus} is the item's <em>check</em> dimension and
  * {@code testStatus} its <em>test</em> dimension (V19 split them: one column could not hold both
@@ -78,6 +83,15 @@ public class ReleaseQueryService {
         }
         ScopeGuard.assertUnitInScope(head.getUnitId());
 
+        // P6-F 人员列 (design §2): read once for both columns, partition in memory, keep the SQL
+        // order (user_id ascending). A task row is always present (release_item.task_id is NOT
+        // NULL), the null check only keeps the read model total.
+        List<ReleaseMemberRow> members = head.getTaskId() == null
+            ? List.of()
+            : queryMapper.selectMembers(head.getTaskId());
+        List<MemberView> testers = membersWithRole(members, MemberRole.TEST);
+        List<MemberView> deployers = membersWithRole(members, MemberRole.OPS);
+
         List<NodeView> nodes = head.getInstanceId() == null
             ? List.of()
             : nodes(queryMapper.selectNodes(head.getInstanceId()),
@@ -104,7 +118,9 @@ public class ReleaseQueryService {
             emergencyFlagOf(head.getEmergencyRelease()),
             head.getEmergencyReason(),
             head.getEmergencyBy(),
-            instantOf(head.getEmergencyAt()));
+            instantOf(head.getEmergencyAt()),
+            testers,
+            deployers);
     }
 
     /**
@@ -175,6 +191,27 @@ public class ReleaseQueryService {
             }
         }
         return null;
+    }
+
+    /**
+     * The members holding {@code role}, preserving the SQL order ({@code user_id} ascending). One
+     * row per user per task (the unique key), so a name appears in at most one of the two columns.
+     * The role is the stored task-member vocabulary ({@link MemberRole}), not the platform role;
+     * an unrecognised stored value is ignored rather than guessed.
+     */
+    private static List<MemberView> membersWithRole(List<ReleaseMemberRow> rows, MemberRole role) {
+        String expected = role.name();
+        List<MemberView> views = new ArrayList<>();
+        for (ReleaseMemberRow row : rows) {
+            if (expected.equals(roleName(row.getRole()))) {
+                views.add(new MemberView(row.getUserId(), row.getName()));
+            }
+        }
+        return List.copyOf(views);
+    }
+
+    private static String roleName(String raw) {
+        return raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
     }
 
     /** The stored trigger vocabulary is controlled; an unrecognised value degrades to unknown. */
@@ -250,11 +287,24 @@ public class ReleaseQueryService {
         String emergencyRelease,
         String emergencyReason,
         String emergencyBy,
-        String emergencyAt) {
+        String emergencyAt,
+        /**
+         * P6-F (design §2): the task members with {@code role=TEST} / {@code role=OPS}, ordered by
+         * {@code user_id}; empty — never null — when the task has no such member. Read-only display
+         * data: it takes no part in permission checks.
+         */
+        List<MemberView> testers,
+        List<MemberView> deployers) {
 
         public ReleaseDetail {
             nodes = nodes == null ? List.of() : List.copyOf(nodes);
+            testers = testers == null ? List.of() : List.copyOf(testers);
+            deployers = deployers == null ? List.of() : List.copyOf(deployers);
         }
+    }
+
+    /** One person of the 测试人员 / 部署人员 column: the task member and their user name. */
+    public record MemberView(String userId, String name) {
     }
 
     /** Admission fields of the order the detail belongs to. */

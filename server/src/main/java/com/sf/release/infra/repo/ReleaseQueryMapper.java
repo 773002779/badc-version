@@ -4,6 +4,7 @@ import com.sf.release.infra.repo.po.NodeTaskPO;
 import com.sf.release.infra.repo.po.PipelineInstancePO;
 import com.sf.release.infra.repo.po.PipelineNodePO;
 import com.sf.release.infra.repo.po.ReleaseHeadRow;
+import com.sf.release.infra.repo.po.ReleaseMemberRow;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -15,9 +16,10 @@ import java.util.List;
  * mappers stay MyBatis-Plus {@code BaseMapper}s and this one owns the few hand-written reads
  * whose statement count is part of the contract.
  *
- * <p><strong>Query budget.</strong> The detail view must be aggregated in at most three
- * statements — one header join, one node read and one task read — so there is no per-node query
- * (no N+1). {@code ReleaseQueryTest} counts the executed statements with a MyBatis interceptor.
+ * <p><strong>Query budget.</strong> The detail view must be aggregated in at most four
+ * statements — one header join (which also carries the owning task id), one node read, one task
+ * read and one member read — so there is no per-node or per-member query (no N+1).
+ * {@code ReleaseQueryTest} counts the executed statements with a MyBatis interceptor.
  * The history view needs one ownership lookup plus one instance list, i.e. one statement more
  * than the ownership check alone.
  */
@@ -39,6 +41,7 @@ public interface ReleaseQueryMapper {
                o.emergency_at         AS emergencyAt,
                i.unit_id              AS unitId,
                i.id                   AS itemId,
+               i.task_id              AS taskId,
                i.gate_status          AS gateStatus,
                i.test_status          AS testStatus,
                pi.id                  AS instanceId,
@@ -104,4 +107,21 @@ public interface ReleaseQueryMapper {
         ORDER BY pi.id DESC
         """)
     List<PipelineInstancePO> selectInstances(@Param("publishNo") String publishNo);
+
+    /**
+     * The members of the release task owning the item (P6-F design §2), joined to their user name
+     * and ordered by {@code user_id}. One statement for both people columns: the service partitions
+     * {@code TEST} / {@code OPS} in memory. The {@code LEFT JOIN} keeps a member whose user row was
+     * removed; its name is then null instead of the member disappearing from the page.
+     */
+    @Select("""
+        SELECT m.user_id AS userId,
+               u.name    AS name,
+               m.role    AS role
+        FROM release_task_member m
+        LEFT JOIN app_user u ON u.id = m.user_id
+        WHERE m.task_id = #{taskId}
+        ORDER BY m.user_id
+        """)
+    List<ReleaseMemberRow> selectMembers(@Param("taskId") long taskId);
 }

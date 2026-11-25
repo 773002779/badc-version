@@ -4,6 +4,7 @@ import com.sf.release.application.settings.SettingsService.ApprovalSla;
 import com.sf.release.application.settings.SettingsService.ApproverSettings;
 import com.sf.release.application.settings.SettingsService.GateSettings;
 import com.sf.release.application.settings.SettingsService.LockSettings;
+import com.sf.release.application.settings.SettingsService.WaiverSettings;
 import jakarta.validation.constraints.NotNull;
 
 import java.time.Instant;
@@ -20,7 +21,8 @@ import java.util.List;
  * <p>The four blocks mirror the stored sections one-to-one
  * ({@code enabledChecks}, {@code opsLead/deptManager}, {@code pauseBoundHours},
  * {@code enabled/remindHours/escalateHours}) and carry the same {@code updatedBy/updatedAt}
- * metadata as the 「消息通知」 block.
+ * metadata as the 「消息通知」 block. The P6-F 「豁免默认有效期」 block is a fifth one:
+ * {@code defaultDays} (1–90, default 7).
  */
 public final class SettingsDtos {
 
@@ -44,6 +46,10 @@ public final class SettingsDtos {
     public static ApprovalSettingsResponse approvalOf(ApprovalSla view) {
         return new ApprovalSettingsResponse(view.enabled(), view.remindHours(),
             view.escalateHours(), view.updatedBy(), view.updatedAt());
+    }
+
+    public static WaiverSettingsResponse waiverOf(WaiverSettings view) {
+        return new WaiverSettingsResponse(view.defaultDays(), view.updatedBy(), view.updatedAt());
     }
 
     /** The 「门禁规则」 block: enabled check types plus who last saved it. */
@@ -110,5 +116,18 @@ public final class SettingsDtos {
         Integer remindHours,
         @NotNull(message = "升级阈值不能为空")
         Integer escalateHours) {
+    }
+
+    /**
+     * The P6-F 「豁免默认有效期」 block: the days a waiver runs when a request leaves
+     * {@code expireAt} empty (1–90, default 7).
+     */
+    public record WaiverSettingsResponse(int defaultDays, String updatedBy, Instant updatedAt) {
+    }
+
+    /** Save form of the waiver block; the range is validated by the service. */
+    public record WaiverSettingsRequest(
+        @NotNull(message = "豁免默认有效期不能为空")
+        Integer defaultDays) {
     }
 }

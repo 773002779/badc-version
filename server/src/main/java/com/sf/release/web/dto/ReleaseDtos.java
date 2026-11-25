@@ -1,6 +1,7 @@
 package com.sf.release.web.dto;
 
 import com.sf.release.application.ReleaseQueryService;
+import com.sf.release.application.ReleaseQueryService.MemberView;
 import com.sf.release.application.ReleaseQueryService.NodeView;
 import com.sf.release.application.ReleaseQueryService.OrderView;
 import com.sf.release.application.ReleaseQueryService.ReleaseRecord;
@@ -35,7 +36,11 @@ import java.util.List;
  *       that was never executed and {@code executedBy} is null for a historical order (V25);</li>
  *   <li>{@code emergencyRelease} is always the machine word {@code "true"} or {@code "false"}; the
  *       other three emergency fields (reason/administrator/ISO-8601 instant) are null until an
- *       administrator used J11 on the order (P6-D §3).</li>
+ *       administrator used J11 on the order (P6-D §3);</li>
+ *   <li>{@code testers}/{@code deployers} (P6-F §2) are always arrays, empty when the task has no
+ *       {@code TEST}/{@code OPS} member, and each element is {@code {userId,name}} ordered by
+ *       {@code userId}. {@code name} can be null if the user row was removed; the member still
+ *       appears.</li>
  * </ul>
  */
 public final class ReleaseDtos {
@@ -64,7 +69,9 @@ public final class ReleaseDtos {
             view.emergencyRelease(),
             view.emergencyReason(),
             view.emergencyBy(),
-            view.emergencyAt());
+            view.emergencyAt(),
+            view.testers().stream().map(ReleaseDtos::memberOf).toList(),
+            view.deployers().stream().map(ReleaseDtos::memberOf).toList());
     }
 
     /** Maps the instance history of one 发布单, preserving the newest-first order. */
@@ -130,6 +137,10 @@ public final class ReleaseDtos {
             task.status(), task.durationMs(), task.resultSummary(), task.externalUrl());
     }
 
+    private static ReleaseMemberView memberOf(MemberView member) {
+        return new ReleaseMemberView(member.userId(), member.name());
+    }
+
     /**
      * The aggregated view of one 发布单: the newest execution, the rerun hand-off fields, the
      * order's admission fields and every node with its tasks in pipeline order.
@@ -158,7 +169,18 @@ public final class ReleaseDtos {
         String emergencyRelease,
         String emergencyReason,
         String emergencyBy,
-        String emergencyAt) {
+        String emergencyAt,
+        /**
+         * P6-F (design §2): the task's 测试人员 ({@code role=TEST}) and 部署人员 ({@code role=OPS}),
+         * each an always-present array of {@code {userId,name}} ordered by {@code userId}. Empty
+         * means "no such member", which the page renders as {@code —}.
+         */
+        List<ReleaseMemberView> testers,
+        List<ReleaseMemberView> deployers) {
+    }
+
+    /** One person of the 测试人员 / 部署人员 column (P6-F §2). */
+    public record ReleaseMemberView(String userId, String name) {
     }
 
     /** Admission fields of the 发布单. */

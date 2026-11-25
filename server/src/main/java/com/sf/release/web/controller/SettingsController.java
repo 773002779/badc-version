@@ -13,6 +13,8 @@ import com.sf.release.web.dto.SettingsDtos.GateSettingsRequest;
 import com.sf.release.web.dto.SettingsDtos.GateSettingsResponse;
 import com.sf.release.web.dto.SettingsDtos.LockSettingsRequest;
 import com.sf.release.web.dto.SettingsDtos.LockSettingsResponse;
+import com.sf.release.web.dto.SettingsDtos.WaiverSettingsRequest;
+import com.sf.release.web.dto.SettingsDtos.WaiverSettingsResponse;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -30,7 +32,10 @@ import org.springframework.web.bind.annotation.RestController;
  *       {@code DEPT_MANAGER} member lists;</li>
  *   <li>{@code GET/PUT /api/v1/settings/lock} — {@code pauseBoundHours} (1–8760);</li>
  *   <li>{@code GET/PUT /api/v1/settings/approval} — the P6-E approval SLA: {@code enabled} plus
- *       {@code remindHours} (1–72) and {@code escalateHours} (2–168, above the reminder).</li>
+ *       {@code remindHours} (1–72) and {@code escalateHours} (2–168, above the reminder);</li>
+ *   <li>{@code GET/PUT /api/v1/settings/waiver} — the P6-F waiver default validity
+ *       {@code defaultDays} (1–90, default 7), used when a waiver request leaves {@code expireAt}
+ *       empty.</li>
  * </ul>
  *
  * <p><strong>The saving user comes from the request identity.</strong> The body never carries an
@@ -103,5 +108,19 @@ public class SettingsController {
             @Valid @RequestBody ApprovalSettingsRequest request) {
         return ApiResponse.ok(SettingsDtos.approvalOf(settings.saveApprovalSla(
             request.enabled(), request.remindHours(), request.escalateHours())));
+    }
+
+    @RequirePerm(Permissions.SETTING_MANAGE)
+    @GetMapping("/settings/waiver")
+    public ApiResponse<WaiverSettingsResponse> waiver() {
+        return ApiResponse.ok(SettingsDtos.waiverOf(settings.waiver()));
+    }
+
+    @RequirePerm(Permissions.SETTING_MANAGE)
+    @PutMapping("/settings/waiver")
+    public ApiResponse<WaiverSettingsResponse> saveWaiver(
+            @Valid @RequestBody WaiverSettingsRequest request) {
+        return ApiResponse.ok(SettingsDtos.waiverOf(settings.saveWaiver(
+            request.defaultDays())));
     }
 }

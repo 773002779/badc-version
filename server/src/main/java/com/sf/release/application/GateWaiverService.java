@@ -6,6 +6,7 @@ import com.sf.release.application.audit.AuditService;
 import com.sf.release.application.notification.NotificationAudiences;
 import com.sf.release.application.notification.NotificationCommand;
 import com.sf.release.application.notification.NotificationService;
+import com.sf.release.application.settings.SettingsService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.common.security.Permissions;
@@ -78,6 +79,7 @@ public class GateWaiverService {
     private final ReleaseOrderMapper orderMapper;
     private final NotificationService notifications;
     private final AuditService audit;
+    private final SettingsService settings;
 
     public GateWaiverService(ReleaseItemMapper itemMapper,
                              GateWaiverMapper waiverMapper,
@@ -87,7 +89,8 @@ public class GateWaiverService {
                              GateCheckService checkService,
                              ReleaseOrderMapper orderMapper,
                              NotificationService notifications,
-                             AuditService audit) {
+                             AuditService audit,
+                             SettingsService settings) {
         this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper must not be null");
         this.waiverMapper = Objects.requireNonNull(waiverMapper, "waiverMapper must not be null");
         this.memberMapper = Objects.requireNonNull(memberMapper, "memberMapper must not be null");
@@ -98,14 +101,21 @@ public class GateWaiverService {
         this.notifications = Objects.requireNonNull(notifications,
             "notifications must not be null");
         this.audit = Objects.requireNonNull(audit, "audit must not be null");
+        this.settings = Objects.requireNonNull(settings, "settings must not be null");
     }
 
     /**
      * Requests a waiver for the item's medium findings.
      *
+     * <p><strong>Expiry.</strong> {@code expireAt} is optional (P6-F design §3): an empty value
+     * means "the configured default validity", i.e. {@code now + WAIVER.defaultDays} days (7 when
+     * the section is unreadable). An explicit value keeps the unchanged rules — it must be later
+     * than now and at most {@link #MAX_VALIDITY} days away.
+     *
      * @throws BizException 40001 the item is not in a waivable state (checks still running, or no
      *                      medium finding); 40002 the blocking findings are 高危/严重 and cannot be
-     *                      waived; 40009 the caller is not a member of the release task
+     *                      waived; 40009 the caller is not a member of the release task; 40000 a
+     *                      blank reason or an explicit expiry outside the allowed window
      */
     public GateService.GateView request(long itemId, String reason, String impact,
                                         Instant expireAt) {
@@ -115,11 +125,10 @@ public class GateWaiverService {
         requireTaskMember(user, item);
         String why = requireText(reason, "豁免原因");
         String impactText = trimToNull(impact);
-        if (expireAt == null) {
-            throw new BizException(BizError.PARAM_INVALID, "豁免有效期不能为空",
-                Map.of("expireAt", "不能为空"));
-        }
         Instant now = Instant.now();
+        if (expireAt == null) {
+            expireAt = now.plus(Duration.ofDays(settings.waiver().defaultDays()));
+        }
         if (!expireAt.isAfter(now)) {
             throw new BizException(BizError.PARAM_INVALID, "豁免有效期必须晚于当前时间",
                 Map.of("expireAt", expireAt.toString()));

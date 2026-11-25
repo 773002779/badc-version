@@ -26,6 +26,12 @@ public class ReleaseHeadRow {
     /** The 变更项 id, so the page can open its verification panel without another lookup. */
     private Long itemId;
 
+    /**
+     * The release task owning the item, so the member read of the P6-F 人员列 needs no second
+     * item lookup (the members are keyed by task).
+     */
+    private Long taskId;
+
     private Long instanceId;
     private String pipelineNo;
     private String triggerType;
@@ -90,6 +96,14 @@ public class ReleaseHeadRow {
 
     public void setItemId(Long itemId) {
         this.itemId = itemId;
+    }
+
+    public Long getTaskId() {
+        return taskId;
+    }
+
+    public void setTaskId(Long taskId) {
+        this.taskId = taskId;
     }
 
     public String getPipelineNo() {

@@ -33,26 +33,29 @@ import java.util.Set;
 
 /**
  * The P6-B platform settings (design §1/§2/§3): the gate check switches, the two approval-role
- * member lists and the abandoned-pause bound, plus the P6-E approval SLA, stored as four sections
- * of the generic {@code app_setting} key/value table.
+ * member lists and the abandoned-pause bound, plus the P6-E approval SLA and the P6-F waiver
+ * default validity, stored as five sections of the generic {@code app_setting} key/value table.
  *
- * <p><strong>Typed views, one JSON section each.</strong> The four rows are addressed by
- * {@code GATE} / {@code APPROVER} / {@code LOCK} / {@code APPROVAL}; {@link #gate()},
- * {@link #approvers()}, {@link #lock()} and {@link #approvalSla()} expose them as typed records, and
- * each {@code save*} method validates the payload,
- * writes the section and then records one {@code SETTING_UPDATE} audit row whose {@code before} and
- * {@code after} are the whole section payload (the design's "整段 JSON"). Platform-level settings
- * carry no scope columns, so only an ALL-scope caller can read the audit rows.
+ * <p><strong>Typed views, one JSON section each.</strong> The five rows are addressed by
+ * {@code GATE} / {@code APPROVER} / {@code LOCK} / {@code APPROVAL} / {@code WAIVER};
+ * {@link #gate()}, {@link #approvers()}, {@link #lock()}, {@link #approvalSla()} and
+ * {@link #waiver()} expose them as typed records, and each {@code save*} method validates the
+ * payload, writes the section and then records one {@code SETTING_UPDATE} audit row whose
+ * {@code before} and {@code after} are the whole section payload (the design's "整段 JSON").
+ * Platform-level settings carry no scope columns, so only an ALL-scope caller can read the audit
+ * rows.
  *
  * <p><strong>No cache, on purpose.</strong> The consumers of this configuration are the gate
- * evaluation and the lease renewer; both must see a save on their very next read (design §2.1/§2.3),
- * so every view method reads the row again. A cache would add an invalidation problem for a row
- * that is read a handful of times per minute.
+ * evaluation, the lease renewer, the approval scan and the waiver request; each must see a save on
+ * its very next read (design §2.1/§2.3), so every view method reads the row again. A cache would
+ * add an invalidation problem for a row that is read a handful of times per minute.
  *
  * <p><strong>Read failures fail safe, not open.</strong> {@link #enabledChecks()} falls back to
  * "all checks enabled" when the row is unreadable or malformed, because the safe direction is to run
  * more checks, not fewer. {@link #pauseBoundHours(int)} falls back to the caller's configured bound
  * (the deployment's {@code release.unit-lease.max-paused-hours}) instead of inventing a value.
+ * {@link #waiver()} falls back to the documented seven days, so a broken row keeps the documented
+ * default instead of refusing every waiver (or granting an unbounded one).
  *
  * <p><strong>Approvers are role membership.</strong> The {@code APPROVER} section mirrors the two
  * approval roles, but the authority remains {@code user_role}: {@link #saveApprovers} replaces
@@ -72,6 +75,8 @@ public class SettingsService {
     public static final String SECTION_LOCK = "LOCK";
     /** P6-E: the approval SLA (enabled + the two reminder thresholds), seeded by V33. */
     public static final String SECTION_APPROVAL = "APPROVAL";
+    /** P6-F: the waiver default validity in days, seeded by V34. */
+    public static final String SECTION_WAIVER = "WAIVER";
 
     /** The two approval roles the approver section owns (design §2.2). */
     public static final String ROLE_OPS_LEAD = "OPS_LEAD";
@@ -94,6 +99,15 @@ public class SettingsService {
     public static final int DEFAULT_PAUSE_BOUND_HOURS = 168;
     public static final int MIN_PAUSE_BOUND_HOURS = 1;
     public static final int MAX_PAUSE_BOUND_HOURS = 8760;
+
+    /**
+     * P6-F design §3: the waiver default validity in days. The default is seven days; the upper
+     * bound is the unchanged waiver maximum of 90 days ({@code GateWaiverService.MAX_VALIDITY}),
+     * so the configured default can never produce a waiver the request path would reject.
+     */
+    public static final int DEFAULT_WAIVER_DAYS = 7;
+    public static final int MIN_WAIVER_DAYS = 1;
+    public static final int MAX_WAIVER_DAYS = 90;
 
     /** {@code user_role.user_id} is {@code VARCHAR(32)}. */
     static final int MAX_USER_ID_LENGTH = 32;
@@ -173,6 +187,26 @@ public class SettingsService {
             return defaultApprovalSla(null, null);
         }
         return parseApproval(po);
+    }
+
+    /**
+     * The P6-F waiver default validity (design §3): the number of days a waiver runs when the
+     * request leaves {@code expireAt} empty. The unchanged explicit-expiry rules stay in
+     * {@code GateWaiverService}: this value is only the default, never an override.
+     *
+     * <p>A missing, unreadable, malformed or out-of-range row degrades to the documented seven
+     * days, so a broken settings row cannot refuse every waiver or grant an unbounded one.
+     */
+    public WaiverSettings waiver() {
+        AppSettingPO po;
+        try {
+            po = settingMapper.selectById(SECTION_WAIVER);
+        } catch (RuntimeException ex) {
+            log.warn("WAIVER setting could not be read; using the seven-day default: {}",
+                ex.getMessage());
+            return defaultWaiverSettings(null, null);
+        }
+        return parseWaiver(po);
     }
 
     // ------------------------------------------------------------------ consumer-facing reads
@@ -351,6 +385,33 @@ public class SettingsService {
         return saved;
     }
 
+    /**
+     * Saves the waiver default validity (P6-F design §3).
+     *
+     * @throws BizException 40000 a missing value or a value outside
+     *                      {@value #MIN_WAIVER_DAYS}..{@value #MAX_WAIVER_DAYS} days
+     */
+    public WaiverSettings saveWaiver(Integer defaultDays) {
+        if (defaultDays == null || defaultDays < MIN_WAIVER_DAYS
+            || defaultDays > MAX_WAIVER_DAYS) {
+            throw new BizException(BizError.PARAM_INVALID,
+                "豁免默认有效期必须在 " + MIN_WAIVER_DAYS + "-" + MAX_WAIVER_DAYS + " 天之间",
+                Map.of("defaultDays", "超出范围"));
+        }
+        WaiverSettings before = waiver();
+        String actor = UserContext.current().userId();
+        Instant now = Instant.now();
+        writeSection(SECTION_WAIVER, waiverJson(defaultDays), actor, now);
+        WaiverSettings saved = waiver();
+        audit.record(AuditCommand.of(AuditAction.SETTING_UPDATE, SECTION_WAIVER,
+                "豁免默认有效期设置", "更新豁免默认有效期（" + saved.defaultDays() + " 天）")
+            .before(waiverAuditValues(before))
+            .after(waiverAuditValues(saved))
+            .build());
+        log.info("WAIVER setting saved: defaultDays={}, by={}", saved.defaultDays(), actor);
+        return saved;
+    }
+
     // ------------------------------------------------------------------ validation
 
     /** Canonical check order, de-duplicated; an empty list is the design's 40000. */
@@ -464,6 +525,12 @@ public class SettingsService {
         values.put("enabled", enabled);
         values.put("remindHours", remindHours);
         values.put("escalateHours", escalateHours);
+        return json(values);
+    }
+
+    private String waiverJson(int defaultDays) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("defaultDays", defaultDays);
         return json(values);
     }
 
@@ -585,6 +652,35 @@ public class SettingsService {
             updatedAt);
     }
 
+    /**
+     * The stored waiver default. A missing/malformed/out-of-range value degrades to the documented
+     * seven days (see {@link #waiver()}); the section keeps its {@code updatedBy}/{@code updatedAt}
+     * metadata where the row exists.
+     */
+    private WaiverSettings parseWaiver(AppSettingPO po) {
+        if (po == null || po.getValueJson() == null) {
+            log.warn("WAIVER setting is missing; using the seven-day default");
+            return defaultWaiverSettings(null, null);
+        }
+        try {
+            JsonNode root = objectMapper.readTree(po.getValueJson());
+            Integer days = intOrNull(root.path("defaultDays"));
+            if (!inRange(days, MIN_WAIVER_DAYS, MAX_WAIVER_DAYS)) {
+                log.warn("WAIVER setting is invalid; using the seven-day default");
+                return defaultWaiverSettings(updatedBy(po), updatedAt(po));
+            }
+            return new WaiverSettings(days, updatedBy(po), updatedAt(po));
+        } catch (JsonProcessingException ex) {
+            log.warn("WAIVER setting is not valid JSON; using the seven-day default: {}",
+                ex.getMessage());
+            return defaultWaiverSettings(updatedBy(po), updatedAt(po));
+        }
+    }
+
+    private static WaiverSettings defaultWaiverSettings(String updatedBy, Instant updatedAt) {
+        return new WaiverSettings(DEFAULT_WAIVER_DAYS, updatedBy, updatedAt);
+    }
+
     private static boolean inRange(Integer value, int min, int max) {
         return value != null && value >= min && value <= max;
     }
@@ -660,6 +756,12 @@ public class SettingsService {
         return values;
     }
 
+    private static Map<String, Object> waiverAuditValues(WaiverSettings settings) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("defaultDays", settings.defaultDays());
+        return values;
+    }
+
     // ------------------------------------------------------------------ views
 
     /**
@@ -704,6 +806,14 @@ public class SettingsService {
      */
     public record ApprovalSla(boolean enabled, int remindHours, int escalateHours,
                               String updatedBy, Instant updatedAt) {
+    }
+
+    /**
+     * The P6-F waiver default validity in days (1–90, default 7). It is the read view of the
+     * {@code WAIVER} section and the value {@code GateWaiverService} uses when a request leaves
+     * {@code expireAt} empty.
+     */
+    public record WaiverSettings(int defaultDays, String updatedBy, Instant updatedAt) {
     }
 
     /** The two lists of the {@code APPROVER} JSON section. */

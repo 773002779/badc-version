@@ -49,8 +49,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * tasks. The aggregation, the derivation rules, the scope guard and the response shape are the
  * real production code under test.
  *
- * <p><strong>Why a counting interceptor.</strong> The detail joins three tables and must issue at
- * most three statements (header, nodes, tasks) with no per-node query. A MyBatis
+ * <p><strong>Why a counting interceptor.</strong> The detail joins four reads (header, members,
+ * nodes, tasks) and must issue at most four statements with no per-node/per-member query. A MyBatis
  * {@link Interceptor} counts every {@code Executor.query} of the request, so an N+1 regression
  * fails here. The authentication lookup of the {@code PermissionInterceptor} uses
  * {@code JdbcTemplate} and is therefore not counted.
@@ -242,7 +242,7 @@ class ReleaseQueryTest {
     }
 
     @Test
-    void release_detail_is_aggregated_in_at_most_three_sql_statements() throws Exception {
+    void release_detail_is_aggregated_in_at_most_four_sql_statements() throws Exception {
         givenPublishedInstance();
         sqlCounter.reset();
 
@@ -250,8 +250,8 @@ class ReleaseQueryTest {
             .andExpect(jsonPath("$.code").value(0));
 
         assertThat(sqlCounter.count())
-            .as("header join + node read + task read, no per-node query")
-            .isEqualTo(3);
+            .as("header join + member read + node read + task read, no per-node/per-member query")
+            .isEqualTo(4);
     }
 
     @Test
