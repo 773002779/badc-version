@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  getApprovalSetting,
   getApproverSetting,
   getCodingConn,
   getGateSetting,
@@ -9,6 +10,7 @@ import {
   getMe,
   getNotificationSetting,
   listSubsystems,
+  saveApprovalSetting,
   saveApproverSetting,
   saveCodingConn,
   saveGateSetting,
@@ -20,6 +22,7 @@ import { ApiError, currentUser, setCurrentUser } from '../api/http'
 import { applyTheme, currentTheme } from '../theme'
 import type { Theme } from '../theme'
 import type {
+  ApprovalSettingView,
   ApproverSettingView,
   CodingConnView,
   CodingProbeView,
@@ -241,11 +244,12 @@ async function saveNotify() {
   }
 }
 
-// ---------------------------------------------------------------- 平台设置 (P6-B)
+// ---------------------------------------------------------------- 平台设置 (P6-B / P6-E)
 //
-// The three `setting:manage` blocks of design §4, after 消息通知: 门禁规则 / 审批人名单 / 锁超时.
+// The four `setting:manage` blocks of design §4 (P6-B) and §2 (P6-E), after 消息通知:
+// 门禁规则 / 审批人名单 / 锁超时 / 审批时效.
 // They share one `/me` read and one loader: unlike the CODING and 消息通知 blocks (each owns its own
-// permission flag because they are independent features), these three are one settings slice and
+// permission flag because they are independent features), these four are one settings slice and
 // always appear together, so a single permission check keeps the page from calling `/me` five times.
 //
 // The check labels below are display-only. The machine value is the contract the API stores and
@@ -282,6 +286,16 @@ const lockView = ref<LockSettingView | null>(null)
 const pauseHours = ref('168')
 const lockError = ref<string | null>(null)
 const lockSaving = ref(false)
+
+// 「审批时效」 (P6-E §2): the switch plus the two thresholds of the pending-approval reminder scan.
+// The inputs are strings so the page can show the reason for a bad value instead of silently
+// coercing it; the server re-checks the same three rules on save (40000).
+const approvalView = ref<ApprovalSettingView | null>(null)
+const approvalEnabled = ref(true)
+const remindHours = ref('12')
+const escalateHours = ref('24')
+const approvalError = ref<string | null>(null)
+const approvalSaving = ref(false)
 
 function errorMessage(e: unknown, fallback: string): string {
   return e instanceof ApiError ? e.message : fallback
@@ -353,6 +367,64 @@ const lockSubtitle = computed(() => {
     : `${state} · 默认值`
 })
 
+const approvalStatus = computed(() => {
+  if (settingsLoading.value) return { label: '读取中…', tone: 'neutral' as const }
+  if (!settingsCanManage.value) return { label: '只读', tone: 'neutral' as const }
+  const view = approvalView.value
+  if (view?.enabled === false) return { label: '已关闭', tone: 'neutral' as const }
+  return view?.updatedBy
+    ? { label: '已保存', tone: 'success' as const }
+    : { label: '默认开启', tone: 'neutral' as const }
+})
+
+const approvalSubtitle = computed(() => {
+  if (settingsLoading.value) return '读取中…'
+  if (!settingsCanManage.value) return '仅平台管理员可见'
+  const view = approvalView.value
+  if (!view) return '默认开启 · 提醒 12 小时 · 升级 24 小时'
+  const state = `${view.enabled ? '已开启' : '已关闭'} · 提醒 ${view.remindHours} 小时 · 升级 ${view.escalateHours} 小时`
+  return view.updatedBy
+    ? `${state} · ${view.updatedBy} 更新于 ${formatDateTime(view.updatedAt)}`
+    : `${state} · 默认配置`
+})
+
+/** Whole hours only; `null` for anything that is not a plain non-negative integer. */
+function parseHours(raw: string): number | null {
+  const text = raw.trim()
+  if (!/^\d+$/.test(text)) return null
+  const hours = Number(text)
+  return Number.isSafeInteger(hours) ? hours : null
+}
+
+/**
+ * The client-side guard of design §2: remind 1–72, escalate 2–168, escalate > remind. Every failing
+ * rule contributes one sentence, so the block can explain exactly why 保存 is disabled instead of
+ * only flashing a toast after the click.
+ */
+const approvalProblems = computed(() => {
+  const problems: string[] = []
+  const remind = parseHours(remindHours.value)
+  const escalate = parseHours(escalateHours.value)
+  if (remind === null || remind < 1 || remind > 72) {
+    problems.push(`提醒阈值需为 1–72 之间的整数小时（当前 ${remindHours.value.trim() || '空'}）`)
+  }
+  if (escalate === null || escalate < 2 || escalate > 168) {
+    problems.push(`升级阈值需为 2–168 之间的整数小时（当前 ${escalateHours.value.trim() || '空'}）`)
+  }
+  if (remind !== null && escalate !== null && escalate <= remind) {
+    problems.push(`升级阈值必须大于提醒阈值（当前 ${escalate} ≤ ${remind}）`)
+  }
+  return problems
+})
+
+const approvalInvalid = computed(() => approvalProblems.value.length > 0)
+
+const approvalReason = computed(() =>
+  approvalProblems.value.length
+    ? `当前设置不可保存：${approvalProblems.value.join('；')}`
+    : ''
+)
+
 function fillGate(view: GateSettingView) {
   gateView.value = view
   gateEnabled.value = [...view.enabledChecks]
@@ -371,6 +443,13 @@ function fillLock(view: LockSettingView) {
   pauseHours.value = String(view.pauseBoundHours)
 }
 
+function fillApproval(view: ApprovalSettingView) {
+  approvalView.value = view
+  approvalEnabled.value = view.enabled
+  remindHours.value = String(view.remindHours)
+  escalateHours.value = String(view.escalateHours)
+}
+
 async function loadPlatformSettings() {
   settingsLoading.value = true
   let me
@@ -381,6 +460,7 @@ async function loadPlatformSettings() {
     gateError.value = message
     approverError.value = message
     lockError.value = message
+    approvalError.value = message
     settingsLoading.value = false
     return
   }
@@ -390,10 +470,11 @@ async function loadPlatformSettings() {
     settingsLoading.value = false
     return
   }
-  const [gate, approvers, lock] = await Promise.allSettled([
+  const [gate, approvers, lock, approval] = await Promise.allSettled([
     getGateSetting(),
     getApproverSetting(),
-    getLockSetting()
+    getLockSetting(),
+    getApprovalSetting()
   ])
   if (gate.status === 'fulfilled') fillGate(gate.value)
   else gateError.value = errorMessage(gate.reason, '读取门禁规则失败')
@@ -401,6 +482,8 @@ async function loadPlatformSettings() {
   else approverError.value = errorMessage(approvers.reason, '读取审批人名单失败')
   if (lock.status === 'fulfilled') fillLock(lock.value)
   else lockError.value = errorMessage(lock.reason, '读取锁超时配置失败')
+  if (approval.status === 'fulfilled') fillApproval(approval.value)
+  else approvalError.value = errorMessage(approval.reason, '读取审批时效配置失败')
   settingsLoading.value = false
 }
 
@@ -513,6 +596,34 @@ async function saveLock() {
     ElMessage.error(errorMessage(e, '保存锁超时设置失败'))
   } finally {
     lockSaving.value = false
+  }
+}
+
+async function saveApproval() {
+  if (approvalInvalid.value) {
+    ElMessage.warning(approvalProblems.value[0] ?? '审批时效设置不合法')
+    return
+  }
+  const remind = parseHours(remindHours.value)
+  const escalate = parseHours(escalateHours.value)
+  if (remind === null || escalate === null) {
+    // Unreachable while approvalInvalid is false; keeps the request body typed.
+    ElMessage.warning('提醒阈值与升级阈值都必须是整数小时')
+    return
+  }
+  approvalSaving.value = true
+  try {
+    const view = await saveApprovalSetting({
+      enabled: approvalEnabled.value,
+      remindHours: remind,
+      escalateHours: escalate
+    })
+    fillApproval(view)
+    ElMessage.success('审批时效设置已保存')
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '保存审批时效设置失败'))
+  } finally {
+    approvalSaving.value = false
   }
 }
 
@@ -918,6 +1029,118 @@ onMounted(() => {
       </template>
     </DataSection>
 
+    <DataSection
+      class="settings-approval"
+      title="审批时效"
+      :subtitle="approvalSubtitle"
+      style="margin-bottom: 16px"
+    >
+      <template #actions>
+        <span class="chip" :class="`chip-${approvalStatus.tone}`">{{ approvalStatus.label }}</span>
+        <el-button
+          v-if="settingsCanManage"
+          type="primary"
+          class="approval-save"
+          :disabled="approvalSaving || approvalInvalid"
+          :loading="approvalSaving"
+          @click="saveApproval"
+        >
+          保存
+        </el-button>
+      </template>
+
+      <el-alert
+        v-if="approvalError"
+        type="error"
+        :closable="false"
+        show-icon
+        :title="approvalError"
+        style="margin-bottom: 12px"
+      />
+
+      <div v-if="!settingsLoading && !settingsCanManage" class="restricted">
+        <span class="strong">需要平台管理员权限</span>
+        <span class="weak small">
+          审批时效决定待签审批的提醒与升级，只有具备 <code class="mono">setting:manage</code>
+          的账号可以查看和修改；当前账号无权读取该配置。
+        </span>
+      </div>
+
+      <template v-else-if="settingsCanManage">
+        <div class="approval-grid">
+          <label class="field">
+            <span class="field-label">超时提醒</span>
+            <span class="switch-row">
+              <el-switch
+                v-model="approvalEnabled"
+                class="approval-enabled"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+              <span class="weak small">关闭后扫描不发任何提醒与升级消息。</span>
+            </span>
+          </label>
+          <label class="field">
+            <span class="field-label">提醒阈值</span>
+            <div class="approval-row">
+              <el-input
+                v-model="remindHours"
+                class="approval-hours approval-remind"
+                inputmode="numeric"
+                placeholder="12"
+                style="max-width: 200px"
+              >
+                <template #append>小时</template>
+              </el-input>
+              <span class="weak small">待签满该小时数发提醒；默认 12，可填 1–72 的整数。</span>
+            </div>
+          </label>
+          <label class="field">
+            <span class="field-label">升级阈值</span>
+            <div class="approval-row">
+              <el-input
+                v-model="escalateHours"
+                class="approval-hours approval-escalate"
+                inputmode="numeric"
+                placeholder="24"
+                style="max-width: 200px"
+              >
+                <template #append>小时</template>
+              </el-input>
+              <span class="weak small">
+                待签满该小时数升级；默认 24，可填 2–168 的整数，且必须大于提醒阈值。
+              </span>
+            </div>
+          </label>
+        </div>
+
+        <el-alert
+          v-if="approvalInvalid"
+          class="approval-invalid"
+          type="warning"
+          :closable="false"
+          show-icon
+          :title="approvalReason"
+          style="margin-top: 12px"
+        />
+
+        <div class="field hint approval-hint">
+          <span>
+            提醒发给当前待签审批人；升级发给 ADMIN 与系统负责人；升级后不再提醒。
+          </span>
+          <span>
+            扫描每 10 分钟一轮，只扫最新一代的待签步骤：同一代同一步骤只提醒一次、只升级一次，
+            发布单已终结或已离开待审批后不再发消息。
+          </span>
+          <span>保存即时生效，无需重启；阈值修改会记入审计（<code class="mono">SETTING_UPDATE</code>）。</span>
+        </div>
+
+        <p v-if="approvalView?.updatedBy" class="weak small approval-audit">
+          最近保存：{{ approvalView.updatedBy }} · {{ formatDateTime(approvalView.updatedAt) }}
+        </p>
+      </template>
+    </DataSection>
+
     <div class="grid">
       <div class="stack">
         <DataSection title="外观">
@@ -1192,6 +1415,29 @@ onMounted(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
+}
+
+/* 「审批时效」 block (P6-E): the switch plus the two threshold fields. */
+.approval-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  max-width: 760px;
+}
+
+.approval-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.approval-hint {
+  margin-top: 12px;
+}
+
+.approval-audit {
+  margin: 12px 0 0;
 }
 
 .grid {

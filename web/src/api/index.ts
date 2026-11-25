@@ -1,6 +1,7 @@
 import { ApiError, api, currentUser, qs } from './http'
 import type {
   AdmissionView,
+  ApprovalSettingView,
   ApproverSettingView,
   ArchiveResult,
   AuditFilter,
@@ -560,6 +561,26 @@ export const getLockSetting = () => api<LockSettingView>('/api/v1/settings/lock'
 /** Saves the pause bound; out-of-range values answer 40000. */
 export const saveLockSetting = (body: { pauseBoundHours: number }) =>
   api<LockSettingView>('/api/v1/settings/lock', {
+    method: 'PUT',
+    body: JSON.stringify(body)
+  })
+
+// -------------------------------------------------- approval reminders (P6-E)
+
+/** The 「审批时效」 block; requires `setting:manage` (design §2). */
+export const getApprovalSetting = () => api<ApprovalSettingView>('/api/v1/settings/approval')
+
+/**
+ * Full replacement of the switch and both thresholds. The server range-checks them itself
+ * (remind 1–72, escalate 2–168 and > remind; 40000 otherwise), so the client guard is only a
+ * convenience that keeps an obviously bad value from leaving the page.
+ */
+export const saveApprovalSetting = (body: {
+  enabled: boolean
+  remindHours: number
+  escalateHours: number
+}) =>
+  api<ApprovalSettingView>('/api/v1/settings/approval', {
     method: 'PUT',
     body: JSON.stringify(body)
   })

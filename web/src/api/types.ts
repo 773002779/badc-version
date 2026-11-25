@@ -587,6 +587,20 @@ export interface LockSettingView {
   updatedAt?: string | null
 }
 
+/**
+ * The 「审批时效」 block (P6-E design §2): the two thresholds of the pending-approval reminder scan.
+ * `remindHours` is 1–72 and `escalateHours` 2–168 *and* greater than `remindHours`; `enabled:false`
+ * silences the scan (no reminder and no escalation). The page mirrors those three rules before it
+ * lets a save leave, and the server re-checks them (40000).
+ */
+export interface ApprovalSettingView {
+  enabled: boolean
+  remindHours: number
+  escalateHours: number
+  updatedBy?: string | null
+  updatedAt?: string | null
+}
+
 // ---------------------------------------------------------------- audit (P4-C)
 
 /**
