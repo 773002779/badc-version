@@ -357,3 +357,35 @@ Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有�
 - Ruling R57: 导出取 5001 行以区分「恰好 5000」与「被截断」，截断追加末行中文提示；导出沿用当前筛选、不带分页，web 用 `fetch` + blob（`window.open` 会丢 `X-User-Id`），文件名取 `Content-Disposition`。`b4bbb81` / `ceeba6a`
 - Ruling R58: 单元详情的「操作日志」用通栏 `DataSection` 而非 Tab（6 列在约 570px 右栏必然横向滚动）；`before/after` 只在全局页用展开行展示，单元页严格 6 列。`ceeba6a`
 - Ruling R59: 审计动作下拉只列 13 个常用动作（三组），未列动作仍可经「全部动作」检索并显示服务端 `actionLabel`；对象类型 9 个在前端镜像（行里没有 `objectTypeLabel`），改枚举时两处同步。`ceeba6a`
+
+## R67+（P5-B 停止/退出/关闭/归档，2026-11-25）
+
+> **编号说明**：R60–R66 是 P5-A 的裁决，当时只写进 `.superpowers/sdd/p5a-daily/progress.md`（正式台账未追加），
+> 该文件已注明「后续 P5-B 从 R67 起」。本节按该约定从 R67 续号，不重写 P5-A 的 7 条；P5-A 原文见其 progress
+> 文件的「裁决 R60+（P5-A）」一节。来源文件（P5-B 的 progress）同样在 `.gitignore` 的 `.superpowers/` 下，
+> 未进提交，行号为 2026-11-25 的文件状态。
+
+**R67–R73（P5-B 停止/退出/关闭/归档）**
+
+- Ruling R67: 四个动作**共用一条终止路径**（`PipelineTerminationService`，`ACTIVE = PENDING/RUNNING/PAUSED`），
+  差别只在对象、权限、允许状态与额外级联；业务状态在一个 `TransactionTemplate` 里提交，`InstanceFinishedEvent(TERMINATED)`
+  在事务内发布（回滚记录收敛依赖它），引擎取消与锁释放在提交后 best-effort（失败只 WARN）。`3adeb8e`
+- Ruling R68: 发布单状态被**镜像**（stop/exit → `TERMINATED`，close/归档每关一项 → `CLOSED`，`row_version` CAS）；
+  `{status,itemStatus,terminatedPipelineNo}` 里 `status` 是发布单镜像（未发布过的变更项 close 为 `null`），
+  `terminatedPipelineNo` 在无活动实例时为 `null`（动作仍成功，不是 40001）。`3adeb8e`
+- Ruling R69: 归档级联 = `ItemStatus.isBlocking()`——`DONE` 保留、`GATE_FAILED/FAILED/REJECTED` 原样不动；
+  `closedItems` 只数真正 `APPLIED` 的关闭、`terminatedInstances` 只数真正被终止的实例；归档范围按该任务变更项的
+  去重单元校验，权限是 `task:create` + 创建人或 `ADMIN`。`3adeb8e`
+- Ruling R70: 审批/检查作废在**业务事务内且不吞异常**（参与事务的 `@Transactional` 抛错会标 rollback-only，捕获无益），
+  逻辑 no-op 返回 0（无快照/没有 PENDING 步）；只有引擎取消、锁释放、审计、通知是提交后/独立事务且失败不阻断。
+  `3adeb8e`
+- Ruling R71: **stop 也作废待签审批**（保留已记录检查，只有 exit/close 才把未完成检查置 `INVALID`）；评审发现 stop 后
+  审批人仍会收到一个已终止发布的待签，修复为 stop 也 `CANCELED`，设计 §1 同步，回归测试
+  `stop_voids_the_signatures_it_still_waits_for_and_keeps_the_recorded_checks`。`dae9057`
+- Ruling R72: 归档的 `releaseTaskLocks` **不抢活锁**（owner 实例仍 `PENDING/RUNNING/PAUSED` 则跳过，状态读不出按
+  「仍活动」）；归档对并发移动的变更项记日志跳过而不是 40001，只有任务/发布单 CAS 失手才 40001；四个端点都放
+  `ReleaseControlController`（`TaskController` 不加归档）。`3adeb8e`
+- Ruling R73: 前端四处共用新组件 `ReasonDialog.vue`（原因 1–200、每次打开清空、服务端拒绝保留文字）；停止/退出在
+  发布页页头，状态取 `GET .../admission` 的 `itemStatus`（PAUSED 实例仍是 `PROD_DEPLOYING`）；归档预览的 N 用前端
+  「非终态」集合（比后端 `isBlocking()` 宽，可能多算）、M 由客户端从发布记录数出，响应计数才权威；`demo-control.sql`
+  给 `ops-lead` 幂等加 `OPS` 角色（C20 保证 OPS 无 `release:publish`）。`518d37e`

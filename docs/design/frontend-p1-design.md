@@ -592,3 +592,144 @@
 - 没有停止/重试/取消日常（GAP-05）、没有日常通知（只写审计）、没有日常镜像入库/一致性校验。
 - 探针数据来自种子 + live 后端，**没有真实 CODING 成功路径的界面证据**（本机无连接，真实记录是
   `ENGINE_UNAVAILABLE` 失败）；截图未做人眼复核。
+
+## 16. P5-B · 停止 / 退出 / 关闭 / 归档（2026-11-25）
+
+四个止损动作首次有页面入口：发布内容页页头两扇门（停止 / 退出）、任务详情变更项行「关闭」、页头「归档任务」
+与归档后的只读态；四处确认共用一个新组件 `ReasonDialog.vue`（必填原因 1–200）。**不新增路由、不加导航**。
+截图（1440×900，探针生成，`git add -f` 入库）：
+
+![停止发布确认框（浅色）](shots/release-stop-light.png)
+![归档后的任务详情（浅色）](shots/task-archived-light.png)
+
+**共享确认框 `web/src/components/ReasonDialog.vue`（新组件）**
+
+- `el-dialog` 520px，`close-on-click-modal=false`；`el-input type=textarea :rows=3 maxlength=200 show-word-limit`；
+  标题、`message`（级联说明）、`warning`（不可逆部分，`el-alert` warning 块）、`confirmText`、`placeholder`、
+  `danger`（停止/归档用红色确认按钮，退出/关闭用 primary）、`busy` 由父组件控制。
+- 校验：trim 后 1–200 才能确认；空/超长/请求中确认按钮 `disabled`，请求中显示 loading；底部提示固定
+  「原因必填，1–200 字，作为操作留痕」，超长变红「原因不能超过 200 字」。
+- 每次打开清空原因（上一次「停止」的理由不会带进下一次「退出」）；**服务端拒绝时保留已输入文字**，由父组件
+  决定是否关闭，便于改正后重试。
+
+**发布内容页 `web/src/views/ReleaseView.vue`（页头两扇门）**
+
+- 位置：`PageHeader` 右侧，`停止发布`（class `stop-release`）在 `退出流水线`（class `exit-release`）之前。
+- 禁用口径全部落在**变更项状态**上（`GET /api/v1/releases/{publishNo}/admission` 的 `itemStatus`），不用实例
+  状态：实例 `PAUSED` 时变更项仍是 `PROD_DEPLOYING`，用实例状态会把「暂停等待」误判成「不可停止」。读取失败/
+  未加载时按钮也禁用，`title` 说明原因。
+  - 停止：需要 `control:execute-prod`；状态 ∈ 生产流程四态（`isStoppableItemStatus`：`SUBMITTED`/
+    `PENDING_APPROVAL`/`READY`/`PROD_DEPLOYING`）。可用时 title「终止在途生产流水线；已上线批次保留，不回滚」；
+    不可用时 title 点名缺权限或当前状态「不在生产流程中，请使用退出流水线」。
+  - 退出：需要 `release:publish` **或** `control:execute-prod`；状态不是「不可再退出」集合
+    （`isTerminalItemStatus`：`DONE`/`CLOSED`/`TERMINATED`/`ROLLED_BACK`）。可用时 title
+    「退出任意非终态流水线，作废待签审批与未完成检查」。
+- 两个确认框文案（停止）：message「将停止发布单 <单号>：终止在途流水线与后续批次，变更项置为「已终止」，
+  待签审批作废。」；warning「已上线（成功）批次保留，不回滚；镜像回滚是独立的运维动作。」。退出：message
+  「…终止在途实例，变更项置为「已终止」，未完成检查置为失效，待签审批作废。」；warning「已上线批次保留；
+  退出后该发布单不可恢复执行，如需回退请使用生产回滚。」。
+- 提交 `stopRelease`/`exitRelease`：成功后 toast「已停止发布：变更项 已终止[，已终止实例 <单号>]；已上线批次保留」/
+  「已退出流水线：变更项 已终止…」，关闭对话框并 `load()` 刷新整个发布页（状态、节点、记录）。
+- **40001 专门处理**：对话框关闭、显示服务端句子（例如「变更项状态已变化，操作未生效，请刷新后重试」），
+  并重读 `admission`/详情——不把旧状态留在页面上。其他错误直接显示 `ApiError.message`（40009 原文含缺的权限点）。
+- 按钮加载态由页面级 `controlBusy` 控制，两个按钮互斥，防重复提交。
+
+**任务详情 `web/src/views/TaskDetailView.vue`（行内关闭 + 归档 + 只读态）**
+
+- 变更项行操作列：`发布` 之后新增 `关闭`（class `close-item`，`type=danger` link）。条件：任务未归档、
+  有 `release:publish`、行状态不在 `isTerminalItemStatus`（`DONE` 与三个闭合终态）；不可用时 `disabled` +
+  原生 `title`（缺权限 / 「当前状态「X」不可关闭」）。确认框 message 点名
+  「<crid> · <单元> / <版本>」，warning「关闭后该变更项不可再发布；活动实例终止，待签审批与未完成检查作废；
+  发布记录保留。」；成功后 toast `已关闭变更项「<crid>」（已关闭）[，已终止实例 <单号>]` 并刷新列表。
+- 页头「归档任务」（class `archive-task`，`type=danger plain`）：`task:create` **且**（创建人是当前用户 **或**
+  当前用户有 `ADMIN` 角色）；任务已归档时按钮**不渲染**。不可用时 `disabled` + `title` 点名缺权限 / 非创建人 /
+  已归档。
+- 归档确认框的**级联预览**：message「将归档任务「<任务>」：级联关闭 <N> 个未完成变更项[，正在统计在途实例… |
+  ，终止 <M> 个在途实例]。」，N = 列表里 `!isTerminalItemStatus` 的行数，M = 打开对话框后**客户端**从
+  `GET /api/v1/releases?unitId=…` 的发布记录里数出的未完成项最新实例数（`archiveInFlight`，请求中显示「正在统计」）。
+  warning「归档后任务只读：新增变更项、发布、日常与重跑均不可用；发布记录与回滚入口保留。此操作不可撤销。」。
+  确认 `archiveTask` → toast 用**响应**的 `closedItems/terminatedInstances`：
+  「任务已归档：关闭 N 个变更项，终止 M 个在途实例；发布记录与回滚入口保留」。
+- 归档后的只读态：页头 `新建变更项`/`归档任务` 不再出现；顶部 `el-alert`「任务已归档（只读）」+「新增变更项、
+  发布、日常与重跑均不可用；发布记录与回滚入口保留（发布记录 → 发布单 → 进入生产回滚）。」；行内
+  `发布`/`关闭`/`日常` 消失，`记录`（日常记录，仅 `UNIT` 行）与 `发布记录` 保留；`发布记录` 链到
+  `/records?keyword=<crid>`（发布记录页 → 发布单 → 生产回滚入口）。
+
+**发布记录页 `web/src/views/RecordsView.vue`**
+
+- 只加一处：读取 `?keyword=` 作为初始筛选（归档任务行的「发布记录」链接落点），不新增页面/接口。
+
+**API / 类型 / 状态集合**
+
+- `web/src/api/index.ts`：`stopRelease(publishNo, reason)`、`exitRelease(publishNo, reason)`、
+  `closeItem(itemId, reason)`、`archiveTask(taskId, reason)`，都是 POST `{reason}`。
+- `web/src/api/types.ts`：`ControlResult {status?, itemStatus, terminatedPipelineNo?}`、
+  `ArchiveResult {taskStatus, closedItems, terminatedInstances}`（与 §12.2.8 响应一致）。
+- `web/src/utils/format.ts`：`isTerminalItemStatus`（`DONE`/`CLOSED`/`TERMINATED`/`ROLLED_BACK`）、
+  `isStoppableItemStatus`（生产流程四态）、`ARCHIVED → 已归档` 标签。
+
+**演示数据 `scripts/demo-control.sql`（新脚本，幂等、ASCII-only）**
+
+- 造 `PO-DEMO-CTL-STOP`：变更项 `PROD_DEPLOYING`、实例 `PAUSED` at `PROD_DEPLOY`、批次 1 `SUCCESS` + 批次 2
+  `PENDING`、单元锁在；`DEMO-CTL-ARCHIVE-A/-B` 两个任务各 DONE + TESTING/RUNNING + GATE_PENDING（一个任务给
+  一个主题，归档不可逆，重跑探针前重放脚本）。只删自己标记的行（children first），不碰 `PO-20261121-5976BF`。
+- 给 `ops-lead` 幂等 `INSERT IGNORE` 一个 `OPS` 角色：live 种子只有 `OPS_LEAD`，而探针需要一个
+  `control:execute-prod` 且无 `release:publish` 的身份（C20 保证 OPS 永不持 `release:publish`）；不改角色表。
+
+**验收（P5-B）**
+
+- `cd web; npm run build` 通过（`vue-tsc -b && vite build`，`✓ built in 1.87s`，1671 modules，无新依赖）。
+- `scripts/verify-p5b-ui.mjs`（复制到 `%TEMP%\rp-shot-tools` 后运行，双主题，0 console error），探针原文：
+
+  ```
+  p5b-light: task=90001 stop=on exit=on ops=stop/exit dept=blocked closed=yes archived=yes rows=3 errors=0
+  p5b-dark: task=90002 stop=on exit=on ops=stop/exit dept=blocked closed=yes archived=yes rows=3 errors=0
+  OK all stop/exit/close/archive assertions passed
+  ```
+
+  每主题断言：开发看到两扇门可点、停止 title 含「已上线批次保留，不回滚」；两个确认框的级联文案、空原因禁用
+  确认、`maxlength=200` 与 `/200` 计数、输入后可确认、取消不改变发布单；`ops-lead`（只有
+  `control:execute-prod`）可停止**且**可退出；`dept-manager`（两者皆无）两扇门禁用且 title 点名缺权限；
+  `ops-lead` 的 `关闭`/`归档任务` 禁用；开发真实关闭一条 GATE_PENDING 行后行变「已关闭」；归档对话框显示
+  「关闭 1 个未完成变更项，终止 1 个在途实例」，确认后只读态出现、创建/归档按钮消失、行内发布/关闭/日常/重跑
+  消失、DONE 行保留、每行保留 `?keyword=` 的发布记录链接；两主题 0 console error。
+- **真实 stop 证据**（种子 + live 后端，随后重放脚本恢复演示态）：
+  `POST /api/v1/releases/PO-DEMO-CTL-STOP/stop`（dev，理由
+  `demo control stop evidence: production batch 2 unhealthy`）→
+  `{"code":0,"data":{"status":"TERMINATED","itemStatus":"TERMINATED","terminatedPipelineNo":"PL-DEMO-CTL-STOP"}}`；
+  DB 断言：实例 `TERMINATED` + `status_reason` + `end_at`；`PROD_DEPLOY` 节点 `RUNNING→SKIPPED`，批次 1
+  `SUCCESS` 保留、批次 2 `SKIPPED`（summary「已取消：<reason>」）；`release_item`/`release_order` 均
+  `TERMINATED`；`deploy_unit_lock` 该实例 0 行；审计行 `actor=dev action=STOP object=PO-DEMO-CTL-STOP`、
+  `reason` 原文、`after_json` 含 `itemStatus/instanceStatus/terminatedPipelineNo`。
+- 截图 4 张入库（探针生成，未人眼复核）：`release-stop-{light,dark}.png`、`task-archived-{light,dark}.png`。
+  探针**会真的关闭/归档**一条种子数据（每主题一个任务），重跑前必须重放 `scripts/demo-control.sql`。
+
+**与设计不一致（前端，代码为准）**
+
+1. **归档预览的 N 与后端 `closedItems` 口径不同**：前端 N 用 `isTerminalItemStatus`（排除 `DONE`/`CLOSED`/
+   `TERMINATED`/`ROLLED_BACK`），仍会计入 `GATE_FAILED`/`FAILED`/`REJECTED`；后端级联用
+   `ItemStatus.isBlocking()` 会跳过这三类。种子/演示里若存在 GATE_FAILED 项，预览 N 可能大于响应
+   `closedItems`；toast 一律以响应为准（见 §8.11 偏差 3）。
+2. **「M 个在途实例」是客户端统计**：没有新增后端预览端点，页面从 `GET /api/v1/releases?unitId=` 的未完成项
+   最新实例状态里数；`archiveInFlight` 只用于文案，权威计数仍是归档响应。
+3. **停止按钮只看变更项状态**：`GET .../admission` 的 `itemStatus`（PAUSED 实例仍显示 `PROD_DEPLOYING`）；
+   设计 §6 没有规定用哪个状态，这里刻意不用实例状态。
+4. **退出按钮的权限口径与后端 OR 一致**，但页面对「C20 角色」没有额外提示：OPS/OPS_LEAD 永无
+   `release:publish`，仍可因 `control:execute-prod` 退出；关闭按钮对它们始终禁用（C20 在拦截器就拒）。
+5. **40001 的恢复动作是页面自定的**：关对话框 + 服务端原文 + 重读状态；设计只说「成功后刷新」。
+6. **归档后保留的两个入口**是「记录」（日常记录）与「发布记录」（`/records?keyword=`）；`RecordsView` 因此
+   新增 `?keyword=` 读取——设计 §6 只说「保留发布记录入口」，没有给落点。
+7. **没有停止/退出的影响面预览**（批次清单、实例号、审批人名单），也没有节点级「停止」入口；停止/退出只在
+   发布页页头，关闭/归档只在任务详情。
+8. **演示脚本改了 live 身份**：给 `ops-lead` 幂等加 `OPS` 角色（环境种子与简报不符）；不改角色/权限表。
+
+**未做（P5-B 明确不做）**
+
+- 不做**已上线批次回收**：停止只终止后续批次，页面与 toast 都写明「已上线批次保留」；镜像回滚是 P4-A 的独立入口。
+- 不做**归档撤销/批量归档**：归档不可撤销，一次一个任务；没有「归档后仍可编辑」的临时态。
+- 不做**停止/退出的行内或节点级入口**、不做「停止并回滚」组合动作。
+- 不做**归档前的服务端预览**：N/M 都是客户端估算，响应才权威。
+- 没有停止/退出/关闭/归档的**前端单测**；覆盖靠 `scripts/verify-p5b-ui.mjs` 的 DOM 断言（无 CI 浏览器）。
+- 截图未人眼复核（实现模型无图像输入）；探针数据来自种子 + live 后端，**没有真实 CODING 引擎取消的界面证据**
+  （本机无连接）。
+
