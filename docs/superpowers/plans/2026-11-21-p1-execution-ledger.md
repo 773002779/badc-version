@@ -653,3 +653,72 @@ Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有�
   itemStatus=PENDING_APPROVAL / chain=PENDING/PENDING`（否则退出码非 0），历史行随重播种清除、审计/通知行保留为证据。
   前端**无单测**、截图未人眼复核（本轮文档模型无图像输入，只核实文件尺寸 1440×2351）；执行侧只在真实 DB + stub
   引擎上验证，没有真实 CODING 租户端到端。`7b44de2` / `10b9d6d`
+
+## R121+（P6-E 审批时效提醒，2026-11-26）
+
+> **编号说明**：正式台账此前停在 R120（P6-D 收口）。P6-E 的代码先于文档合并、在本次收口，按「接续最大编号」从
+> **R121** 起，不改写 R80–R120，也不改动 P6-A/B/C/D 的章节正文（技术方案 §8.13–§8.16、§12.2.10–§12.2.13，
+> 前端设计 §18–§21）。
+>
+> **来源**：契约与计划为 `docs/superpowers/{specs,plans}/2026-11-26-p6e-approval-reminder*.md`（`eb869c8`）；
+> 代码以 `78bc195`（后端 18 文件，+1645/−16，全量 994 绿 = 基线 964 + 30）与 `516a680`（前端/脚本/截图 6 文件，
+> +743/−5；`npm run build` 绿、`verify-p6e-ui.mjs` 双主题通过并恢复 `enabled/12/24`）为准；任务报告在
+> `.superpowers/sdd/p6e-reminder/{task-1-report.md,task-2-report.md}`（`.gitignore` 的 `.superpowers/` 下，未进提交），
+> 进度见同目录 `progress.md`。lead 复核：994 绿（`server/target/surefire-reports` 当前 **103 个测试类**逐类累计 =
+> 994，0 失败/0 错误/0 跳过；目录里另有两条 2026-11-22 的陈旧报告共 10 条，累加会得到 1004，**不计**）、独立
+> `npm run build` 绿、探针输出见前端设计 §22 与技术方案 §12.2.14、live 端点取证见 §12.2.14。
+
+- Ruling R121: 配置是 **V33 给通用 `app_setting` 加第四段 `APPROVAL`**（无新表、无新索引），
+  `{"enabled":true,"remindHours":12,"escalateHours":24}`；`SettingsService` 的 `SECTION_APPROVAL`、
+  `DEFAULT_REMIND_HOURS=12`/`DEFAULT_ESCALATE_HOURS=24`、保存范围 `MIN/MAX_REMIND_HOURS=1/72`、
+  `MIN/MAX_ESCALATE_HOURS=2/168` 且 `escalateHours > remindHours`；保存整段覆盖（`UPDATE` 未命中再 `INSERT`）。
+  `enabled=false` 时扫描在 **due 查询之前**返回 `ScanResult.none()`（不发消息也不查待签行）；每次扫描读表、无缓存。
+  种子行 `updated_by=NULL`，保存后为当前账号。`78bc195`
+- Ruling R122: 扫描口径是**每单最新准入代**：`ApprovalReminderMapper#selectDue` 用
+  `a.snapshot_id = (SELECT MAX(snap.id) FROM admission_snapshot snap WHERE snap.order_id=a.order_id)`，**不是**
+  `MAX(approval.snapshot_id)`——重提后不需要签字的新代没有 `approval` 行，按 approval 取 MAX 会把旧代 `PENDING`
+  行复活；`only_the_newest_snapshot...` 与 `a_new_generation_without_a_pending_step_does_not_revive_the_old_one`
+  钉住。只取 `a.status='PENDING'` + `i.status='PENDING_APPROVAL'`；`created_at <= now-remindHours`（**边界含等号**，
+  恰好 12h/24h 就发），Java 再以 `Duration.compareTo >= 0` 判级；`ORDER BY created_at, order_id, step_no`，
+  `LIMIT` 由 `scan(now,limit)` 传入、`limit<=0` 回退 `DEFAULT_SCAN_LIMIT=200`，job 固定 200；等待小时数用
+  `Duration.toHours()` 向下取整。`78bc195`
+- Ruling R123: 两级**先判升级、再判提醒**：`waited >= escalateAfter` → `APPROVAL_ESCALATE`（ADMIN + 系统负责人），
+  `else if waited >= remindAfter` → `APPROVAL_REMIND`（该角色生效审批人）。因此首扫已 ≥24h **只升级不补提醒**，
+  12h 已提醒的步骤到 24h 只多一组升级行，25h 再扫不新增（升级抑制不依赖历史发送记录，由分支顺序保证）。
+  `ScanResult{scanned,reminded,escalated}`：`scanned` 是 due 行数，`reminded`/`escalated` 是**本轮尝试发送数**，
+  不是插入行数；幂等由通知唯一键承担。`78bc195`
+- Ruling R124: 接收人：提醒用 `SettingsService#approvers()` 的该角色生效名单（P6-B：存储名单为空 → `user_role`
+  的 `OPS_LEAD`/`DEPT_MANAGER`），最终为空 → 系统负责人（正文追加「（角色无人，已转系统负责人）」）；未知角色名
+  不臆造名单，同样转负责人（`ApprovalRole` 只有两个角色，`roleLabel` 对未知角色原样显示机器名）。升级用
+  `user_role` 的 `ADMIN`（`SELECT DISTINCT user_id`，无 ACTIVE 过滤）+ 扫描行的 `subsystem.owner_id`，
+  `TreeSet` 去重（负责人兼 ADMIN 只一行）；owner 取自 due 查询 join 出的行，resolver 不再二次读 subsystem
+  （负责人变更下一轮生效）。`subsystemId`/`creator` 随行查出但当前规则不用。`78bc195`
+- Ruling R125: 去重与通知：ref = `approval:{snapshotId}:{stepNo}:REMIND|ESCALATE`；唯一键
+  `event|objectType|objectId|recipient|channel|ref`（`INSERT IGNORE`），服务端**不预读通知表**。因此「同一代同一步骤
+  只发一次」的实际粒度是 **per recipient/channel/level**：12h 后新加入该角色的审批人下一轮会收到同一 ref 的提醒；
+  一次升级 = 每个接收人一行站内（测试 fixture 为 2 ADMIN + 负责人 = 3 行）。事件键
+  `APPROVAL_REMIND("审批待处理提醒", ORDER)`、`APPROVAL_ESCALATE("审批超时升级", ORDER)`（事件键 19→21）；正文含
+  发布单号、角色中文名、已等待小时数、`/releases/{publishNo}` 直达链接，升级追加「已升级通知系统管理员与系统
+  负责人」；渠道沿用 P4-B（INAPP 即时 `SENT` + 配置企微时 `PENDING` 由 15s 任务发送/重试一次），扫描本身不发 HTTP。
+  **扫描不写审计**（`a_scan_writes_no_audit_rows` 断言 `audit_log=0`），通知行即留痕。`78bc195`
+- Ruling R126: 端点与审计：`GET/PUT /api/v1/settings/approval` 加在既有 `SettingsController`（不是新控制器），
+  两端点都 `@RequirePerm(setting:manage)`——**读也 40009**（payload `perm:"setting:manage"`，message「缺少权限点：
+  setting:manage」，不是 403）；请求三个字段都 `@NotNull`（**具备权限时**缺字段先被 web 校验拒成 40000「参数不合法」，
+  `data.<field>`「不能为空」——权限检查先于请求体校验，非管理员即使 body 非法也 40009），服务再校验范围与交叉
+  （40000，`data.remindHours/escalateHours="超出范围"` 或 `"必须大于提醒阈值"`）；响应
+  `ApprovalSettingsResponse{enabled,remindHours,escalateHours,updatedBy,updatedAt}`
+  （`updatedAt` ISO-8601）。每次成功保存写**一行** `SETTING_UPDATE`：`object_type=SETTING`、`object_id=APPROVAL`、
+  label「审批时效设置」、`before_json`/`after_json` 为整段、两个 scope 列为 `NULL`（平台级，仅 `ALL` 读者可见）。
+  无 DELETE/重置端点，恢复默认只能 PUT；`updatedBy` 无法通过 API 还原为 `null`。`78bc195`
+- Ruling R127: 任务、回退与证据口径：`ApprovalReminderJob` `@Scheduled(fixedDelay=600_000L)`，注入 `Clock`
+  （`ClockConfig`）调 `scan(clock.instant(),200)`，整轮异常只记日志；`JobConfig` 用
+  `@ConditionalOnProperty(name="release.approval.reminder-enabled", havingValue="true", matchIfMissing=true)`，
+  `application.yml` 显式 true、`application-test.yml` false（开关关闭时 bean 不注册，不是空跑）；**无分布式锁/leader**，
+  多实例靠唯一键幂等。读失败回退比设计更宽：缺行/JSON 非法/字段缺失或类型不对/越界/**阈值交叉**一律回退
+  `enabled=true / 12 / 24`（交叉当坏段，不「修正」），能读到行时回退值仍带 `updatedBy/updatedAt`；service 再兜
+  `RuntimeException`；`APPROVER` 读失败 → 空名单 → 负责人，ADMIN 读失败 → 只发负责人。证据：30 个测试（22 + 6 + 2，
+  真实库 + 固定时钟 `CREATED=2026-11-26T00:00:00Z`）、全量 994 绿（103 个当前测试类）、探针
+  `verify-p6e-ui.mjs` 双主题绿（`guard=0/12eq/169 puts=3 saved=6/12 off=false restored=true/12/24 readonly=yes
+  approvalRequests=0 errors=0`）、截图 1440×900 视口（浅 94,463 B / 深 93,685 B）。探针只走 HTTP API、不依赖 MySQL、
+  不改 `user_role`，但 `finally` PUT 恢复默认会把 `updatedBy/updatedAt` 写成 `dev` + 本次时间。前端**无单测**、
+  截图未人眼复核；没有真实等 12 小时/真实企微收消息的端到端取证。`516a680` / `78bc195`

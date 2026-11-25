@@ -1394,3 +1394,151 @@ GAP-11 / J11 的前端是一个**页头红色入口 + 红色确认框 + 常驻�
   未人工看图（尺寸 1440×2351 由文件读取核实）。
 - **只验证 demo 单**：探针只对 `PO-DEMO-EMERGENCY` 真实放行，未在其它真实发布单上跑「放行 → 执行 → 观察批次」；
   执行侧由后端 5 个测试覆盖。
+
+## 22. P6-E · 审批时效（2026-11-26）
+
+GAP-12 / J7 的前端是设置页的**第四块**「审批时效」：一个开关 + 两个小时数 + 客户端校验 + 保存回显，
+位于「锁超时」之后、「外观」之前。**不新增路由、不新增导航、不新增依赖**：只改 `web/src/views/SettingsView.vue`
+与 `web/src/api/{index,types}.ts`。接口与后端口径见技术方案 §8.17 / §12.2.14。
+
+截图（`git add -f`，视口 1440×900，块滚到页面顶部）：
+
+![审批时效（浅色）](shots/settings-approval-light.png)
+![审批时效（暗色）](shots/settings-approval-dark.png)
+
+**块结构（`SettingsView.vue`，类 `.settings-approval`）**
+
+- `DataSection` 标题「审批时效」；右上 `#actions`：状态 chip + 「保存」按钮（类 `.approval-save`，仅
+  `settingsCanManage` 渲染）。整块在 P6-B 的「锁超时」块之后、「外观」网格之前（`margin-bottom: 16px`）。
+- chip 五态：`读取中…`（`settingsLoading`）/ `只读`（无 `setting:manage`）/ `已关闭`（`enabled=false`）/
+  `已保存`（有 `updatedBy`）/ `默认开启`（种子，`updatedBy=null`）。
+- subtitle 回显：`已开启|已关闭 · 提醒 N 小时 · 升级 M 小时`；有 `updatedBy` 时追加 `· {updatedBy} 更新于 {时间}`
+  （`formatDateTime`，本地时区到分钟），否则追加 `· 默认配置`；未加载时 `读取中…`，只读时 `仅平台管理员可见`。
+- 读取失败：块内 `el-alert type="error"`，title 为 `API message`，回退文案「读取审批时效配置失败」。
+- 控件：
+  - 「超时提醒」`el-switch`（类 `.approval-enabled`，`active-text=开启`/`inactive-text=关闭`），旁注
+    「关闭后扫描不发任何提醒与升级消息。」
+  - 「提醒阈值」`el-input`（类 `.approval-hours.approval-remind`，`inputmode=numeric`、`#append 小时`、
+    placeholder `12`），旁注「待签满该小时数发提醒；默认 12，可填 1–72 的整数。」
+  - 「升级阈值」`el-input`（类 `.approval-hours.approval-escalate`，同上，placeholder `24`），旁注
+    「待签满该小时数升级；默认 24，可填 2–168 的整数，且必须大于提醒阈值。」
+- 提示区 `.field.hint.approval-hint` 三句：brief 要求的三句（「提醒发给当前待签审批人；升级发给 ADMIN 与
+  系统负责人；升级后不再提醒。」）之外，另补扫描口径（「扫描每 10 分钟一轮，只扫最新一代的待签步骤：同一代
+  同一步骤只提醒一次、只升级一次，发布单已终结或已离开待审批后不再发消息。」）与审计说明（保存即时生效、
+  阈值修改记入 `SETTING_UPDATE`）。
+- 回显：`updatedBy` 非空时块底 `.approval-audit` 显示「最近保存：{updatedBy} · {时间}」。
+- 只读分支（无 `setting:manage`）：整块显示虚线框 `.restricted`「需要平台管理员权限 / 只有具备
+  `setting:manage` 的账号可以查看和修改；当前账号无权读取该配置。」，**不渲染**开关、阈值输入、保存按钮，
+  且**不发**该端点的 GET（见探针断言）。
+
+**客户端校验（`approvalProblems` → `approvalInvalid` → `approvalReason`）**
+
+- 输入用 `string` + `parseHours`（`/^\d+$/` 且 `Number.isSafeInteger`，不接受小数/负数/空/前后空格外的字符），
+  不做 `el-input-number`：保留用户输入原文，才能解释「为什么不能保存」。
+- 三条规则各产出一句中文原因，可同时命中、用「；」连接：
+  1. 提醒阈值不是 1–72 的整数 →「提醒阈值需为 1–72 之间的整数小时（当前 X）」（空值显示「空」）；
+  2. 升级阈值不是 2–168 的整数 →「升级阈值需为 2–168 之间的整数小时（当前 X）」；
+  3. 两者都是整数且 `escalate <= remind` →「升级阈值必须大于提醒阈值（当前 E ≤ R）」。
+- 任一不满足：块内 `el-alert type="warning"`（类 `.approval-invalid`）title 为
+  「当前设置不可保存：…」、`保存` disabled；`saveApproval()` 另有一道 `ElMessage.warning` 兜底（`approvalInvalid`
+  或 `parseHours` 为 `null` 时直接返回，不发 PUT）。
+- 合法时 `saveApprovalSetting({enabled, remindHours, escalateHours})` → `fillApproval(view)` 回填
+  （chip/副标题/audit 行随之更新）、`ElMessage.success('审批时效设置已保存')`；失败只 toast
+  `API message`（回退「保存审批时效设置失败」），不关闭块、保留输入。
+
+**只读口径（沿用 P6-B 平台设置片）**
+
+- 审批时效是 P6-B 平台设置的**第四块**，复用同一个 `loadPlatformSettings()`：一次 `GET /me` 判
+  `setting:manage`，有权限才用 `Promise.allSettled` 并发 **四路** GET（gate/approvers/lock/approval）；
+  无权限**连 GET 都不发**（后端读也 40009），块内只显示权限原因。没有为审批时效另起 loader、也不各自再读 `/me`。
+- 只读用户看不到阈值数值（不是 disabled 控件）：块内不渲染任何控件，`controls=0`。
+
+**API / 类型**
+
+- `web/src/api/index.ts`：`getApprovalSetting()` → `GET /api/v1/settings/approval`；
+  `saveApprovalSetting(body)` → `PUT` 同路径（`body` 为 `{enabled, remindHours, escalateHours}`，全量替换）。
+- `web/src/api/types.ts`：`ApprovalSettingView{enabled:boolean; remindHours:number; escalateHours:number;
+  updatedBy?: string | null; updatedAt?: string | null}`。
+
+**探针与截图（`scripts/verify-p6e-ui.mjs`）**
+
+- 运行（`puppeteer-core` 只在 scratch 目录可解析，故把脚本拷到 `%TEMP%\rp-shot-tools` 执行；脚本不依赖 MySQL，
+  只走 HTTP API）：
+
+  ```text
+  copy scripts\verify-p6e-ui.mjs %TEMP%\rp-shot-tools\
+  node %TEMP%\rp-shot-tools\verify-p6e-ui.mjs http://127.0.0.1:5173 --shots docs/design/shots
+  ```
+
+- 探针在**运行前与 `finally` 各一次** PUT `enabled=true / 12 / 24` 并读回校验（否则退出码非 0），因此可重复运行；
+  它不重播种 SQL、不改 `user_role`（与 P6-D 的探针不同）。
+- 覆盖（亮/暗各一遍，`expect()` 全为硬断言）：
+  1. 块存在且标题「审批时效」、默认 `12 / 24`、开关 on、保存可用、无非法提示、subtitle 含「提醒 12 小时 /
+     升级 24 小时」、三段文案含「提醒发给当前待签审批人」「ADMIN 与系统负责人」「升级后不再提醒」、块确实发过 GET；
+  2. 非法拦截：提醒 `0` → 块内可见原因含 `1–72`、保存 disabled、**无 PUT 离开**、API 仍 12/24；提醒 12 /
+     升级 12 → 原因含「必须大于提醒阈值」、保存 disabled、无 PUT；升级 `169` → 原因含 `2–168`、保存 disabled、无 PUT；
+  3. 保存回显：合法 `6/12` → toast、API 读回 `true/6/12`、页面 6/12、chip `已保存`、subtitle 6/12、
+     `.approval-audit` 含 `dev` 与时间戳；开关关 → 保存 → API `enabled=false`、chip `已关闭`、subtitle「已关闭」；
+     开关开 + `12/24` → 保存 → API `true/12/24`、页面 12/24、subtitle 12/24；
+  4. 截图断言：`.settings-approval` `scrollIntoView({block:'start'})` 后整块落在视口内（`top>=-1 && bottom<=901`）；
+  5. 只读：`ops-lead`（OPS + OPS_LEAD，无 `setting:manage`）打开 `/settings` → 块内「需要平台管理员权限 /
+     setting:manage」、无保存按钮、无开关/输入框（`controls=0`）、阈值不渲染、对该端点请求数 **0**；
+  6. 每主题 assert 0 console error；`finally` 再 PUT + 读回 `enabled=true / 12 / 24`。
+- 探针输出（最终一次，见 Task 2 报告）：
+
+  ```text
+  initial GET: enabled=true remind=12 escalate=24 updatedBy=-
+  defaults: enabled=true remind=12 escalate=24
+  p6e-light: block=审批时效 defaults=12/24 guard=0/12eq/169 puts=3 saved=6/12 off=false restored=true/12/24 readonly=yes approvalRequests=0 errors=0
+  p6e-dark: block=审批时效 defaults=12/24 guard=0/12eq/169 puts=3 saved=6/12 off=false restored=true/12/24 readonly=yes approvalRequests=0 errors=0
+  restored: enabled=true remind=12 escalate=24
+  OK all P6-E approval-reminder settings assertions passed
+  ```
+
+- 截图口径：两张都是 **1440×900 视口截图**（不是整页），拍摄前把 `.settings-approval` 滚到视口顶部，与 P6-B
+  `settings-rules-*.png` 同一取景方式；大小浅色 94,463 B / 深色 93,685 B。拍摄时是**已保存 12/24 且开关开启**的
+  状态，chip 为「已保存」、audit 行显示 `dev`。代价：看不到页面其它块；若要整页图需改 `fullPage`，但会把无关
+  块一起带进来。
+
+**验收（P6-E）**
+
+- `cd web; npm run build`（`vue-tsc -b && vite build`）通过：`built in 1.03s`、exit 0、无新依赖（Task 2 报告）；
+  构建产物 `web/dist/` 被 gitignore，未入库。
+- 探针双主题 `OK all P6-E approval-reminder settings assertions passed`，0 console error；结束态
+  `enabled=true / 12 / 24`。
+- 两张截图入库（1440×900，`git add -f`）；前端提交 `516a680`（6 文件，+743/−5）。
+- 后端 30 个测试 / 全量 994 绿见技术方案 §8.17。
+
+**与设计不一致（前端，代码为准）**
+
+1. **块内容比设计多**：设计 §2 只写「开关 + 两个小时数」。实现另加状态 chip、subtitle、`updatedBy/updatedAt`
+   回显、块内可见的非法原因 `el-alert`、三条提示与「最近保存」行；这些是 P6-B 三块的既有呈现口径，保持一致。
+2. **阈值输入是字符串 `el-input`，不是 `el-input-number`**：为了保留用户输入原文并解释原因（空/小数/负数都
+   归为「整数小时」违规）；与「锁超时」块的文本输入风格一致。服务端仍按整数校验。
+3. **客户端校验比 brief 的两条多一条**：除「提醒 1–72」「升级 > 提醒」外，还拦截「升级 2–168」（探针用 169
+   验证）；三条规则可同时命中，原因合并展示。保存前还有一道 toast 兜底。
+4. **复用 P6-B 的 `settingsCanManage` 与 `Promise.allSettled` 四路 GET**：审批时效并入平台设置片，而不是像
+   CODING/消息通知那样各自再读 `/me`；改动只在加载器注释与数组，既有三块行为不变。
+5. **探针结束后 `updatedBy` 由 `null` 变为 `dev`**：`finally` 用 PUT 恢复 `enabled/12/24`，后端按 `SETTING_UPDATE`
+   记录更新人/时间，因此再打开页面 chip 显示「已保存」而不是「默认开启」，audit 行带上 `dev` 与时间；
+   **数值与开关是默认态**，仅元数据非空（与 P6-B 探针同源，API 无法还原 `null`）。
+6. **截图只截视口 1440×900 且把块滚到顶部**：设计只要求「亮/暗截图」，未规定尺寸/取景；与 P6-B
+   `settings-rules-*` 一致。代价是看不到页面其它块（如外观/消息通知），块本身完整（探针断言 `top>=-1 &&
+   bottom<=901`）。
+7. **文案补了扫描口径与审计说明**：brief 只要求三句接收人/抑制语义。实现另写「10 分钟一轮、只扫最新一代、
+   同代同步骤只一次、发布单终结或离开待审批后不发」与「保存即时生效、阈值修改记入 `SETTING_UPDATE`」，
+   避免用户误解为「每 10 分钟重复提醒」。
+8. **只读用户看不到阈值数值**：沿用 P6-B「无权限连 GET 都不发」的口径，只读块只有权限原因，不显示当前
+   配置（不是 disabled 的控件）。设计未规定只读呈现。
+9. **探针不依赖 MySQL、不改 `user_role`**：只走 HTTP API 并在前后恢复默认；与 P6-D 探针的重播种方式不同
+   （P6-E 没有业务数据需要构造，扫描由后端固定时钟测试覆盖）。
+
+**未做（P6-E 前端明确不做）**
+
+- **没有「立即扫描一次」按钮**：扫描是后台任务，页面只配置阈值；手动触发需要新端点与权限，未在设计内。
+- **不展示提醒/升级历史**：通知中心按 P4-B 展示通知行，设置页不列「谁在何时收到过」。
+- **不预览接收人名单**：页面只解释规则（当前审批人 / ADMIN + 系统负责人），不实时解析会发给谁。
+- **升级组不可配**：与设计 §5 一致，页面只有两个阈值与开关，没有「升级对象」编辑器。
+- **无前端单测、截图未人眼复核**：覆盖靠 `scripts/verify-p6e-ui.mjs` 双主题 DOM 断言；模板轮文档模型无图像
+  输入，两张 1440×900 截图只核对了尺寸与文件大小，未人工看图。
+- **不改变 P6-B 三块**：门禁/审批人/锁超时的行为、文案与截图不变；审批时效只是第四块。
