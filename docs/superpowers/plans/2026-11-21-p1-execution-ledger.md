@@ -358,11 +358,11 @@ Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有�
 - Ruling R58: 单元详情的「操作日志」用通栏 `DataSection` 而非 Tab（6 列在约 570px 右栏必然横向滚动）；`before/after` 只在全局页用展开行展示，单元页严格 6 列。`ceeba6a`
 - Ruling R59: 审计动作下拉只列 13 个常用动作（三组），未列动作仍可经「全部动作」检索并显示服务端 `actionLabel`；对象类型 9 个在前端镜像（行里没有 `objectTypeLabel`），改枚举时两处同步。`ceeba6a`
 
-## R67+（P5-B 停止/退出/关闭/归档，2026-11-25）
+## R67+（P5-B 停止/退出/关闭/归档 + P5-C 待办中心，2026-11-25）
 
 > **编号说明**：R60–R66 是 P5-A 的裁决，当时只写进 `.superpowers/sdd/p5a-daily/progress.md`（正式台账未追加），
 > 该文件已注明「后续 P5-B 从 R67 起」。本节按该约定从 R67 续号，不重写 P5-A 的 7 条；P5-A 原文见其 progress
-> 文件的「裁决 R60+（P5-A）」一节。来源文件（P5-B 的 progress）同样在 `.gitignore` 的 `.superpowers/` 下，
+> 文件的「裁决 R60+（P5-A）」一节。来源文件（P5-B/P5-C 的 progress）同样在 `.gitignore` 的 `.superpowers/` 下，
 > 未进提交，行号为 2026-11-25 的文件状态。
 
 **R67–R73（P5-B 停止/退出/关闭/归档）**
@@ -389,3 +389,24 @@ Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有�
   发布页页头，状态取 `GET .../admission` 的 `itemStatus`（PAUSED 实例仍是 `PROD_DEPLOYING`）；归档预览的 N 用前端
   「非终态」集合（比后端 `isBlocking()` 宽，可能多算）、M 由客户端从发布记录数出，响应计数才权威；`demo-control.sql`
   给 `ops-lead` 幂等加 `OPS` 角色（C20 保证 OPS 无 `release:publish`）。`518d37e`
+
+**R74–R79（P5-C 待办中心）**
+
+- Ruling R74: `execute` 的 `waitingSince` 用 `release_order.created_at`：设计 §2 写 `updated_at`，但该表自 V8 起只有
+  `created_at`（V25 只加 `executed_by`），本切片禁止迁移与写路径改动；`mine` 用真实存在的 `release_task.updated_at`。
+  `2bdff21`
+- Ruling R75: `mine.count` 是**未完成变更项数**、`items` 是任务行（≤ `limit`），两者维度不同是有意的；前端徽标求和
+  因此按「待办项数」计，可能大于列表行数；要按任务数只需改 `countMineItems` 一条 SQL。`2bdff21`
+- Ruling R76: `approval` 只读**最新快照**的最小 `PENDING` 步骤，`role ∈ 调用者角色`，服务层再要求 `control:approve`；
+  自审批排除用字面 `s.submitted_by != #{me}`，`submitted_by` 为 NULL 的 V23 前旧快照 **fail-closed 不出现**（未写断言）。
+  `2bdff21`
+- Ruling R77: `test` 组的「ADMIN 全量」只实现为范围 `allUnits`，仍须是任务 `TEST` 成员（与设计 §4.1「非成员不命中」
+  一致）；`execute` 用权限点 `control:execute-prod`（非写死 ADMIN 角色）与 `OPS` 成员做 OR 分支。`2bdff21`
+- Ruling R78: 排序取**等待最久优先**（`waitingSince ASC, id ASC`，设计未规定）；`waitingHours` 向下取整、负数归零，
+  `waitingSince` 以 ISO-8601 UTC 字符串下发；`link` 三种形态由服务端拼；标签走 `ItemStatus.label()`/`TaskStatus.label()`
+  （代码里**没有 `OrderStatus` 枚举**，ORDER 行复用 ItemStatus 镜像标签，TaskStatus.label 本次新增）。`2bdff21`
+- Ruling R79: 新增 `ClockConfig` bean（`Clock` 构造注入，生产 systemDefaultZone、测试可冻结）；`limit` 数值越界
+  40000（HTTP 200）、非数字 `limit=abc` 由框架转 HTTP 400 + 40000；8 条 SQL（4 明细 + 4 计数，`count=0` 跳过明细、
+  无 N+1）。前端在文档收口期间随后提交 `c805568`（`/todos` + 侧栏徽标 + 四段 + 探针 + 2 张截图）：页面请求
+  `limit=20`、徽标请求 `limit=1`，`mine` 段文案写「N 个未完成项」，等待文案 0→「刚刚」、只到整点；页面只渲染
+  服务端字段，不拼路由。`2bdff21` / `c805568`

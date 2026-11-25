@@ -733,3 +733,109 @@
 - 截图未人眼复核（实现模型无图像输入）；探针数据来自种子 + live 后端，**没有真实 CODING 引擎取消的界面证据**
   （本机无连接）。
 
+## 17. P5-C · 待办中心（2026-11-25）
+
+待办从「无入口」变成侧栏一等入口：`/todos` 页四段队列 + 侧栏徽标，页面只渲染服务端算好的
+`label/statusLabel/waitingHours/link`，**不做二次过滤、不拼路由**。不新增依赖、不新增后端端点。
+截图（1440×900，探针生成，`git add -f`）：
+
+![待办中心（浅色）](shots/todos-light.png)
+![待办中心（暗色）](shots/todos-dark.png)
+
+> 交付时间线：本轮文档动笔时前端提交 `feat: P5-C web todos` 尚不存在；写到中途由另一实现者提交为
+> `c805568`（9 个文件，含 2 张截图）。以下事实按该提交的代码复核（此前 `/todos` 没有任何实现，现已不是
+> 「未核实」状态）。
+
+**侧栏「待办」与徽标（`web/src/App.vue`）**
+
+- 「平台」分组内新增 `/todos` 导航项（图标 `List`），徽标 = 四组 `count` 之和；`0` 隐藏、`>99` 显示 `99+`。
+- 刷新：`onMounted` 立即取一次 + 30s 定时（与通知铃铛同款），并在路由变化时再取一次；`onUnmounted` 清理
+  定时器。徽标请求 `listTodos(1)`（只要 count），失败**保留上一次的数字**、下一个 tick 重试（侧栏装饰不弹错）。
+- 可访问性：有数字时 `aria-label="待办，N 项"`，徽标 `aria-hidden`。
+
+**`/todos` 页（`web/src/views/TodoView.vue`）**
+
+- 页头 `PageHeader`：标题「待办」，说明「按你的角色与数据范围计算；只列出当前轮到你处理的事项。」；右侧
+  「共 N 项」（四组 count 之和）+「刷新」（loading）。
+- 四段 `DataSection`（两列 grid，≤1100px 收单列）：`我的待测试 / 我的审批 / 待我执行 / 我发起的`。段标题
+  副标题：前三段「N 项」，`mine` 段「N 个未完成项」（服务端 count 是未完成变更项数，不是任务行数）。
+- 行（`todo-row` grid 5 列）：对象类型中文（`ITEM→变更项`/`ORDER→发布单`/`TASK→任务`，未知回退原值）、
+  `label`（mono，省略号 + title 全文）、状态 chip（`statusLabel || status`，色调用 `statusTone`）、等待文案、
+  右箭头。整行是 `RouterLink`（服务端 `link` 原样绑定），`link` 为空时退化为静态 `div` 且不显示箭头。
+- 截断：`count > items.length` 时段落底部说明——前三段「共 N 项，仅显示等待最久的 M 项。」，`mine` 段
+  「共 N 个未完成变更项，仅列出等待最久的 M 个任务。」。
+- 空态：单段空 → `EmptyState`（暂无待测试/暂无待审批/暂无待执行/暂无我发起的任务）；四段全空 → 整页
+  `EmptyState`「当前没有待办」。加载骨架 `el-skeleton`；失败独立 `el-alert`（保留旧列表）。
+- 页脚固定说明：「列表由服务端按你的角色、任务成员关系与部署单元数据范围计算；页面不做二次过滤，也不提供
+  忽略/已读状态。」。
+
+**等待文案与跳转**
+
+- `waitingHours <= 0` →「刚刚」，否则「已等待 N 小时」（只到整点，不做天换算）；hover `title`
+  「自 YYYY-MM-DD HH:mm 起等待」（`formatDateTime`，本地时区）。
+- `link` 由服务端给，页面原样绑定为 `RouterLink`：`/tasks/{taskId}?item={itemId}`（变更项）、
+  `/releases/{publishNo}`（发布单）、`/tasks/{taskId}`（任务）；`link` 为空时行不可点。
+
+**API / 类型 / 路由**
+
+- `web/src/api/index.ts#listTodos(limit = 5)` → `GET /api/v1/todos?limit=N`。
+- `web/src/api/types.ts`：`TodoItemView`（9 字段，`waitingHours` 也是字符串）、`TodoGroupView {count,items}`、
+  `TodoBoardView {test,approval,execute,mine}`。
+- `web/src/router.ts`：`/todos`（`title: '待办'`、`crumb: '待办中心'`）。
+
+**演示数据 `scripts/demo-todos.sql`（新脚本，幂等、ASCII-only）**
+
+- 四组各造一条确定性数据：`test` = task 90003 `DEMO-TODO-TEST`（TESTING、测试未通过，最新实例
+  `test_ready_at=now-3h`，dev 为 TEST 成员，实例**故意 PAUSED** 使 reconcile 不推进、等待时长稳定）；
+  `execute` = `PO-DEMO-TODO-EXECUTE`（READY，2h 前）；`approval` = `PO-DEMO-TODO-APPROVAL-A`（第 1 步
+  OPS_LEAD、第 2 步 DEPT_MANAGER，5h）与 `-B`（第 1 步 DEPT_MANAGER，2h），提交人都是 dev；
+  `mine` = task 90005 `DEMO-TODO-MINE`（2h 前）与 90007 `DEMO-TODO-NOW`（now →「刚刚」），均由 dev 创建且有
+  一个 PENDING 项。
+- 幂等身份：dev / ops-lead / dept-manager（角色 + ALL 范围）+ `demo-bot`（ACTIVE、无角色、无范围）。`demo-bot`
+  是测试/执行/审批演示任务的 creator，既不污染真实身份的「我发起的」，又用来验证四组全 0 的整页空态。
+- 只删自己标记的行（children first）；跑探针前重放一次（「刚刚」行相对种子时间）。演示数据落在
+  subsystem 2 / unit 2；未改 `demo-control.sql`。
+
+**验收（P5-C）**
+
+- `cd web; npm run build` 通过（`vue-tsc -b && vite build`，`✓ 1674 modules transformed`，`✓ built in 1.11s`，
+  无新依赖）。
+- `scripts/verify-p5c-ui.mjs`（复制到 `%TEMP%\rp-shot-tools` 后运行，双主题，0 console error），探针原文：
+
+  ```
+  p5c-light: dev=1/0/2/9 badge=12 itemLink=yes orderLink=yes emptySegment=yes | ops=0/1/2/0 badge=3 approvalA=yes empty=yes | dept=0/1/0/0 badge=1 approvalB=yes noApprovalA=yes | empty=demo-bot pageEmpty=yes badge=none | errors=0
+  p5c-dark: dev=1/0/2/9 badge=12 itemLink=yes orderLink=yes emptySegment=yes | ops=0/1/2/0 badge=3 approvalA=yes empty=yes | dept=0/1/0/0 badge=1 approvalB=yes noApprovalA=yes | empty=demo-bot pageEmpty=yes badge=none | errors=0
+  OK all todo-centre assertions passed
+  ```
+
+  断言：四段标题/顺序与每段 count；徽标 = 四组 count 之和并与页首「共 N 项」一致；等待文案（3 小时/2 小时/
+  刚刚）；行 href 与服务端 `link` 一致并**真实点击跳转**（`/tasks/90003?item=90031`、
+  `/releases/PO-DEMO-TODO-EXECUTE`）；空段轻量空态；dept-manager 看不到第 1 步是 OPS_LEAD 的 APPROVAL-A
+  （只显示最低待签步骤）；`demo-bot` 四组全 0 的整页空态且无徽标；两主题 0 console error。
+- 布局实测 1440×900：`scrollHeight=900`、`scrollWidth=1440`，四段在首屏内（grid bottom 644）。
+- 截图 2 张入库（dev 视角，四段/徽标/等待文案/空段可见；未人眼复核）。
+
+**与设计不一致（前端，代码为准）**
+
+1. **页面请求 `limit=20`（接口上限），不是设计的默认 5**：待办中心按真实队列展示；`count` 仍是全量，截断时
+   段落底部明说「仅显示等待最久的 M 项」；侧栏徽标请求 `limit=1`（只用 count）。
+2. **`mine` 段的计数文案与另三段不同**：服务端 `count` 是未完成变更项数、行是任务，页面写「N 个未完成项」/
+   「仅列出等待最久的 M 个任务」，避免把 count 读成任务数（技术方案 §8.12 偏差 2）。
+3. **第四个演示身份 `demo-bot`**：设计只列 dev/ops-lead/dept-manager，三者没有任何一个四组全空；为验证
+   「四段全空 → 整页空态」与服务端 fail-closed 增加该身份，同时充当演示任务 creator。
+4. **等待文案只到小时、0 显示「刚刚」**：设计 §3 只写「已等待 N 小时」；没有分钟/天换算（旧数据会出现
+   「已等待 108 小时」），绝对时间放在 hover title。
+5. **四段是两列 grid（≤1100px 单列）**：设计只说四段 `DataSection`，未规定布局；为 1440×900 截图一屏呈现。
+6. **整页空态是设计之外的补充**：设计只要求「空段轻量空态」，实现另加四段全空时的整页 `EmptyState`。
+7. **状态 chip 的颜色复用 `statusTone(status)`**：chip 文案用服务端 `statusLabel`（缺省回退 `status`），
+   颜色不由服务端给。
+8. **没有已读/忽略/折叠/筛选/分页**：与设计 §5 一致（二期）；截断只给说明，没有「加载更多」。
+
+**未做（P5-C 明确不做）**
+
+- 没有已读/忽略/关闭待办、没有历史/已办列表、没有筛选/搜索/分页（只有服务端 `limit` 与截断说明）。
+- 没有服务端推送：徽标 30s 轮询 + 路由刷新。
+- 没有天级等待文案、没有按组折叠。
+- 没有前端单测；覆盖靠 `scripts/verify-p5c-ui.mjs` 的 DOM 断言（无 CI 浏览器）。
+- 截图未人眼复核（实现模型无图像输入）；探针数据来自种子 + live 后端，**没有真实审批/测试操作后的界面证据**
+  （只验证队列呈现与跳转）。
