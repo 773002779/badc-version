@@ -36,9 +36,9 @@ import java.util.UUID;
  *       deployment is deterministic (C14).</li>
  * </ol>
  *
- * <p>The daily pipeline ({@link #createDaily}) is a two-node simplification of the online one
- * and the second-party library pipeline is a later task; the online shape is exposed through
- * {@link #createOnline} and {@link #createRerun}.
+ * <p>The daily pipeline ({@link #createDaily}) is a two-node simplification of the online one;
+ * the second-party library pipeline is {@link #createLib} (P6-A design §1/§3), a three-node
+ * graph without image build, test deploy, verification or production deploy.
  */
 public final class PipelineFactory {
 
@@ -271,6 +271,51 @@ public final class PipelineFactory {
         return new PipelineInstance(null, 0L, newPipelineNo(when), ExecType.DAILY,
             TriggerType.INITIAL, NodeType.BUILD, InstanceStatus.PENDING, null, null, null, null,
             when, null, nodes, item.id(), unitId, requestedBy);
+    }
+
+    /**
+     * Pre-generates a second-party library instance for {@code order} (P6-A design §1/§3): the
+     * three-node graph {@code BUILD → LIB_SECURITY → LIB_PUBLISH}.
+     *
+     * <ol>
+     *   <li>{@code BUILD} (seq 0): {@code CODE_CHECK → PKG_BUILD}. There is deliberately
+     *       <strong>no IMG_BUILD</strong>: a library produces an artifact, not an image, and the
+     *       existing {@code BuildNodeHandler} simply finds no successor after {@code PKG_BUILD}.</li>
+     *   <li>{@code LIB_SECURITY} (seq 1): no {@code node_task} rows. Its three checks
+     *       ({@code SONAR}, {@code COMPONENT_VULN}, {@code VERSION_DEFECT}) live in
+     *       {@code gate_check}, exactly like the {@code VERIFY} node's checks, and the handler
+     *       decides the node through the gate. Pre-generating {@code CHECK} rows here would never
+     *       be mirrored (the check service mirrors onto {@code VERIFY}) and would only look like
+     *       unfinished work.</li>
+     *   <li>{@code LIB_PUBLISH} (seq 2): one {@code LIB_PUBLISH} task, the artifact upload
+     *       driven by the engine's publish endpoint.</li>
+     * </ol>
+     *
+     * <p><strong>Identity.</strong> A LIB execution is still an online-style release: it uses
+     * the real 发布单 ({@code order.id}) and therefore the same release order, unit lock and
+     * audit as a deployment, while its {@code exec_type} is {@link ExecType#LIB}. The instance
+     * starts {@code PENDING} at {@code BUILD}, so the caller commits it and starts it afterwards
+     * (or the reconcile pass enters it). There is no DE configuration to pass: a library has no
+     * environment, so the parameter does not exist rather than being silently ignored.
+     */
+    public static PipelineInstance createLib(ReleaseOrder order, ReleaseItem item, Instant now) {
+        Objects.requireNonNull(order, "order must not be null");
+        Objects.requireNonNull(item, "item must not be null");
+        if (item.type() != UnitType.LIB) {
+            throw new IllegalArgumentException(
+                "the library pipeline requires a LIB item, got " + item.type());
+        }
+        Instant when = now == null ? Instant.now() : now;
+        List<PipelineNode> nodes = List.of(
+            PipelineNode.pending(NodeType.BUILD, 0, List.of(
+                NodeTask.pending(NodeType.BUILD, TaskType.CODE_CHECK, NO_BATCH, 0),
+                NodeTask.pending(NodeType.BUILD, TaskType.PKG_BUILD, NO_BATCH, 0))),
+            PipelineNode.pending(NodeType.LIB_SECURITY, 1, List.of()),
+            PipelineNode.pending(NodeType.LIB_PUBLISH, 2, List.of(
+                NodeTask.pending(NodeType.LIB_PUBLISH, TaskType.LIB_PUBLISH, NO_BATCH, 0))));
+        return new PipelineInstance(null, order.id(), newPipelineNo(when), ExecType.LIB,
+            TriggerType.INITIAL, NodeType.BUILD, InstanceStatus.PENDING, null, null, null, null,
+            when, null, nodes);
     }
 
     /**

@@ -17,9 +17,12 @@ import com.sf.release.domain.pipeline.event.NodeTaskCompletedEvent;
 import com.sf.release.domain.pipeline.event.TestEnvReadyEvent;
 import com.sf.release.domain.task.ItemEvent;
 import com.sf.release.domain.task.MemberRole;
+import com.sf.release.domain.resource.UnitType;
 import com.sf.release.infra.repo.PipelineInstanceMapper;
+import com.sf.release.infra.repo.ReleaseItemMapper;
 import com.sf.release.infra.repo.ReleaseOrderMapper;
 import com.sf.release.infra.repo.po.PipelineInstancePO;
+import com.sf.release.infra.repo.po.ReleaseItemPO;
 import com.sf.release.infra.repo.po.ReleaseOrderPO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,6 +53,13 @@ import java.util.Set;
  * release order (the daily pipeline, {@code orderId = 0}) never changes an item either
  * (design §5.1).
  *
+ * <p><strong>The item type selects the vocabulary (P6-A).</strong> A {@code LIB} item keeps
+ * {@code BUILDING} through its {@code BUILD} and {@code LIB_SECURITY} nodes and only moves on the
+ * artifact upload ({@code LIB_PUBLISH} success → {@code LIB_OK} → {@code DONE}, any LIB node
+ * failure → {@code LIB_FAIL} → {@code FAILED}). It never receives {@code BUILD_OK → TESTING} or a
+ * production event, and it emits no notification: a second-party library sends none (FR-N-01 does
+ * not list it), which is the recorded trade-off of the slice.
+ *
  * <p><strong>Listener failures never break the pipeline; they are persisted.</strong> The
  * transition runs in the orchestrator's transaction, but this listener is a notification side
  * effect. A transition that throws (corrupt row, unexpected DB error) is caught, logged and
@@ -70,17 +80,20 @@ public class PipelineEventListener {
 
     private final ReleaseOrderMapper orderMapper;
     private final PipelineInstanceMapper instanceMapper;
+    private final ReleaseItemMapper itemMapper;
     private final ItemTransitions transitions;
     private final ItemFailureAppService failureService;
     private final NotificationService notifications;
 
     public PipelineEventListener(ReleaseOrderMapper orderMapper,
                                  PipelineInstanceMapper instanceMapper,
+                                 ReleaseItemMapper itemMapper,
                                  ItemTransitions transitions,
                                  ItemFailureAppService failureService,
                                  NotificationService notifications) {
         this.orderMapper = orderMapper;
         this.instanceMapper = instanceMapper;
+        this.itemMapper = itemMapper;
         this.transitions = transitions;
         this.failureService = failureService;
         this.notifications = notifications;
@@ -100,12 +113,6 @@ public class PipelineEventListener {
 
     @EventListener
     public void onNodeCompleted(NodeCompletedEvent event) {
-        ItemEvent itemEvent = itemEventOf(event.nodeType(), event.status());
-        if (itemEvent == null) {
-            log.debug("node {} result does not change an item state (instanceId={})",
-                event.nodeType(), event.instanceId());
-            return;
-        }
         if (isRollbackInstance(event.instanceId())) {
             // A rollback instance deploys an already released image; its PROD_DEPLOY result is
             // handled by RollbackCompletionService (record SUCCESS/FAILED, item ROLLED_BACK only
@@ -116,13 +123,14 @@ public class PipelineEventListener {
                 + " (instanceId={})", event.nodeType(), event.instanceId());
             return;
         }
+        if (event.orderId() <= 0) {
+            log.debug("instance {} has no release order, item state unchanged",
+                event.instanceId());
+            return;
+        }
         long itemId = 0L;
+        ItemEvent itemEvent = null;
         try {
-            if (event.orderId() <= 0) {
-                log.debug("instance {} has no release order, item state unchanged",
-                    event.instanceId());
-                return;
-            }
             ReleaseOrderPO order = orderMapper.selectById(event.orderId());
             if (order == null || order.getItemId() == null) {
                 log.warn("release order {} of instance {} is missing, item state unchanged",
@@ -130,6 +138,21 @@ public class PipelineEventListener {
                 return;
             }
             itemId = order.getItemId();
+            ReleaseItemPO item = itemMapper.selectById(itemId);
+            if (item == null) {
+                log.warn("变更项 {} of release order {} is missing, item state unchanged",
+                    itemId, event.orderId());
+                return;
+            }
+            // The item type decides the mapping: a LIB item must never receive BUILD_OK→TESTING
+            // or any production event (P6-A design §2), so the branch is required before the
+            // static node-type mapping can be applied.
+            itemEvent = itemEventOf(unitTypeOf(item), event.nodeType(), event.status());
+            if (itemEvent == null) {
+                log.debug("node {} result does not change an item state (instanceId={}, type={})",
+                    event.nodeType(), event.instanceId(), item.getType());
+                return;
+            }
             ItemTransitions.Outcome outcome = transitions.apply(itemId, itemEvent);
             switch (outcome) {
                 case APPLIED -> log.info("item state advanced: itemId={} by {} (instanceId={})",
@@ -154,8 +177,10 @@ public class PipelineEventListener {
             // durable repair path (V12). The record itself never throws.
             log.error("item transition failed: instanceId={}, itemId={}, event={}, reason={}",
                 event.instanceId(), itemId, itemEvent, ex.getMessage(), ex);
-            failureService.record(event.instanceId(), itemId, itemEvent.name(),
-                messageOf(ex));
+            if (itemEvent != null) {
+                failureService.record(event.instanceId(), itemId, itemEvent.name(),
+                    messageOf(ex));
+            }
         }
     }
 
@@ -192,12 +217,16 @@ public class PipelineEventListener {
                 case PROD_DEPLOY -> NotificationEventKey.PROD_DEPLOY_FAILED;
                 // A daily release sends no notification (P5-A design §1 non-goals: FR-N-01 does
                 // not list it); its history is the daily page plus the DAILY_START audit row.
-                case VERIFY, DAILY_DEPLOY -> null;
+                // A second-party library sends none either (P6-A design §5 item 7: FR-N-01 does
+                // not list it). The rows above are reached for a LIB item too — the "build"
+                // node of a library is still a BUILD node — which is why the item-type guard
+                // below comes before the order lookup.
+                case VERIFY, DAILY_DEPLOY, LIB_SECURITY, LIB_PUBLISH -> null;
             };
             if (key == null || event.orderId() <= 0) {
                 return;
             }
-            if (isRollbackInstance(event.instanceId())) {
+            if (isRollbackInstance(event.instanceId()) || isLibOrder(event.orderId())) {
                 return;
             }
             ReleaseOrderPO order = orderMapper.selectById(event.orderId());
@@ -212,6 +241,10 @@ public class PipelineEventListener {
                 case PROD_DEPLOY -> "生产部署";
                 case DAILY_DEPLOY -> "日常部署";
                 case VERIFY -> "验证";
+                // Reached only for an unknown/LIB node that slipped past the guard; the labels
+                // exist so the switch stays exhaustive when the enum grows.
+                case LIB_SECURITY -> "二方库安全检查";
+                case LIB_PUBLISH -> "二方库入库";
             };
             StringBuilder body = new StringBuilder("发布单 ")
                 .append(order.getPublishNo()).append(" 的").append(node).append("节点执行失败");
@@ -265,6 +298,13 @@ public class PipelineEventListener {
             if (isRollbackInstance(event.instanceId())) {
                 return;
             }
+            // P6-A design §5 item 7: a second-party library emits no notification (FR-N-01 does
+            // not list it). Its history is the publish record's LIB nodes plus the PUBLISH audit
+            // row. The guard is here, not only on the node listener, because a LIB instance also
+            // finishes DONE after its LIB_PUBLISH node.
+            if (isLibOrder(event.orderId())) {
+                return;
+            }
             ReleaseOrderPO order = orderMapper.selectById(event.orderId());
             if (order == null || order.getPublishNo() == null) {
                 return;
@@ -282,18 +322,73 @@ public class PipelineEventListener {
     }
 
     /**
-     * The item event a node result produces, or {@code null} when there is none. The daily deploy
-     * has none by design: a daily release never moves the 变更项 state machine (P5-A design §5),
-     * and its instance has no release order anyway (the order-id guard below would also skip it).
+     * The item event a node result produces, or {@code null} when there is none. The item type
+     * selects the vocabulary: a {@code UNIT} (and the daily pipeline, which never moves an item)
+     * keeps the deployment mapping, while a {@code LIB} item only ever moves on its own three
+     * nodes (P6-A design §2).
+     *
+     * <p>For a LIB item, a successful {@code BUILD} or {@code LIB_SECURITY} deliberately maps to
+     * <em>nothing</em>: the item stays {@code BUILDING} through both, and only the artifact
+     * upload ends it ({@link ItemEvent#LIB_OK}). This is the branch that keeps a library out of
+     * {@code TESTING}.
      */
-    static ItemEvent itemEventOf(NodeType nodeType, NodeStatus nodeStatus) {
+    static ItemEvent itemEventOf(UnitType itemType, NodeType nodeType, NodeStatus nodeStatus) {
+        if (itemType == UnitType.LIB) {
+            return libItemEventOf(nodeType, nodeStatus);
+        }
         boolean success = nodeStatus == NodeStatus.SUCCESS;
         return switch (nodeType) {
             case BUILD -> success ? ItemEvent.BUILD_OK : ItemEvent.BUILD_FAIL;
             case TEST_DEPLOY -> success ? ItemEvent.TEST_DEPLOY_OK : ItemEvent.TEST_DEPLOY_FAIL;
             case PROD_DEPLOY -> success ? ItemEvent.PROD_OK : ItemEvent.PROD_FAIL;
-            case VERIFY, DAILY_DEPLOY -> null;
+            // A LIB node never appears in a UNIT instance; VERIFY/DAILY_DEPLOY have no event.
+            case VERIFY, DAILY_DEPLOY, LIB_SECURITY, LIB_PUBLISH -> null;
         };
+    }
+
+    /**
+     * The item event of a LIB node result: failure always ends the item, success only of the
+     * artifact upload. The other node types are unreachable for a LIB instance and map to
+     * {@code null} instead of inventing a deployment state.
+     */
+    private static ItemEvent libItemEventOf(NodeType nodeType, NodeStatus nodeStatus) {
+        boolean success = nodeStatus == NodeStatus.SUCCESS;
+        return switch (nodeType) {
+            case BUILD, LIB_SECURITY -> success ? null : ItemEvent.LIB_FAIL;
+            case LIB_PUBLISH -> success ? ItemEvent.LIB_OK : ItemEvent.LIB_FAIL;
+            case TEST_DEPLOY, VERIFY, PROD_DEPLOY, DAILY_DEPLOY -> null;
+        };
+    }
+
+    /** The item type stored on the row; a blank/unknown value degrades to {@code UNIT}. */
+    private static UnitType unitTypeOf(ReleaseItemPO item) {
+        String raw = item.getType();
+        if (raw == null || raw.isBlank()) {
+            return UnitType.UNIT;
+        }
+        try {
+            return UnitType.valueOf(raw.trim());
+        } catch (IllegalArgumentException ex) {
+            log.warn("变更项 {} has an unknown type '{}', treated as UNIT", item.getId(), raw);
+            return UnitType.UNIT;
+        }
+    }
+
+    /**
+     * Whether the release order belongs to a second-party library. Read-only and cheap: one
+     * order lookup plus one item lookup, only on the notification paths (never inside a handler).
+     */
+    private boolean isLibOrder(long orderId) {
+        ReleaseOrderPO order = orderMapper.selectById(orderId);
+        if (order == null || order.getItemId() == null) {
+            return false;
+        }
+        return unitTypeOfItem(order.getItemId()) == UnitType.LIB;
+    }
+
+    private UnitType unitTypeOfItem(long itemId) {
+        ReleaseItemPO item = itemMapper.selectById(itemId);
+        return item == null ? UnitType.UNIT : unitTypeOf(item);
     }
 
     private boolean isRollbackInstance(long instanceId) {

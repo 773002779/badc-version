@@ -59,6 +59,8 @@ final class NotificationLabels {
             case VERIFY -> "验证";
             case PROD_DEPLOY -> "生产部署";
             case DAILY_DEPLOY -> "日常部署";
+            case LIB_SECURITY -> "二方库安全检查";
+            case LIB_PUBLISH -> "二方库入库";
         };
     }
 }

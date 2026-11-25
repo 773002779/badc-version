@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Deployment unit management: units (and second-party libraries), their CODING task
@@ -82,7 +83,12 @@ public class UnitAppService {
     private static final int DE_NAME_MAX_LENGTH = 128;
     private static final int RESOURCE_NAME_MAX_LENGTH = 128;
     private static final int CODING_DEPLOY_TARGET_MAX_LENGTH = 128;
+    private static final int ARTIFACT_COORDINATE_MAX_LENGTH = 128;
     private static final int MAX_PAGE_SIZE = 100;
+
+    /** The documented artifact coordinate format of a LIB unit (P6-A design §4). */
+    private static final Pattern ARTIFACT_COORDINATE =
+        Pattern.compile("^[A-Za-z0-9._-]{1,128}$");
 
     private static final List<TaskKind> PUBLISH_REQUIRED =
         List.of(TaskKind.BUILD, TaskKind.TEST_DEPLOY, TaskKind.PROD_DEPLOY);
@@ -148,11 +154,14 @@ public class UnitAppService {
         String module = optionalMaxLength(
             cmd.module(), MODULE_LABEL_MAX_LENGTH, "module", "模块");
         String tag = optionalMaxLength(cmd.tag(), TAG_MAX_LENGTH, "tag", "标签");
+        ArtifactCoordinates coordinates = artifactCoordinates(
+            type, cmd.artifactGroupId(), cmd.artifactArtifactId());
 
         Instant now = Instant.now();
         DeployUnit unit = new DeployUnit(null, cmd.subsystemId(), name, type, du, ownerId,
             frameworkTemplate, branchMode, UnitStatus.ACTIVE, description, modulePath,
-            deployType, imageType, imageName, module, tag, now, now);
+            deployType, imageType, imageName, module, tag, coordinates.groupId(),
+            coordinates.artifactId(), now, now);
         DeployUnitPO po = DeployUnitPO.of(unit);
         try {
             unitMapper.insert(po);
@@ -166,6 +175,10 @@ public class UnitAppService {
         after.put("type", type.name());
         after.put("ownerId", ownerId);
         after.put("status", UnitStatus.ACTIVE.name());
+        if (type == UnitType.LIB) {
+            after.put("artifactGroupId", coordinates.groupId());
+            after.put("artifactArtifactId", coordinates.artifactId());
+        }
         audit.record(AuditCommand.of(AuditAction.RESOURCE_UPDATE, String.valueOf(po.getId()), name,
                 "新增部署单元：" + name)
             .objectType(AuditObjectType.UNIT)
@@ -210,6 +223,8 @@ public class UnitAppService {
         String module = optionalMaxLength(
             cmd.module(), MODULE_LABEL_MAX_LENGTH, "module", "模块");
         String tag = optionalMaxLength(cmd.tag(), TAG_MAX_LENGTH, "tag", "标签");
+        ArtifactCoordinates coordinates = artifactCoordinates(
+            type, cmd.artifactGroupId(), cmd.artifactArtifactId());
 
         int rows;
         try {
@@ -229,6 +244,8 @@ public class UnitAppService {
                 .set(DeployUnitPO::getImageName, imageName)
                 .set(DeployUnitPO::getModule, module)
                 .set(DeployUnitPO::getTag, tag)
+                .set(DeployUnitPO::getArtifactGroupId, coordinates.groupId())
+                .set(DeployUnitPO::getArtifactArtifactId, coordinates.artifactId())
                 .set(DeployUnitPO::getUpdatedAt, Instant.now()));
         } catch (DuplicateKeyException ex) {
             throw duplicateName(name);
@@ -246,6 +263,10 @@ public class UnitAppService {
         after.put("type", type.name());
         after.put("ownerId", ownerId);
         after.put("status", status.name());
+        if (type == UnitType.LIB) {
+            after.put("artifactGroupId", coordinates.groupId());
+            after.put("artifactArtifactId", coordinates.artifactId());
+        }
         audit.record(AuditCommand.of(AuditAction.RESOURCE_UPDATE, String.valueOf(id), name,
                 "修改部署单元：" + name)
             .objectType(AuditObjectType.UNIT)
@@ -514,6 +535,41 @@ public class UnitAppService {
         }
     }
 
+    /**
+     * Validates the artifact coordinates of a unit (P6-A design §4). A {@code LIB} must supply
+     * both and each must match {@code ^[A-Za-z0-9._-]{1,128}$}; a {@code UNIT} ignores them and
+     * stores {@code null}, so the deployment path is byte-for-byte unchanged.
+     */
+    private static ArtifactCoordinates artifactCoordinates(UnitType type, String rawGroupId,
+                                                           String rawArtifactId) {
+        if (type != UnitType.LIB) {
+            return new ArtifactCoordinates(null, null);
+        }
+        return new ArtifactCoordinates(
+            requireArtifactCoordinate(rawGroupId, "artifactGroupId", "制品 groupId"),
+            requireArtifactCoordinate(rawArtifactId, "artifactArtifactId", "制品 artifactId"));
+    }
+
+    private static String requireArtifactCoordinate(String raw, String field, String label) {
+        String value = trimToNull(raw);
+        if (value == null) {
+            throw new BizException(BizError.PARAM_INVALID, label + "不能为空（二方库必填）",
+                Map.of(field, "不能为空"));
+        }
+        if (value.length() > ARTIFACT_COORDINATE_MAX_LENGTH
+                || !ARTIFACT_COORDINATE.matcher(value).matches()) {
+            throw new BizException(BizError.PARAM_INVALID,
+                label + "只能包含字母、数字、点、下划线和连字符，长度 1-"
+                    + ARTIFACT_COORDINATE_MAX_LENGTH,
+                Map.of(field, value));
+        }
+        return value;
+    }
+
+    /** The two optional coordinates a unit command may carry; both {@code null} for a UNIT. */
+    private record ArtifactCoordinates(String groupId, String artifactId) {
+    }
+
     private void requireValidJson(String raw, String field) {
         String json = trimToNull(raw);
         if (json == null) {
@@ -618,6 +674,7 @@ public class UnitAppService {
             unit.ownerId(), unit.frameworkTemplate(), unit.branchMode().name(),
             unit.status().name(), unit.description(), unit.modulePath(), unit.deployType(),
             unit.imageType(), unit.imageName(), unit.module(), unit.tag(),
+            unit.artifactGroupId(), unit.artifactArtifactId(),
             unit.createdAt(), unit.updatedAt());
     }
 
@@ -643,11 +700,22 @@ public class UnitAppService {
         String imageType,
         String imageName,
         String module,
-        String tag) {
+        String tag,
+        String artifactGroupId,
+        String artifactArtifactId) {
 
         public CreateCmd(Long subsystemId, String name, String ownerId) {
             this(subsystemId, name, null, null, ownerId, null, null, null, null, null, null,
-                null, null, null);
+                null, null, null, null, null);
+        }
+
+        /** The pre-V29 form: no artifact coordinates (a deployment unit ignores them anyway). */
+        public CreateCmd(Long subsystemId, String name, String type, String du, String ownerId,
+                         String frameworkTemplate, String branchMode, String description,
+                         String modulePath, String deployType, String imageType, String imageName,
+                         String module, String tag) {
+            this(subsystemId, name, type, du, ownerId, frameworkTemplate, branchMode, description,
+                modulePath, deployType, imageType, imageName, module, tag, null, null);
         }
     }
 
@@ -666,11 +734,22 @@ public class UnitAppService {
         String imageType,
         String imageName,
         String module,
-        String tag) {
+        String tag,
+        String artifactGroupId,
+        String artifactArtifactId) {
 
         public UpdateCmd(String name, String ownerId) {
             this(name, null, null, ownerId, null, null, null, null, null, null, null, null,
-                null, null);
+                null, null, null, null);
+        }
+
+        /** The pre-V29 form: no artifact coordinates (a deployment unit ignores them anyway). */
+        public UpdateCmd(String name, String type, String du, String ownerId,
+                         String frameworkTemplate, String branchMode, String status,
+                         String description, String modulePath, String deployType, String imageType,
+                         String imageName, String module, String tag) {
+            this(name, type, du, ownerId, frameworkTemplate, branchMode, status, description,
+                modulePath, deployType, imageType, imageName, module, tag, null, null);
         }
     }
 
@@ -747,6 +826,8 @@ public class UnitAppService {
         String imageName,
         String module,
         String tag,
+        String artifactGroupId,
+        String artifactArtifactId,
         Instant createdAt,
         Instant updatedAt) {
     }

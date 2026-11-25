@@ -52,6 +52,16 @@ class ItemTransitionFailureTest {
     void setUp() {
         jdbc.update("DELETE FROM pipeline_item_failure");
         jdbc.update("DELETE FROM release_order WHERE id = ?", ORDER_ID);
+        jdbc.update("DELETE FROM release_item WHERE id = ?", ITEM_ID);
+        // The listener resolves the item type before mapping a node event (P6-A), so a missing
+        // item now means "nothing to advance" rather than "apply the static mapping". The fixture
+        // therefore owns a real UNIT item whose BUILDING state accepts BUILD_OK.
+        jdbc.update("INSERT INTO release_item (id, task_id, crid, type, unit_id, build_plan_id,"
+            + " source_branch, version, plan_release_date, status, gate_status, row_version,"
+            + " created_at, updated_at)"
+            + " VALUES (?, 1, ?, 'UNIT', 1, 'plan-cas-lost', 'release/cas-lost', 'V0.0.1',"
+            + " UTC_DATE(), 'BUILDING', 'CHECK_RUNNING', 0, NOW(3), NOW(3))",
+            ITEM_ID, "CR-CAS-LOST");
         jdbc.update("INSERT INTO release_order (id, publish_no, item_id, status, row_version,"
             + " created_at) VALUES (?, ?, ?, 'INIT', 0, NOW(3))",
             ORDER_ID, "PO-CAS-LOST", ITEM_ID);

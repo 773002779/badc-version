@@ -42,6 +42,14 @@ public interface PipelineRepository {
     InstanceContext contextOf(long instanceId);
 
     /**
+     * The 变更项 the instance belongs to, or {@code 0} when it has none (the daily pipeline) or
+     * the order/item row is missing. Handlers that work on the item's gate data (the library
+     * security node) need the item id; the release order path is the same one every online
+     * context uses.
+     */
+    long itemIdOf(long instanceId);
+
+    /**
      * Applies one task completion, idempotently: a task that is already terminal
      * ({@code SUCCESS/FAILED/TIMEOUT/SKIPPED}) is never changed again, so a late
      * {@code RUNNING} callback cannot regress a {@code SUCCESS}. A non-terminal status
@@ -216,6 +224,18 @@ public interface PipelineRepository {
     DeployContext dailyDeployContextOf(long instanceId);
 
     /**
+     * The artifact-publish coordinates of a second-party library instance (P6-A design §3): the
+     * unit, the release order's publish number, the unit's enabled {@code LIB_PUBLISH} binding,
+     * the unit's artifact coordinates and the 变更项 version.
+     *
+     * <p>The order-based resolution is the same one the build/deploy contexts use; a LIB
+     * instance always has a real release order (it is an online-style execution that takes the
+     * unit lock). Unresolvable parts are {@code 0}/blank; the handler turns a missing binding
+     * into an explicit task failure instead of triggering the engine with a null task.
+     */
+    LibPublishContext libPublishContextOf(long instanceId);
+
+    /**
      * Durably claims the once-only {@code TestEnvReadyEvent} publication of an instance: the
      * first caller sets {@code pipeline_instance.test_ready_at} and wins, every later caller —
      * another thread, another application instance, a retry — loses. The compare-and-set is the
@@ -284,5 +304,14 @@ public interface PipelineRepository {
      * {@code node_task.target_id}, its environment family and its concrete name.
      */
     record DeployTarget(long deId, String envKind, String deName) {
+    }
+
+    /**
+     * Artifact-publish coordinates; see {@link #libPublishContextOf(long)}. {@code taskId} and
+     * the coordinates are {@code null} when the configuration is incomplete; {@code version} is
+     * the 变更项 version and may also be {@code null} for a malformed item.
+     */
+    record LibPublishContext(long unitId, String publishNo, String taskId, String groupId,
+                             String artifactId, String version) {
     }
 }

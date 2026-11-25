@@ -48,6 +48,18 @@ public enum ItemEvent {
     PROD_OK,
     /** Engine callback: the production deployment failed ({@code PROD_DEPLOYING → FAILED}). */
     PROD_FAIL,
+    /**
+     * Second-party library: the {@code LIB_PUBLISH} node uploaded the artifact
+     * ({@code BUILDING → DONE}, P6-A design §2/§3). A LIB item never passes through
+     * {@code TESTING} or the production states.
+     */
+    LIB_OK,
+    /**
+     * Second-party library: the {@code BUILD}, {@code LIB_SECURITY} or {@code LIB_PUBLISH} node
+     * failed ({@code BUILDING → FAILED}). The item never enters {@code TESTING}, so the normal
+     * {@code BUILD_FAIL}/{@code TEST_DEPLOY_FAIL} events cannot describe it.
+     */
+    LIB_FAIL,
     /** A freeze became effective while the item was submitted or ready. */
     FREEZE_HIT,
     /**

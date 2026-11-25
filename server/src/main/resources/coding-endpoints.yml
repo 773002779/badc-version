@@ -11,6 +11,8 @@
 #   deploy.start : unitId, taskId, envKind, deName, imageDigest, pipelineNo, attempt
 #   deploy.query : externalId
 #   deploy.logs  : externalId, offset, limit
+#   publish.start : taskId, groupId, artifactId, version, pipelineNo, attempt
+#   publish.query : externalId
 #   cancel       : externalId
 #   job.list     : project, jobType
 #   check.start      : unitId, taskId, checkType, commitSha, imageDigest, pipelineNo, attempt
@@ -78,6 +80,26 @@ coding:
     "[deploy.logs]":
       method: GET
       url: "/open-api/deploy/{externalId}/logs?offset={offset}&limit={limit}"
+
+    # Second-party library artifact upload (P6-A design §3). The path, body field names and
+    # response expressions are a placeholder like every other action: no artifact repository
+    # was reachable while implementing this slice, so a real tenant replaces the template here
+    # (or from an external application.yml) without a code change. The platform does not own
+    # the repository; it only records the task and the engine's result.
+    "[publish.start]":
+      method: POST
+      url: "/open-api/artifact/publish/start"
+      body: '{"TaskId":"{taskId}","GroupId":"{groupId}","ArtifactId":"{artifactId}","Version":"{version}","PipelineNo":"{pipelineNo}","Attempt":{attempt}}'
+      responseId: "$.Response.Data.PublishId"
+      responseUrl: "$.Response.Data.WebUrl"
+
+    # Polling of the in-flight publish job, used by the 30s reconcile when no webhook arrives
+    # (the LIB_PUBLISH node is WAITING_EXTERNAL with a 60min deadline).
+    "[publish.query]":
+      method: GET
+      url: "/open-api/artifact/publish/{externalId}"
+      responseStatus: "$.Response.Data.Status"
+      responseDigest: "$.Response.Data.Digest"
 
     "[cancel]":
       method: POST

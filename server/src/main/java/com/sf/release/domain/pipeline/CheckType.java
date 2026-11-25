@@ -1,5 +1,7 @@
 package com.sf.release.domain.pipeline;
 
+import java.util.List;
+
 /**
  * The seven check types of the gate (requirements §7.1, tech design §7):
  * four image-level checks that run after {@code IMG_BUILD} succeeded and three environment-level
@@ -52,6 +54,20 @@ public enum CheckType {
     /** Chinese operator-facing label, for example {@code Sonar 扫描}. */
     public String label() {
         return label;
+    }
+
+    /**
+     * The three image-level checks a second-party library runs before its artifact may be
+     * uploaded (P6-A design §1/§3: {@code LIB_SECURITY}). They are the artifact-relevant subset
+     * of the seven gate checks: architecture, dynamic security, automated test and database
+     * normalisation do not apply to a library, and the environment-level stage does not exist
+     * because a library has no deployment.
+     *
+     * <p>Kept here instead of in the handlers so the factory, the check trigger and the gate
+     * decision cannot drift apart.
+     */
+    public static List<CheckType> libSecurityChecks() {
+        return List.of(SONAR, COMPONENT_VULN, VERSION_DEFECT);
     }
 
     /**

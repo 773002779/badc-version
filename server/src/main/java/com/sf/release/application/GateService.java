@@ -250,6 +250,58 @@ public class GateService {
         return null;
     }
 
+    /**
+     * Whether the {@code LIB_SECURITY} node of {@code instance} may complete (P6-A design §3):
+     * the three artifact checks exist and their decision is {@code PASS} or {@code WAIVED}.
+     *
+     * <p>Unlike {@link #verifySatisfied} this asks <strong>only</strong> the check gate: a
+     * second-party library has no test deployment, so there is no test gate to satisfy. The
+     * completeness guard (all three {@link CheckType#libSecurityChecks()} rows present) keeps a
+     * partially triggered security node from completing on a subset of its checks.
+     *
+     * <p>Read-only: the orchestrator calls it from inside its advance transaction.
+     */
+    public boolean libSecuritySatisfied(PipelineInstance instance) {
+        long itemId = itemIdOfInstance(instance);
+        if (itemId <= 0) {
+            return false;
+        }
+        ReleaseItemPO po = requireItem(itemId);
+        ReleaseItem item = po.toDomain();
+        List<GateCheck> checks = checkService.checks(itemId);
+        for (CheckType type : CheckType.libSecurityChecks()) {
+            boolean present = checks.stream().anyMatch(check -> check.checkType() == type);
+            if (!present) {
+                return false;
+            }
+        }
+        return decide(item, snapshotOf(item)).admits();
+    }
+
+    /**
+     * Why the {@code LIB_SECURITY} node must fail now, or {@code null} while it may still turn
+     * around (P6-A design §3). Only a final verdict fails: an invalidated result or a blocking
+     * finding that cannot be waived. A waivable 中危 block keeps the node waiting so the waiver
+     * can be requested and approved, exactly like the deployment gate (P2 rules); once approved,
+     * {@link #libSecuritySatisfied} becomes true and the artifact may be uploaded.
+     */
+    public String libSecurityBlockedReason(PipelineInstance instance) {
+        long itemId = itemIdOfInstance(instance);
+        if (itemId <= 0) {
+            return null;
+        }
+        ReleaseItemPO po = requireItem(itemId);
+        ReleaseItem item = po.toDomain();
+        GateDecision decision = decide(item, snapshotOf(item));
+        if (finalBlock(decision)) {
+            return "二方库安全检查未通过：" + decision.summary()
+                + (decision.reasons().isEmpty() ? ""
+                    : "（" + String.join("；", decision.reasons()) + "）");
+        }
+        return null;
+    }
+
+    /** The item's current check decision against the latest instance snapshot. */
     private GateDecision decide(ReleaseItem item, Snapshot snapshot) {
         return GateEvaluator.evaluate(checkService.checks(item.id()), snapshot.waiver(),
             Instant.now(), snapshot.commitSha(), snapshot.imageDigest());

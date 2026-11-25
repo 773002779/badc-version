@@ -11,6 +11,10 @@ package com.sf.release.domain.pipeline;
  * generic {@code DEPLOY} tasks (design §3: one per target DE), so {@code DAILY_DEPLOY} is the
  * reserved vocabulary for a future dedicated daily deploy job, exactly like the
  * {@code coding_task_binding.task_kind = DAILY_DEPLOY} binding it mirrors.
+ *
+ * <p>{@code LIB_PUBLISH} is the second-party library's artifact upload task (P6-A design §2/§3):
+ * the only task of the {@code LIB_PUBLISH} node, driven by the engine's publish endpoint. It is
+ * appended so the existing values keep their meaning.
  */
 public enum TaskType {
     CODE_CHECK,
@@ -20,5 +24,6 @@ public enum TaskType {
     CHECK,
     AUTO_TEST,
     ROLLBACK,
-    DAILY_DEPLOY
+    DAILY_DEPLOY,
+    LIB_PUBLISH
 }

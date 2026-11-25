@@ -235,25 +235,28 @@ public class CodingWebhookAppService {
         return new Payload(eventId, externalId, status, kind, digest, message);
     }
 
-    /** {@code BUILD}/{@code DEPLOY}, case-insensitive; anything else is an invalid delivery. */
+    /** {@code BUILD}/{@code DEPLOY}/{@code PUBLISH}, case-insensitive; anything else is invalid. */
     private static JobKind parseKind(String raw) {
         try {
             return JobKind.valueOf(raw.trim().toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException ex) {
-            throw new MalformedPayloadException("kind 不合法：" + raw + "（期望 BUILD 或 DEPLOY）");
+            throw new MalformedPayloadException(
+                "kind 不合法：" + raw + "（期望 BUILD、DEPLOY 或 PUBLISH）");
         }
     }
 
     /**
      * The node-task types of one engine job family: a {@code BUILD} callback can only resolve
-     * the build chain, a {@code DEPLOY} callback only the deploy tasks. This is the same split
-     * the reconcile query uses, expressed in the task vocabulary the webhook looks up.
+     * the build chain, a {@code DEPLOY} callback only the deploy tasks, a {@code PUBLISH}
+     * callback only the library artifact upload (P6-A). This is the same split the reconcile
+     * query uses, expressed in the task vocabulary the webhook looks up.
      */
     static List<String> taskTypesOf(JobKind kind) {
         return switch (kind) {
             case BUILD -> List.of(TaskType.CODE_CHECK.name(), TaskType.PKG_BUILD.name(),
                 TaskType.IMG_BUILD.name());
             case DEPLOY -> List.of(TaskType.DEPLOY.name(), TaskType.ROLLBACK.name());
+            case PUBLISH -> List.of(TaskType.LIB_PUBLISH.name());
         };
     }
 

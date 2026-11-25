@@ -93,10 +93,11 @@ class UnitServiceTest {
         assertThat(view.createdAt()).isNotNull();
         assertThat(view.updatedAt()).isNotNull();
 
-        // A LIB unit is allowed too (shared shape, no deploy/env config in phase 1).
+        // A LIB unit is allowed too (shared shape, no deploy/env config in phase 1); since V29 a
+        // library must name its artifact coordinates.
         long lib = unitService.create(new CreateCmd(
             subsystemId, "quota-sdk", "LIB", null, OWNER, null, null, null, null, null, null, null,
-            null, null));
+            null, null, "com.sf.quota", "quota-sdk"));
         assertThat(unitService.get(lib).type()).isEqualTo("LIB");
         assertThatThrownBy(() -> unitService.addEnvDe(lib, env("TEST", "quota-sdk-sit", 0)))
             .as("FR-R-03: a second-party library has no deployment environment")
@@ -130,7 +131,7 @@ class UnitServiceTest {
 
         unitService.update(id, new UpdateCmd(" quota-api-v2 ", "LIB", "DU-QUOTA", OWNER,
             "spring-boot", "COMPATIBLE", "INACTIVE", " 配额服务 ", "outbound-os",
-            "K8S", "IMAGE", "quota-api:v2", " quota ", " core "));
+            "K8S", "IMAGE", "quota-api:v2", " quota ", " core ", "com.sf.quota", "quota-api"));
 
         UnitView view = unitService.get(id);
         assertThat(view.name()).isEqualTo("quota-api-v2");

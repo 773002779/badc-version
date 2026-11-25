@@ -91,9 +91,11 @@ import java.util.UUID;
  * id inside it. Any other failure releases the sentinel reservation; a failure of the bind
  * itself means the lock was lost, so no release is attempted at all.
  *
- * <p><strong>Scope.</strong> Only online deployment-unit items are published here. The daily
- * pipeline and the second-party library pipeline belong to later tasks; the rerun use case
- * ({@link RerunAppService}) reuses {@link #createRerunInstance} for its instance creation.
+ * <p><strong>Scope.</strong> Online deployment-unit items and second-party library items are
+ * published here. A LIB item takes its own branch (coordinates + BUILD/LIB_PUBLISH binding, no
+ * DE configuration) and commits a LIB pipeline instead of the four-node online graph; the UNIT
+ * path below is unchanged (P6-A design §3/§5 item 5). The daily pipeline belongs to P5-A and the
+ * rerun use case ({@link RerunAppService}) reuses {@link #createRerunInstance}.
  */
 @Service
 public class PublishAppService {
@@ -124,6 +126,7 @@ public class PublishAppService {
     private final PipelineNodeMapper nodeMapper;
     private final NodeTaskMapper taskMapper;
     private final UnitAppService unitAppService;
+    private final LibAppService libAppService;
     private final UnitLockService unitLockService;
     private final GitCommitProbe commitProbe;
     private final PipelineOrchestrator orchestrator;
@@ -145,6 +148,7 @@ public class PublishAppService {
                              PipelineNodeMapper nodeMapper,
                              NodeTaskMapper taskMapper,
                              UnitAppService unitAppService,
+                             LibAppService libAppService,
                              UnitLockService unitLockService,
                              GitCommitProbe commitProbe,
                              PipelineOrchestrator orchestrator,
@@ -159,6 +163,7 @@ public class PublishAppService {
         this.nodeMapper = nodeMapper;
         this.taskMapper = taskMapper;
         this.unitAppService = unitAppService;
+        this.libAppService = libAppService;
         this.unitLockService = unitLockService;
         this.commitProbe = commitProbe;
         this.orchestrator = orchestrator;
@@ -180,9 +185,8 @@ public class PublishAppService {
         ReleaseItem item = loadItem(itemId);
         ScopeGuard.assertUnitInScope(item.unitId());
         requireTaskNotArchived(item);
-        if (item.type() != UnitType.UNIT) {
-            throw new BizException(BizError.STATE_NOT_ALLOWED,
-                "二方库发布流水线不在本期范围", Map.of("itemId", itemId, "type", item.type().name()));
+        if (item.type() == UnitType.LIB) {
+            return publishLib(item);
         }
         unitAppService.assertPublishable(item.unitId());
 
@@ -227,6 +231,53 @@ public class PublishAppService {
         } catch (RuntimeException ex) {
             // On any other failure the transaction rolled back, including the bindInstance
             // update, so the row still belongs to the reserved sentinel.
+            unitLockService.release(unitId, UnitLockService.UNBOUND_INSTANCE_ID);
+            throw ex;
+        }
+    }
+
+    /**
+     * Publishes a second-party library item (P6-A design §3): validates the artifact
+     * coordinates plus the {@code BUILD}/{@code LIB_PUBLISH} bindings, takes the library's own
+     * unit lock, and commits one release order with the three-node LIB pipeline.
+     *
+     * <p>The steps are deliberately the same as the UNIT path: the base-commit probe is
+     * best-effort and hoisted before the lock, the item moves {@code PENDING -PUBLISH->
+     * BUILDING} with a {@code row_version} CAS, the order/instance/nodes/tasks and the lock bind
+     * are one transaction, and the audit row is written after it commits. What differs is only
+     * what is validated and what graph is pre-generated — a library has no DE/tests/production,
+     * so neither {@code assertPublishable} nor the DE configuration check runs.
+     */
+    private PublishResult publishLib(ReleaseItem item) {
+        long itemId = item.id();
+        long unitId = item.unitId();
+        libAppService.assertPublishable(unitId);
+        String baseCommit = observeBaseCommit(item);
+        if (!unitLockService.acquire(unitId, UnitLockService.UNBOUND_INSTANCE_ID)) {
+            throw unitLocked(unitId, itemId);
+        }
+        try {
+            Published published = transactionTemplate.execute(
+                tx -> publishLibInTransaction(itemId, unitId, baseCommit));
+            Published result = Objects.requireNonNull(published, "library publish result");
+            if (autoStart) {
+                startPipeline(result.instanceId());
+            }
+            audit.record(AuditCommand.of(AuditAction.PUBLISH, result.result().publishNo(),
+                    result.result().publishNo(),
+                    "发起二方库发布：发布单 " + result.result().publishNo()
+                        + "（变更项 " + item.crid() + "）")
+                .before(Map.of("itemStatus", item.status().name()))
+                .after(Map.of("itemStatus", ItemStatus.BUILDING.name(),
+                    "publishNo", result.result().publishNo(),
+                    "pipelineNo", result.result().pipelineNo(),
+                    "type", UnitType.LIB.name()))
+                .scopeUnitId(unitId)
+                .build());
+            return result.result();
+        } catch (LockLostException ex) {
+            throw ex.failure();
+        } catch (RuntimeException ex) {
             unitLockService.release(unitId, UnitLockService.UNBOUND_INSTANCE_ID);
             throw ex;
         }
@@ -283,6 +334,39 @@ public class PublishAppService {
 
     private Published publishInTransaction(long itemId, long unitId, List<EnvDe> envDes,
                                                String baseCommit) {
+        PublishStart start = beginPublish(itemId, baseCommit);
+        PipelineInstance instance = PipelineFactory.createOnline(start.order(), start.item(),
+            envDes);
+        long instanceId = persistInstance(instance, unitId, itemId);
+        log.info("release published: itemId={}, unitId={}, publishNo={}, pipelineNo={}",
+            itemId, unitId, start.order().publishNo(), instance.pipelineNo());
+        return new Published(new PublishResult(start.order().publishNo(), instance.pipelineNo(),
+            UnitType.UNIT.name()), instanceId);
+    }
+
+    /**
+     * Commits one LIB publish: the same item CAS and order insert as a deployment, then the
+     * three-node library graph instead of the four-node online one (P6-A design §3). The order is
+     * a real 发布单, so the unit lock, the audit row and the records page work unchanged.
+     */
+    private Published publishLibInTransaction(long itemId, long unitId, String baseCommit) {
+        PublishStart start = beginPublish(itemId, baseCommit);
+        PipelineInstance instance = PipelineFactory.createLib(start.order(), start.item(),
+            start.now());
+        long instanceId = persistInstance(instance, unitId, itemId);
+        log.info("library release published: itemId={}, unitId={}, publishNo={}, pipelineNo={}",
+            itemId, unitId, start.order().publishNo(), instance.pipelineNo());
+        return new Published(new PublishResult(start.order().publishNo(), instance.pipelineNo(),
+            UnitType.LIB.name()), instanceId);
+    }
+
+    /**
+     * The shared first half of a publish transaction: move the item {@code PENDING →
+     * BUILDING} with a {@code row_version} CAS and insert its {@code INIT} release order. The
+     * caller then pre-generates the pipeline of the item type, so the two paths cannot disagree
+     * on the item transition or on the order identity.
+     */
+    private PublishStart beginPublish(long itemId, String baseCommit) {
         ReleaseItem current = loadItem(itemId);
         ItemStatus next = ItemStateMachine.transit(current, ItemEvent.PUBLISH);
         Instant now = Instant.now();
@@ -307,14 +391,11 @@ public class PublishAppService {
             null, ReleaseOrder.STATUS_INIT, 0, now);
         ReleaseOrderPO orderPo = ReleaseOrderPO.of(order);
         orderMapper.insert(orderPo);
-        ReleaseOrder persistedOrder = order.withId(orderPo.getId());
+        return new PublishStart(current, order.withId(orderPo.getId()), now);
+    }
 
-        PipelineInstance instance = PipelineFactory.createOnline(persistedOrder, current, envDes);
-        long instanceId = persistInstance(instance, unitId, itemId);
-        log.info("release published: itemId={}, unitId={}, publishNo={}, pipelineNo={}",
-            itemId, unitId, persistedOrder.publishNo(), instance.pipelineNo());
-        return new Published(new PublishResult(persistedOrder.publishNo(), instance.pipelineNo()),
-            instanceId);
+    /** One committed publish start: the item as it was read and the persisted order. */
+    private record PublishStart(ReleaseItem item, ReleaseOrder order, Instant now) {
     }
 
     /**
@@ -483,8 +564,12 @@ public class PublishAppService {
             + "-" + suffix;
     }
 
-    /** What the caller needs after publishing: the order number and the instance number. */
-    public record PublishResult(String publishNo, String pipelineNo) {
+    /**
+     * What the caller needs after publishing: the order number, the instance number and the
+     * item type ({@code UNIT} or {@code LIB}, P6-A design §4: the LIB response carries its type
+     * so the page can render the library view).
+     */
+    public record PublishResult(String publishNo, String pipelineNo, String type) {
     }
 
     /**

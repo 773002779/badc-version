@@ -458,8 +458,9 @@ class CodingEngineTest {
             .containsKeys("build.start", "build.query", "build.logs",
                 "deploy.start", "deploy.query", "deploy.logs", "cancel",
                 "git.head", "git.changes", "job.list",
-                "check.start", "check.env.start", "check.query")
-            .hasSize(13);
+                "check.start", "check.env.start", "check.query",
+                "publish.start", "publish.query")
+            .hasSize(15);
         assertThat(properties.getEndpoints().get("build.start").getMethod()).isEqualTo("POST");
         assertThat(properties.getEndpoints().get("build.start").getUrl())
             .isEqualTo("/open-api/build/start");

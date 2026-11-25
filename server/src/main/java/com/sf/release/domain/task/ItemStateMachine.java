@@ -97,6 +97,11 @@ public final class ItemStateMachine {
         put(matrix, ItemStatus.PENDING, ItemEvent.PUBLISH, ItemStatus.BUILDING);
         put(matrix, ItemStatus.BUILDING, ItemEvent.BUILD_OK, ItemStatus.TESTING);
         put(matrix, ItemStatus.BUILDING, ItemEvent.BUILD_FAIL, ItemStatus.FAILED);
+        // The second-party library path (P6-A design §2): the item stays BUILDING through the
+        // build and the security node, and only the artifact upload ends it. There is no TESTING
+        // or production state for a library, so these two edges are the only way out of BUILDING.
+        put(matrix, ItemStatus.BUILDING, ItemEvent.LIB_OK, ItemStatus.DONE);
+        put(matrix, ItemStatus.BUILDING, ItemEvent.LIB_FAIL, ItemStatus.FAILED);
         put(matrix, ItemStatus.TESTING, ItemEvent.GATE_PASS, ItemStatus.GATE_PENDING);
         put(matrix, ItemStatus.TESTING, ItemEvent.GATE_FAIL, ItemStatus.GATE_FAILED);
         put(matrix, ItemStatus.TESTING, ItemEvent.TEST_DEPLOY_OK, ItemStatus.TESTING);

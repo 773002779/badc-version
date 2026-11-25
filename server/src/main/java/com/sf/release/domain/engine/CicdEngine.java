@@ -26,6 +26,19 @@ public interface CicdEngine {
     TriggerResult triggerDeploy(DeployCmd cmd);
 
     /**
+     * Uploads the artifact of a second-party library to the artifact repository (P6-A design
+     * §3). Like {@link #startCheck}, this is an <em>optional</em> capability: an adapter that
+     * cannot publish artifacts reports {@code ENGINE_UNAVAILABLE}, and the pipeline task is
+     * failed with that reason instead of being left running forever.
+     *
+     * <p>The platform only records the task and its result; it does not own the artifact
+     * repository, so the coordinates and the version come from the unit and the 变更项.
+     */
+    default TriggerResult startPublish(PublishCmd cmd) {
+        throw EngineException.unavailable("当前引擎不支持制品入库：" + name());
+    }
+
+    /**
      * Queries a build or deploy job started earlier. The kind selects the engine endpoint
      * ({@code build.query} / {@code deploy.query}); it cannot be inferred from the id.
      *

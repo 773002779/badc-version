@@ -564,12 +564,14 @@ public class ReconcileJob {
 
     /**
      * The engine job kind of a task. Build-chain tasks use {@code build.query}; every deploy
-     * task (TEST/PROD/DAILY) uses {@code deploy.query}. CHECK/AUTO_TEST are not engine jobs.
+     * task (TEST/PROD/DAILY) uses {@code deploy.query}; the library artifact upload uses
+     * {@code publish.query} (P6-A). CHECK/AUTO_TEST are not engine jobs.
      */
     static JobKind kindFor(NodeTask task) {
         return switch (task.taskType()) {
             case CODE_CHECK, PKG_BUILD, IMG_BUILD -> JobKind.BUILD;
             case DEPLOY, DAILY_DEPLOY, ROLLBACK -> JobKind.DEPLOY;
+            case LIB_PUBLISH -> JobKind.PUBLISH;
             case CHECK, AUTO_TEST -> null;
         };
     }

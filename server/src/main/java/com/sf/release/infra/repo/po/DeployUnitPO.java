@@ -36,6 +36,9 @@ public class DeployUnitPO {
     /** Filter-only labels (V16): never part of a build or deploy payload. */
     private String module;
     private String tag;
+    /** LIB only (V29): the Maven coordinates of the published artifact; NULL for a UNIT. */
+    private String artifactGroupId;
+    private String artifactArtifactId;
     private Instant createdAt;
     private Instant updatedAt;
 
@@ -57,6 +60,8 @@ public class DeployUnitPO {
         po.imageName = unit.imageName();
         po.module = unit.module();
         po.tag = unit.tag();
+        po.artifactGroupId = unit.artifactGroupId();
+        po.artifactArtifactId = unit.artifactArtifactId();
         po.createdAt = unit.createdAt();
         po.updatedAt = unit.updatedAt();
         return po;
@@ -65,7 +70,7 @@ public class DeployUnitPO {
     public DeployUnit toDomain() {
         return new DeployUnit(id, subsystemId, name, type(), du, ownerId, frameworkTemplate,
             branchMode(), status(), description, modulePath, deployType, imageType, imageName,
-            module, tag, createdAt, updatedAt);
+            module, tag, artifactGroupId, artifactArtifactId, createdAt, updatedAt);
     }
 
     private UnitType type() {
@@ -210,6 +215,24 @@ public class DeployUnitPO {
 
     public void setTag(String tag) {
         this.tag = tag;
+    }
+
+    /** LIB only (V29): Maven groupId, {@code null} for a UNIT. */
+    public String getArtifactGroupId() {
+        return artifactGroupId;
+    }
+
+    public void setArtifactGroupId(String artifactGroupId) {
+        this.artifactGroupId = artifactGroupId;
+    }
+
+    /** LIB only (V29): Maven artifactId, {@code null} for a UNIT. */
+    public String getArtifactArtifactId() {
+        return artifactArtifactId;
+    }
+
+    public void setArtifactArtifactId(String artifactArtifactId) {
+        this.artifactArtifactId = artifactArtifactId;
     }
 
     public Instant getCreatedAt() {

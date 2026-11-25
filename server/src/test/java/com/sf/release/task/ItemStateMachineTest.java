@@ -235,6 +235,8 @@ class ItemStateMachineTest {
         legal(matrix, ItemStatus.PENDING, ItemEvent.PUBLISH, ItemStatus.BUILDING);
         legal(matrix, ItemStatus.BUILDING, ItemEvent.BUILD_OK, ItemStatus.TESTING);
         legal(matrix, ItemStatus.BUILDING, ItemEvent.BUILD_FAIL, ItemStatus.FAILED);
+        legal(matrix, ItemStatus.BUILDING, ItemEvent.LIB_OK, ItemStatus.DONE);
+        legal(matrix, ItemStatus.BUILDING, ItemEvent.LIB_FAIL, ItemStatus.FAILED);
         legal(matrix, ItemStatus.TESTING, ItemEvent.GATE_PASS, ItemStatus.GATE_PENDING);
         legal(matrix, ItemStatus.TESTING, ItemEvent.GATE_FAIL, ItemStatus.GATE_FAILED);
         legal(matrix, ItemStatus.TESTING, ItemEvent.TEST_DEPLOY_OK, ItemStatus.TESTING);

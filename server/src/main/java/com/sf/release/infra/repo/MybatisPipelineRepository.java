@@ -16,6 +16,7 @@ import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.resource.EnvKind;
 import com.sf.release.domain.resource.TaskKind;
 import com.sf.release.infra.repo.po.CodingTaskBindingPO;
+import com.sf.release.infra.repo.po.DeployUnitPO;
 import com.sf.release.infra.repo.po.EnvDePO;
 import com.sf.release.infra.repo.po.NodeTaskPO;
 import com.sf.release.infra.repo.po.PipelineInstancePO;
@@ -67,6 +68,7 @@ public class MybatisPipelineRepository implements PipelineRepository {
     private final ReleaseItemMapper itemMapper;
     private final CodingTaskBindingMapper bindingMapper;
     private final EnvDeMapper envDeMapper;
+    private final DeployUnitMapper unitMapper;
 
     public MybatisPipelineRepository(PipelineInstanceMapper instanceMapper,
                                      PipelineNodeMapper nodeMapper,
@@ -74,7 +76,8 @@ public class MybatisPipelineRepository implements PipelineRepository {
                                      ReleaseOrderMapper orderMapper,
                                      ReleaseItemMapper itemMapper,
                                      CodingTaskBindingMapper bindingMapper,
-                                     EnvDeMapper envDeMapper) {
+                                     EnvDeMapper envDeMapper,
+                                     DeployUnitMapper unitMapper) {
         this.instanceMapper = instanceMapper;
         this.nodeMapper = nodeMapper;
         this.taskMapper = taskMapper;
@@ -82,6 +85,7 @@ public class MybatisPipelineRepository implements PipelineRepository {
         this.itemMapper = itemMapper;
         this.bindingMapper = bindingMapper;
         this.envDeMapper = envDeMapper;
+        this.unitMapper = unitMapper;
     }
 
     @Override
@@ -145,6 +149,16 @@ public class MybatisPipelineRepository implements PipelineRepository {
         ReleaseItemPO item = itemMapper.selectById(order.getItemId());
         long unitId = item == null || item.getUnitId() == null ? 0L : item.getUnitId();
         return new InstanceContext(instanceId, orderId, unitId);
+    }
+
+    @Override
+    public long itemIdOf(long instanceId) {
+        PipelineInstancePO instance = instanceMapper.selectById(instanceId);
+        if (instance == null || instance.getOrderId() == null || instance.getOrderId() <= 0) {
+            return 0L;
+        }
+        ReleaseOrderPO order = orderMapper.selectById(instance.getOrderId());
+        return order == null || order.getItemId() == null ? 0L : order.getItemId();
     }
 
     @Override
@@ -443,6 +457,40 @@ public class MybatisPipelineRepository implements PipelineRepository {
         }
         List<DeployTarget> targets = dailyDeployTargets(unitId);
         return new DeployContext(unitId, null, planId, targets);
+    }
+
+    /**
+     * The artifact-publish coordinates of a library instance (P6-A design §3): resolved through
+     * the release order like every online context, plus the unit's artifact coordinates and the
+     * 变更项 version. A missing binding/coordinate is returned as {@code null}, so the handler
+     * can fail the task with an explicit reason instead of calling the engine with a null task.
+     */
+    @Override
+    public LibPublishContext libPublishContextOf(long instanceId) {
+        PipelineInstancePO instance = instanceMapper.selectById(instanceId);
+        if (instance == null || instance.getOrderId() == null || instance.getOrderId() <= 0) {
+            return new LibPublishContext(0L, null, null, null, null, null);
+        }
+        ReleaseOrderPO order = orderMapper.selectById(instance.getOrderId());
+        if (order == null || order.getItemId() == null) {
+            return new LibPublishContext(0L, null, null, null, null, null);
+        }
+        String publishNo = trimToNull(order.getPublishNo());
+        ReleaseItemPO item = itemMapper.selectById(order.getItemId());
+        if (item == null) {
+            return new LibPublishContext(0L, publishNo, null, null, null, null);
+        }
+        long unitId = item.getUnitId() == null ? 0L : item.getUnitId();
+        if (unitId <= 0) {
+            return new LibPublishContext(0L, publishNo, null, null, null,
+                trimToNull(item.getVersion()));
+        }
+        DeployUnitPO unit = unitMapper.selectById(unitId);
+        return new LibPublishContext(unitId, publishNo,
+            enabledBindingTaskId(unitId, TaskKind.LIB_PUBLISH),
+            unit == null ? null : trimToNull(unit.getArtifactGroupId()),
+            unit == null ? null : trimToNull(unit.getArtifactArtifactId()),
+            trimToNull(item.getVersion()));
     }
 
     /**

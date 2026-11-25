@@ -61,7 +61,18 @@ public final class UnitDtos {
         String module,
 
         @Size(max = 64, message = "标签长度不能超过 64")
-        String tag) {
+        String tag,
+
+        /*
+         * Artifact coordinates (P6-A): required for a LIB unit and ignored by a UNIT. The
+         * type-conditional requirement and the coordinate format live in the application
+         * service, because a bean-validation annotation cannot see the requested unit type.
+         */
+        @Size(max = 128, message = "制品 groupId 长度不能超过 128")
+        String artifactGroupId,
+
+        @Size(max = 128, message = "制品 artifactId 长度不能超过 128")
+        String artifactArtifactId) {
     }
 
     /** Edit form: the same detail fields plus the lifecycle status. */
@@ -108,7 +119,13 @@ public final class UnitDtos {
         String module,
 
         @Size(max = 64, message = "标签长度不能超过 64")
-        String tag) {
+        String tag,
+
+        @Size(max = 128, message = "制品 groupId 长度不能超过 128")
+        String artifactGroupId,
+
+        @Size(max = 128, message = "制品 artifactId 长度不能超过 128")
+        String artifactArtifactId) {
     }
 
     /** One CODING task reference. */

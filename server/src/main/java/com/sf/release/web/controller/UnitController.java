@@ -91,7 +91,9 @@ public class UnitController {
             request.imageType(),
             request.imageName(),
             request.module(),
-            request.tag())));
+            request.tag(),
+            request.artifactGroupId(),
+            request.artifactArtifactId())));
     }
 
     @RequirePerm(Permissions.SETTING_MANAGE)
@@ -113,7 +115,9 @@ public class UnitController {
             request.imageType(),
             request.imageName(),
             request.module(),
-            request.tag()));
+            request.tag(),
+            request.artifactGroupId(),
+            request.artifactArtifactId()));
         return ApiResponse.ok(null);
     }
 

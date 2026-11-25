@@ -16,6 +16,7 @@ import com.sf.release.domain.engine.GateCheckCmd;
 import com.sf.release.domain.engine.GateCheckOutcome;
 import com.sf.release.domain.engine.GateCheckReport;
 import com.sf.release.domain.engine.JobKind;
+import com.sf.release.domain.engine.PublishCmd;
 import com.sf.release.domain.engine.TriggerResult;
 import com.sf.release.domain.gate.Severity;
 import com.sf.release.domain.pipeline.CheckType;
@@ -61,6 +62,7 @@ public class CodingEngine implements CicdEngine {
 
     static final String ACTION_BUILD_START = "build.start";
     static final String ACTION_DEPLOY_START = "deploy.start";
+    static final String ACTION_PUBLISH_START = "publish.start";
     static final String ACTION_CANCEL = "cancel";
     static final String ACTION_JOB_LIST = "job.list";
     static final String ACTION_CHECK_START = "check.start";
@@ -183,7 +185,42 @@ public class CodingEngine implements CicdEngine {
         return new TriggerResult(externalId, externalUrl);
     }
 
-    /** Queries {@code build.query} or {@code deploy.query} according to the job kind. */
+    /**
+     * Triggers the artifact upload of a second-party library ({@code publish.start}) with the
+     * unit's coordinates, the 变更项 version and the pipeline idempotency context (P6-A design
+     * §3). The body field names come from the endpoint's {@code body} template, so an
+     * unverified vendor contract is a YAML change, not a code change.
+     */
+    @Override
+    public TriggerResult startPublish(PublishCmd cmd) {
+        if (cmd == null) {
+            throw EngineException.unavailable("制品入库参数不能为空");
+        }
+        CodingProperties.Endpoint endpoint = endpoint(ACTION_PUBLISH_START);
+        Map<String, String> vars = new LinkedHashMap<>();
+        put(vars, "taskId", cmd.taskId());
+        put(vars, "groupId", cmd.groupId());
+        put(vars, "artifactId", cmd.artifactId());
+        put(vars, "version", cmd.version());
+        put(vars, "pipelineNo", cmd.pipelineNo());
+        put(vars, "attempt", String.valueOf(cmd.attempt()));
+
+        EngineHttpClient.HttpResult result = execute(ACTION_PUBLISH_START, vars);
+        JsonNode root = parse(result, ACTION_PUBLISH_START);
+        String externalId = text(root, endpoint.getResponseId(), ACTION_PUBLISH_START);
+        if (externalId == null) {
+            throw EngineException.unavailable(
+                "触发制品入库的响应缺少 externalId（action=" + ACTION_PUBLISH_START
+                    + "，请检查 responseId 配置）");
+        }
+        String externalUrl = text(root, endpoint.getResponseUrl(), ACTION_PUBLISH_START);
+        log.info("coding artifact publish triggered: externalId={}, artifact={}:{},"
+                + " version={}, pipelineNo={}",
+            externalId, cmd.groupId(), cmd.artifactId(), cmd.version(), cmd.pipelineNo());
+        return new TriggerResult(externalId, externalUrl);
+    }
+
+    /** Queries {@code build.query}, {@code deploy.query} or {@code publish.query}. */
     @Override
     public EngineResult query(String externalId, JobKind kind) {
         String action = action(kind, "query");
