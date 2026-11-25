@@ -459,3 +459,49 @@ Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有�
 - Ruling R89: 发布入口复用既有 `PUBLISH` 审计动作（不新增动作码，after 带 `type=LIB`），响应
   `PublishResult(publishNo,pipelineNo,type)` 对 UNIT 也回 `type`；ENGINE 失败不回滚已提交的发布单/实例，失败原因
   落任务 `result_summary` 与实例 `status_reason`，HTTP 仍按发布成功返回。`d81b980`
+
+## R90+（P6-C 单元流水线配置，2026-11-26）
+
+> **编号说明**：正式台账此前停在 R89（P6-A），本节按「接续最大编号」从 R90 起。P6-B 的计划曾写「台账 R90+」，
+> 但 P6-B 的文档收口至今未执行（没有 §8.14/§12.2.11/§19，也没有台账节）；**P6-B 若补写，从本节最后一条之后
+> 续号**，不重排本节。来源文件 `.superpowers/sdd/p6c-pipeline/{progress.md,task-1-report.md,task-2-report.md}`
+> 在 `.gitignore` 的 `.superpowers/` 下，未进提交；代码以 `40b2b27`（后端）、`9d047f7`（前端）为准。
+>
+> **实现历史（不是裁决、也不是产品偏差）**：本轮同样两轮实现——Task 1 的首个后端实现者中途因 provider 故障退出，
+> 磁盘上留下可编译的半成品（V31、领域/PO/mapper、部分服务与工厂改动）；lead 以 continuation brief 接手续做，
+> 补齐 controller/DTO、五个 handler 的超时读取、发布/重跑的空交集拒绝、门禁/LIB 一致性、28 个测试与读失败降级，
+> 一次提交 `40b2b27`（25 文件，+2286/−39）。Task 2 的 web 轮独立提交 `9d047f7`（6 文件，含两张截图）。lead 复核：
+> 全量 937 绿（surefire 96 个当前测试类，0 失败；两条 11-22 的陈旧报告不计）、web 独立 `npm run build` 绿、
+> `scripts/verify-p6c-ui.mjs` 双主题通过、探针结束删行（`unit 2` / `lib 91001` 均为 `configured:false`）。
+
+- Ruling R90: **无行 = 默认**是唯一默认机制：建单元不插行，`GET` 对无行单元返回默认值（开关开、60、8、`FORWARD`）
+  加 `configured:false` 与 `updatedBy/updatedAt:null`；保存按主键 upsert（先 `UPDATE`，0 行再 `INSERT`），
+  `updated_at` 服务端 `Instant.now()`，`updated_by` 取调用者。**没有 DELETE/重置端点**，恢复默认只能 PUT 默认值或
+  删行——探针因此用 dev MySQL 删行。`40b2b27`
+- Ruling R91: 环境级检查开关只作用于 `CheckStage.ENV` 的三项（`SECURITY_DYNAMIC`/`AUTO_TEST`/`DB_NORM`）：
+  平台 `GATE.enabledChecks`（无行=七项全开）∩ 单元开关；镜像四项与 LIB 的三项 `libSecurityChecks()` 不受影响。
+  交集为空时**在线发布/重跑 40011 `UNIT_NOT_CONFIGURED`**（设计未写该情形；复用既有码，事务内拒绝、不落实例），
+  不预生成空 `VERIFY`——否则会卡住或凭零证据放行。`40b2b27`
+- Ruling R92: 超时在**任务进入引擎**时经 `PipelineRepository#pipelineConfigOf(instanceId)` 读取（订单→变更项→单元；
+  日常用实例自身 `unit_id`），`deadline_at = now + 配置分钟`；无行/读失败回退**P6-C 前常量**：BUILD 60、LIB_PUBLISH 60、
+  TEST/PROD 8、DAILY_DEPLOY **60**（设计文字说日常用 8，但「无行 = P6-C 前行为」优先，P5-A 常量是 60；有行时用表中
+  `deploy_timeout_minutes`，其默认 8）。在途 `deadline_at` 永不重算，下一任务才读新值。`40b2b27`
+- Ruling R93: `REVERSE` 只把**新建在线实例**的生产族任务（`PROD/DR/BLUE`）重编号为
+  `maxBatch + 1 - originalBatch`（与回滚同款变换），并按生效批号排序后预生成；测试部署 `batch 0` 不变，已有实例
+  保存后不重编号；`createRollback` **完全不读**该配置（自带逆序）。`40b2b27`
+- Ruling R94: 重跑的已完成生产批次改按 **DE target** 承接（`completedProductionBatches(Set<Integer>)` →
+  `completedProductionTargets(Set<Long>)`）：逆序会重编号，按批号承接会跳过错误任务；FORWARD 下与旧行为等价。
+  同批「最新 attempt 全部 SUCCESS」才算完成，`SKIPPED` 中性。`40b2b27`
+- Ruling R95: PUT 四字段**全是字符串**（`envChecksEnabled`/`buildTimeoutMinutes`/`deployTimeoutMinutes`/`batchOrder`），
+  因为 web DTO 不得 import domain 枚举；服务端 trim/解析/范围校验（5–240、1–120、两值），错误 40000；响应同时给
+  机器值 `batchOrder` 与中文 `batchOrderLabel`，页面不翻译枚举。`40b2b27`
+- Ruling R96: 读写都要求 `setting:manage` + `ScopeGuard`；**GET 无权限也是 40009**（HTTP 200 信封、payload `perm`），
+  不是 403——页面据此在无权限时连 GET 都不发、只显示原因。保存写**一行** `SETTING_UPDATE`（object `UNIT`、
+  objectId=unitId、before/after 整段五键含 `configured`、`scope_unit_id=unitId`、`scope_subsystem_id=NULL`）。`40b2b27`
+- Ruling R97: 评估侧与面板一致：`GateCheckService#startChecks`、`GateService#decide/view/libSecuritySatisfied/
+  libSecurityBlockedReason`、`LibSecurityNodeHandler#start` 都套同一交集；单元停用的检查在面板
+  `CheckView.disabled/disabledLabel` 标「已停用」，历史 `gate_check` 行**保留不删、不补跑**（重新启用后重新参与评估）。
+  配置**无缓存**（每次读表，保存下一次调用生效），与 P6-B 同口径。`40b2b27`
+- Ruling R98: 存量行的缺列/越界值**降级为默认常量**（build 60、deploy 8、批次 `FORWARD`、开关 null=开），
+  **不是夹到 5/240、1/120 边界**；`UnitPipelineConfig` 构造器里的 `clamp` 因此名不副实（范围内保留、否则回退默认），
+  目的是外来行不能安装荒谬 deadline。写入侧仍严格 40000，只有手工改库才会触发降级。`40b2b27`

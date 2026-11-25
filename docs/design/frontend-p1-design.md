@@ -969,3 +969,141 @@
 - **没有前端单测**：覆盖靠 `scripts/verify-p6a-ui.mjs`；探针的 LIB 成功/失败数据来自种子，**不是真实上传成功后的
   界面证据**（真实 live 只到 BUILD 失败）。
 - **截图未人眼复核**；端到端成功路径（`publish.start` 真正返回）未在本机验证。
+
+## 20. P6-C · 单元流水线配置（2026-11-26）
+
+> **编号说明**：§19 预留给 P6-B（平台设置）页面章节，其文档收口尚未执行（前端 `9a13915` 已落地）；本节按计划
+> 从 §20 编号，避免与 P6-B 文档任务互相改号。
+
+GAP-09 的**安全子集**从「无配置表/端点/页面」变成单元详情里的一个配置块：环境级检查开关、构建/部署超时、批次
+顺序。**只加一个 `DataSection`，不新增路由、不新增导航、不新增依赖**；四节点主干不变，也不做可视化节点编排。
+接口与后端口径见技术方案 §8.15 / §12.2.12。
+
+截图（1440×900，探针生成，`git add -f`；两张都是**未保存过的默认态**）：
+
+![单元流水线配置（浅色）](shots/unit-pipeline-light.png)
+![单元流水线配置（暗色）](shots/unit-pipeline-dark.png)
+
+**块位置与结构（`web/src/views/UnitDetailView.vue`）**
+
+- 右栏 `stack` 内、紧跟「CODING 任务绑定」、位于「发布前置条件」之前：`<DataSection class="unit-pipeline" title="流水线配置">`。
+- `#actions`：状态 `el-tag`（`默认配置` / `已保存` / `只读`；加载中不显示 tag）+「保存」按钮（无权限时不渲染）。
+- 副标题（`pipelineSubtitle`）随状态变化：加载中「读取中…」；只读「仅平台管理员可见」；`configured:false`
+  「当前为默认配置」；已保存时 UNIT 为「构建 X / 部署 Y 分钟 · {batchOrderLabel}」，LIB 为「构建超时 X 分钟」，有
+  `updatedBy` 时再拼「 · {user} 更新于 yyyy-MM-dd HH:mm」（`formatDateTime`，本地时区、分钟精度）。
+- 加载失败只在块内显示 `el-alert`（服务端 message），不阻塞页面其余部分；PageHeader 的「刷新」也重载该块
+  （`reloadAll` 调 `loadPipeline()`），进入页面/路由变化时加载一次。
+
+**默认态（`configured:false`）**
+
+- 块内提示原文：「当前为默认配置（构建 60 分钟 / 部署 8 分钟 / 顺序 / 环境检查开），本单元尚未保存过。」
+- 表单初始即 60 / 8 / `FORWARD` / 环境检查开；状态标签「默认配置」；**不显示**「最近保存」回显。
+
+**环境级检查（仅 UNIT）**
+
+- `el-switch`（`开启`/`关闭`）+ 一行「关闭后新实例不再生成下列检查任务。」；三个只读标签同时显示中文名与机器值
+  （`安全动态测试 SECURITY_DYNAMIC`、`自动化测试 AUTO_TEST`、`数据库规范 DB_NORM`），开关关闭时标签转灰。
+- 常驻提示：「**停用对在途评估立即生效**：已停用的检查在评估时被忽略且不会补跑；与平台级门禁规则取交集。」
+- 中文名来自页面本地只读映射 `ENV_CHECKS`（机器值是契约）；不复制枚举，服务端新增检查项不会让页面报错。
+
+**超时（分钟）**
+
+- 构建超时：`el-input`（`inputmode="numeric"`）+ 后缀「分钟」，提示「5–240 分钟；BUILD 与 LIB_PUBLISH 的 deadline
+  取自此值，日常构建同用。」；部署超时：同样的输入，提示「1–120 分钟；测试 / 生产 / 日常部署共用，默认 8 分钟。」
+- 客户端先校验（空白/非整数/越界）：直接 `ElMessage.warning`（如「构建超时需为 5–240 之间的整数分钟」），**不发
+  PUT**；服务端 40000 仍是权威校验，错误 toast 用服务端 message。
+
+**批次顺序（仅 UNIT）**
+
+- `el-radio-group` 两个选项：`顺序(FORWARD)`、`逆序(REVERSE)`（Element Plus `label` 传值，仓库统一旧写法）。
+- 提示：「顺序：先低批后高批（默认）。逆序：先高批后低批（**高风险**，保存时二次确认）；只影响新建的生产实例，
+  测试部署不分批，回滚路径不受此项影响。」
+- **二次确认只在把已保存的 `FORWARD` 改成 `REVERSE` 时弹**（`ElMessageBox.confirm`，标题「保存流水线配置」，
+  正文含「逆序批次是高风险：先高批后低批，且只影响此后新建的生产实例；测试部署不分批，回滚路径自带逆序、不受此项
+  影响。」，确认按钮「确认逆序」/取消「取消」）；已是 `REVERSE` 再保存、或改回 `FORWARD` 都不弹。取消即不保存。
+
+**保存与回显**
+
+- `PUT /api/v1/units/{id}/pipeline-config`，四个字段按契约发**字符串**（`String(envChecksEnabled)`、trim 后的分钟
+  字符串、`batchOrder`）；成功后 `fillPipeline(view)` 回填并 `ElMessage.success('流水线配置已保存')`，副标题、状态
+  标签与「最近保存：{user} · {time}」立刻更新；失败 `ElMessage.error` 显示服务端 message。
+- 全量替换：保存时把当前表单四项一起回传；没有「部分保存」。
+
+**LIB 差异**
+
+- `type === 'LIB'` 时**隐藏**环境级检查、部署超时与批次顺序，只留构建超时，并在块内说明「二方库没有 VERIFY 节点与
+  生产部署，环境级检查与批次顺序对它不适用，只保留构建超时（部署超时同样隐藏）。」
+- 由于保存是全量替换，LIB 把未展示的三项按**当前加载值原样回传**，改构建超时不会误改开关/部署超时/批次顺序
+  （探针用 API 实测断言 `env=true/deploy=8/FORWARD` 不变）。
+
+**只读态（无 `setting:manage`）**
+
+- 块自己查一次 `GET /api/v1/me` 判断 `perms.includes('setting:manage')`（与设置页各功能块同款）。
+- 无权限时显示 `restricted`：「需要平台管理员权限」+「流水线配置决定该单元的检查、超时与批次顺序，只有具备
+  `setting:manage` 的账号可以查看和修改；当前账号无权读取该配置。」，不渲染保存按钮/开关/输入/单选，状态标签
+  「只读」，并且**不向 pipeline-config 端点发任何请求**（连 GET 都不发；该端点对无权限是 40009）。
+- 代价：单元详情页多一次 `/me` 请求；`ops-lead` 看不到已存值（只看到原因）。
+
+**API / 类型**
+
+- `web/src/api/index.ts#getPipelineConfig(unitId)` → `GET /api/v1/units/{unitId}/pipeline-config`；
+  `savePipelineConfig(unitId, {envChecksEnabled,buildTimeoutMinutes,deployTimeoutMinutes,batchOrder})` → 同路径 PUT，
+  body 四字段字符串。
+- `web/src/api/types.ts#PipelineConfigView`：`unitId/envChecksEnabled/buildTimeoutMinutes/deployTimeoutMinutes/
+  batchOrder/batchOrderLabel/configured` + 可空 `updatedBy/updatedAt`。
+
+**探针与截图（`scripts/verify-p6c-ui.mjs`）**
+
+- 运行（从仓库根拷到 `%TEMP%\rp-shot-tools` 执行，双主题，Edge + Puppeteer）：
+  `node %TEMP%\rp-shot-tools\verify-p6c-ui.mjs http://127.0.0.1:5173 --shots docs/design/shots`。
+- 覆盖（亮/暗各一遍）：UNIT 默认值/默认态文案/三条检查名 + 机器值/顺序选中/风险提示；范围拒绝（build 4、241，
+  deploy 0、121，API 仍 60/8）；保存回显（15/3、`configured:true`、`updatedBy=dev`、状态「已保存」）；逆序确认
+  （弹框正文含「高风险：先高批后低批」，确认后 API `REVERSE`；改回顺序不再弹）；LIB 差异（无开关/部署输入/批次
+  单选，改 90 后其余三项不变）；只读态（`ops-lead`、无控件、`pipelineRequests=0`）；收尾删行恢复默认；0 console error。
+- 探针输出（最终一次，见任务报告）：
+
+  ```text
+  initial state: rowDeleted=true unit=60/8/FORWARD/on configured=false lib=60/8/FORWARD configured=false
+  p6c-light: unit=60/8/顺序/env=on guards=build4/241,deploy0/121 saved=15/3 reverse=REVERSE->FORWARD lib=build90(hidden ok) restored=60/8/顺序/env=on readonly=yes pipelineRequests=0 errors=0
+  p6c-dark: unit=60/8/顺序/env=on guards=build4/241,deploy0/121 saved=15/3 reverse=REVERSE->FORWARD lib=build90(hidden ok) restored=60/8/顺序/env=on readonly=yes pipelineRequests=0 errors=0
+  restored: rowDeleted=true unit=60/8/FORWARD/env=on configured=false lib=60/8/FORWARD
+  OK all P6-C pipeline-config assertions passed
+  ```
+
+**验收（P6-C）**
+
+- `cd web; npm run build`（`vue-tsc -b && vite build`）通过：`✓ built in 995ms`（exit 0，无新依赖）。
+- 探针双主题 `OK all P6-C pipeline-config assertions passed`，0 console error；两张 1440×900 截图入库。
+- 后端 API 实测（本机 live）：`GET /api/v1/units/2/pipeline-config`（`X-User-Id: dev`）→ `code 0` +
+  `configured:false/60/8/FORWARD/updatedBy:null`；`ops-lead` → `code 40009`；未知单元 → `code 40000`。
+
+**与设计不一致（前端，代码为准）**
+
+1. **超时输入用 `el-input`（`inputmode="numeric"`）而非 `el-input-number`**：沿用 P6-B「锁超时」先例
+   （`el-input-number` 失焦会把 4 自动夹到 5，页面级「范围拒绝」就无法稳定断言）；非法值点保存直接客户端提示、
+   不发 PUT，服务端 40000 兜底。视觉与「锁超时」一致（`分钟` 后缀）。
+2. **只读分支不读取数值**：`GET` 对无 `setting:manage` 返回 **40009**（HTTP 200 信封），不是设置页注释里的 403；
+   因此按设置页模式**无权限就不发请求**，只显示原因。`ops-lead` 看不到已存值；块为此多查一次 `/me`（设计未写）。
+3. **LIB 还隐藏「部署超时」**：设计 §4 只点名隐藏环境检查与批次顺序、只留构建超时；部署超时对库同样不适用
+   （无部署），一并隐藏，块内有一句说明。
+4. **探针用 dev MySQL 删行恢复默认**：接口没有 DELETE，而收尾要求「恢复默认或删除行」；脚本在每次运行前与
+   `finally` 用 `mysql`（`root/root`，`application.yml` 的默认 dev 账号）删 `unit_pipeline_config` 中 2/91001 的行，
+   这样才能稳定断言 `configured:false` 与「当前为默认配置」；mysql 不可用时回退 PUT 默认值并跳过「未保存态」断言。
+5. **`el-radio-button` 用 `label` 传值**：仓库内（设置页/通知页/生产管控）统一旧写法，本块保持一致，不引入 `value`
+   以免风格分裂。
+6. **二次确认只在「FORWARD → REVERSE」弹**：设计只说「逆序二次确认」，没说重复保存；代码只在从非 REVERSE 改为
+   REVERSE 时弹，避免每次保存都打断。
+7. **状态标签、副标题、块内提示文案是实现的补充**：设计只给要点（检查名、风险提示、回显）；具体中文串以代码为准
+   （探针断言了副标题/默认态/只读/回显的关键片段）。
+8. **PageHeader「刷新」也重载配置块**：设计未写刷新行为；`reloadAll` 增加了 `loadPipeline()`。
+9. **中文检查名是本地只读映射**：`ENV_CHECKS` 与 P6-B 的 `GATE_CHECKS` 同款，机器值是契约；`batchOrderLabel` 由
+   服务端给，页面不翻译枚举。
+
+**未做（P6-C 明确不做）**
+
+- **不做节点编排/只读拓扑图**：页面只是一个配置项表单，四节点主干固定（设计 §6；IA #8 的「节点编排」未实现）。
+- **没有删除/「恢复默认」按钮**：恢复默认要手工改回 60/8/顺序/开，或由运维删行（无 DELETE 端点）。
+- **不提供审计查看入口**：保存留痕在全局审计页（`SETTING_UPDATE`）。
+- **不显示历史停用检查行**：验证确认面板负责「已停用」标记，本块只配置。
+- **没有前端单测**：覆盖靠 `scripts/verify-p6c-ui.mjs`；**截图未人眼复核**（文档轮模型无图像输入）。
+- **未在真实 CODING 环境验证**：本块只写配置；「保存后发布生成新实例」的效果由后端测试覆盖，未做端到端发布取证。
