@@ -1245,3 +1245,152 @@ GAP-09 的**安全子集**从「无配置表/端点/页面」变成单元详情�
 - **不显示历史停用检查行**：验证确认面板负责「已停用」标记，本块只配置。
 - **没有前端单测**：覆盖靠 `scripts/verify-p6c-ui.mjs`；**截图未人眼复核**（文档轮模型无图像输入）。
 - **未在真实 CODING 环境验证**：本块只写配置；「保存后发布生成新实例」的效果由后端测试覆盖，未做端到端发布取证。
+
+## 21. P6-D · 紧急放行（2026-11-26）
+
+GAP-11 / J11 的前端是一个**页头红色入口 + 红色确认框 + 常驻红色横幅**，记录页加一枚红色 chip。**不新增路由、
+不新增导航、不新增依赖**：发布内容页 `ReleaseView.vue`、发布记录页 `RecordsView.vue`，复用既有
+`ReasonDialog`（新增可选 `warningType`）与 `AdmissionPanel`（新增 `emergency` prop）。接口与后端口径见技术方案
+§8.16 / §12.2.13。
+
+截图（`git add -f`，全页 1440×2351，两张都是**真实放行后**的状态）：
+
+![紧急放行（浅色）](shots/emergency-light.png)
+![紧急放行（暗色）](shots/emergency-dark.png)
+
+**页头按钮（`ReleaseView.vue`）**
+
+- 位置：`PageHeader` 的第一个按钮（`紧急放行` 之后才是 `停止发布`/`退出流水线`/`刷新`/`进入生产回滚`）；类
+  `.emergency-release`、`type="danger"`，文案固定「紧急放行」。
+- **显示/隐藏**：只有 `GET /me` 返回的 `roles` 含 `ADMIN` 才**渲染**（`v-if="isAdmin"`）；非 ADMIN **不是 disabled**，
+  是整颗按钮不存在（`ops-lead` 的 OPS + OPS_LEAD 也看不到）。页面不查 `control:approve`，与后端「仅 ADMIN 角色」
+  同口径。
+- **禁用规则**（`emergencyBlock` 计算属性，按顺序取第一条；结果非空即禁用，并作为 `title` 说明原因）：
+  1. `正在读取权限`（`/me` 未回）；
+  2. `无法读取当前身份（GET /me）`；
+  3. `正在读取变更项状态`（admission 未回）；
+  4. `无法读取变更项状态（GET admission）`；
+  5. 已放行（`emergencyRelease === 'true'`）→「该发布单已紧急放行；不可撤销，再次发布请走重跑」；
+  6. `itemStatus === 'READY'` →「已经是待执行状态，无需紧急放行」；
+  7. 其它状态 →「当前状态「{中文标签}」不可紧急放行；仅「已提交」「待审批」可用，其它状态请先正常提交或重跑」。
+  可放行时 `title` 是能力说明：「仅管理员：作废待签审批并置为「待执行」；不绕过门禁、镜像与豁免复核」。
+- 因此**不合格状态仍显示按钮**（只是 disabled + 原因），避免「按钮消失 = 没有这个功能」；只有**角色不合格才是隐藏**。
+- `busy`（请求在飞）时也禁用。点击只打开确认框，不发请求。
+
+**确认框（复用 `ReasonDialog`，`warningType="error"`）**
+
+- 标题「紧急放行」；正文：「将紧急放行发布单 {publishNo}：作废审批链上全部待签步骤（留痕「紧急放行：理由」），
+  变更项置为「待执行」。」
+- 红色警示（`el-alert--error`，仅此处传 `error`，停止/退出等既有弹窗仍是黄色 `warning`）：「仅管理员可用且不可撤销：
+  会写红色标识、审计与通知。执行时只跳过审批与封板等待，门禁检查、镜像一致性与豁免有效期仍会复核。」
+- 理由输入：`textarea` 3 行、`maxlength=200` + 字数统计、占位「说明为什么紧急放行，例如：线上支付故障，需立即修复
+  上线」；空/超长时确认按钮禁用（`canConfirm`），底部提示「原因必填，1–200 字，作为操作留痕」。
+- 确认按钮文案「确认紧急放行」、`danger` 态、`busy` 时转圈防重复点击。
+- 成功：`ElMessage.warning('已紧急放行：变更项 {标签}，审批链已作废；执行时门禁、镜像与豁免仍复核')`，关框并刷新；
+  `40001`：提示服务端 message、关框并刷新（状态已变，避免留下可点的旧动作）；其它错误只 toast，框保持打开并保留
+  已输入理由以便重试。
+
+**已放行横幅（`ReleaseView.vue`）**
+
+- `emergencyRelease === 'true'` 时页头下方常驻 `<div class="emergency-banner" role="alert">`：红色徽标「已紧急放行」+
+  三段「理由 / 操作人 / 时间」（时间走 `formatDateTime`，本地时区到分钟）；缺失值显示 `—`。
+- 横幅与按钮并存：按钮此时 disabled（title 说明不可撤销）。执行按钮文案仍是「执行生产发布」，页面不额外拦截——
+  后端只跳过封板等待，镜像/门禁/豁免仍会拒绝，前端不重复判断。
+
+**审批链作废展示（`AdmissionPanel.vue`）**
+
+- 新增 `emergency?: boolean` prop；为真时在生产准入面板顶部渲染红色 `el-alert`（类 `.admission-emergency`）：
+  「审批链已作废：该发布单已由管理员紧急放行，待签步骤不再需要审批；执行时门禁、镜像一致性与豁免有效期仍会复核。」
+- 被作废的步骤由后端给出 `CANCELED`，面板按既有链渲染（每条显示「已取消」+ comment「紧急放行：理由」）；
+  另有封板告警时两条 alert 都显示（封板不阻断的事实不隐藏）。
+- 父组件给 `AdmissionPanel` 的 `:key` 改为 `isEmergency ? 'admission-emergency' : 'admission-normal'`：放行成功后
+  父页面刷新只换 props、不重挂子组件，链会残留 `PENDING`；`key` 变化强制重挂并重新拉 admission（视觉无变化）。
+- 根节点补 `admission-panel` 类，只供探针定位，不影响样式。
+- Element Plus 的 `type="error"` 用自带的 `--el-color-error`（默认 `#f56c6c`），项目 tokens 只有 `--danger`；在两处
+  红色警示上**局部**把 `--el-color-error*` 绑到 `--danger` / `--danger-weak`（`ReasonDialog`、`AdmissionPanel`），
+  不改全局色板，也不影响其它 error alert。
+
+**发布记录页 chip（`RecordsView.vue`）**
+
+- 行内「发布单」列（`min-width` 190→210）在发布单号后追加红色 chip：`status-chip chip-danger emergency-chip`，
+  文案「紧急放行」；`emergencyRelease === 'true'` 才渲染。
+- `el-tooltip` 内容由 `emergencyHint(row)` 拼：「理由：… · 操作人：… · 时间：…」（缺失段跳过；都没有时只显示「紧急放行」）。
+- 不新增独立列（否则整表多一列空值），理由/操作人/时间只在 hover 中出现。
+
+**API / 类型**
+
+- `web/src/api/index.ts#emergencyRelease(publishNo, reason)` → `POST /api/v1/releases/{publishNo}/emergency-release`；
+  `web/src/api/types.ts`：`EmergencyResult{status,itemStatus,emergency:boolean}`（响应的 `emergency` 是 **JSON boolean**）；
+  `ReleaseDetail` / `ReleaseRecordRow` 加**可选**四字段 `emergencyRelease?: string`、`emergencyReason?/emergencyBy?/
+  emergencyAt?: string | null`（旧后端无字段时页面按未放行处理）。
+
+**探针与截图（`scripts/verify-p6d-ui.mjs` + `scripts/demo-emergency.sql`）**
+
+- 运行（从仓库根目录解析 `scripts/demo-emergency.sql` 与 `--shots`；`puppeteer-core` 只在该 scratch 目录可解析，
+  故把脚本拷到 `%TEMP%\rp-shot-tools` 执行）：
+  `node %TEMP%\rp-shot-tools\verify-p6d-ui.mjs http://127.0.0.1:5173 --shots docs/design/shots`。
+- 种子：`PO-DEMO-EMERGENCY`（item 92001 `PENDING_APPROVAL`、两条 `PENDING` 审批、实例 `PAUSED` 在 `PROD_DEPLOY`、
+  镜像 digest 与快照一致），同时幂等创建 `dev`（ADMIN）与 `ops-lead`（OPS + OPS_LEAD，无 ADMIN）；脚本在**运行前、
+  每个主题前、finally 各重播种一次**，并在 finally 断言恢复成 `emergencyRelease=false / itemStatus=PENDING_APPROVAL /
+  chain=PENDING/PENDING`，否则退出码非 0。
+- 覆盖（亮/暗各一遍）：非 ADMIN 无按钮/无横幅/零 POST；ADMIN 按钮存在、可用、`--danger` 背景（light `#d92d20` /
+  dark `#f97066`）、title 含「仅管理员」；确认框标题/红色警示（含「不可撤销」「门禁」）/danger 确认/空理由禁用/
+  输入后启用；**真实 POST 一次**（toast、横幅含理由/`dev`/时间、按钮转 disabled、准入面板「审批链已作废」+ 两步
+  `CANCELED` + comment 含理由、执行按钮仍为「执行生产发布」）；API + MySQL 回读（详情四字段、`itemStatus=READY`、
+  `orderStatus=READY`、`release_order.emergency_release=1`、历史 1 行、`CANCELED` 2 行）；`READY` 单按钮 disabled +
+  title「已经是待执行状态」；记录页 chip 颜色 = `--danger`、hover 出现含理由与操作人的 tooltip；0 console error。
+- 探针输出（最终一次，见任务报告）：
+
+  ```text
+  seed: PO-DEMO-EMERGENCY reset to PENDING_APPROVAL
+  initial state: itemStatus=PENDING_APPROVAL chain=PENDING/PENDING emergencyRelease=false
+  p6d-light: readonlyHidden=true doorDanger=rgb(217, 45, 32) posts=1 dialogRed=true item=READY chain=CANCELED/CANCELED canceled=2 history=1 readyDoorDisabled=true chip=rgb(217, 45, 32) tooltip=yes frame=157..2116 of 2351 errors=0
+  p6d-dark: readonlyHidden=true doorDanger=rgb(249, 112, 102) posts=1 dialogRed=true item=READY chain=CANCELED/CANCELED canceled=2 history=1 readyDoorDisabled=true chip=rgb(249, 112, 102) tooltip=yes frame=157..2116 of 2351 errors=0
+  restored: emergencyRelease=false itemStatus=PENDING_APPROVAL chain=PENDING/PENDING
+  OK all P6-D emergency-release assertions passed
+  ```
+
+**截图口径：为什么是全页 1440×2351（不是既有 1440×900）**
+
+- 页头红色横幅在页面顶部（探针实测横幅顶 `y≈157`），被作废的审批链在生产节点面板里（面板底 `y≈2116`）；1440×900
+  的视口截图无法同时呈现「红色横幅 + 审批链已作废 + 两条已取消」，而这张图要证明的正是「放行后页面处处留痕」。
+- 因此用 `page.screenshot({fullPage:true})`：宽度仍是 1440，高度取整页滚动高度 2351，`frame=157..2116 of 2351`
+  就是探针实测的横幅顶 / 面板底 / 整页高。代价是与既有各切片 900 高的截图不统一；若要统一，需改裁切或滚动拼接。
+
+**验收（P6-D）**
+
+- `cd web; npm run build`（`vue-tsc -b && vite build`）通过：1675 modules，`built in 1.01s`（exit 0，无新依赖；
+  Task 2 报告的结果，lead 又独立重跑一遍亦绿，`web/dist` 产物时间 02:34:38）。
+- 探针双主题 `OK all P6-D emergency-release assertions passed`，0 console error；两张全页截图入库（1440×2351）。
+- 真实放行两次（每主题一次）后数据库已由脚本重播种：`PO-DEMO-EMERGENCY` 回到 `PENDING_APPROVAL` /
+  `emergencyRelease=false` / 两条 `PENDING` 审批 / 0 条历史；admission 与 detail 两侧都断言过。
+
+**与设计不一致（前端，代码为准）**
+
+1. **截图是全页 1440×2351，不是既有 1440×900**：设计只要求「亮/暗双主题截图」，没规定尺寸；为让横幅与作废审批链
+   同图可见，改用全页截图（原因见上）。
+2. **复用 `ReasonDialog` 并新增 `warningType`，不是新建组件**：设计只写「确认框含红色警示」；为了不复制一套确认框，
+   给共享组件加可选 `warningType: 'warning' | 'error'`（默认 `warning`），停止/退出/归档/关闭的黄色警示与其截图不变。
+3. **红色来自 `--danger`，但 Element Plus 用自己的 `--el-color-error`**：项目 tokens 没有 `--el-color-error`，若直接用
+   `type="error"` 会得到 Element 的 `#f56c6c`，与 `--danger`（light `#d92d20` / dark `#f97066`）不一致；因此在两处红色
+   警示上**局部**把 `--el-color-error*` 绑到 `--danger`/`--danger-weak`，不新增色板、不改全局。
+4. **不合格状态是「显示但禁用」，不是隐藏**：设计只说「仅 ADMIN 显示」，代码把「角色不合格」（隐藏）与「状态不合格」
+   （disabled + title 原因）分开；后者仍在页头，避免被读成功能缺失。
+5. **已放行后按钮不消失、改为 disabled**：设计只说「已放行时显示横幅」；代码保留按钮并用 title 说明「不可撤销，再次
+   发布请走重跑」，与横幅并存。
+6. **记录页 chip 在「发布单」列内，不是新增一列**：设计只说「行内红色 chip」；实现挂在发布单号后（列宽 190→210），
+   理由/操作人/时间只在 hover tooltip。
+7. **准入面板用 `:key` 重挂才刷新审批链**：设计未写刷新机制；父页面 `load(true)` 只换 props，子面板不会重新拉
+   admission，故用 `key` 强制重挂（`admission-emergency`/`admission-normal`），视觉无变化。
+8. **`AdmissionPanel` 根节点加 `admission-panel` 类**：设计未写；只为探针定位（既有类 `admission` 保留）。
+9. **横幅时间是本地时区到分钟**：`formatDateTime`（与全站一致），不是 ISO-8601 原文；详情接口给的仍是 ISO-8601。
+
+**未做（P6-D 前端明确不做）**
+
+- **没有「撤销紧急放行」入口**：无接口、无按钮，横幅永久保留（设计 §6）；再次发布走重跑。
+- **不展示历史表**：记录页/详情只显示订单列上的最近一次；`emergency_release` 历史无读接口，页面不显示「第几次」。
+- **不额外拦截执行**：已放行页面的「执行生产发布」仍可点，镜像/门禁/豁免由后端拒绝并回显 message；前端不预判。
+- **没有前端单测、截图未人眼复核**：覆盖靠 `scripts/verify-p6d-ui.mjs` 的双主题 DOM 断言；模板轮文档模型无图像输入，
+  未人工看图（尺寸 1440×2351 由文件读取核实）。
+- **只验证 demo 单**：探针只对 `PO-DEMO-EMERGENCY` 真实放行，未在其它真实发布单上跑「放行 → 执行 → 观察批次」；
+  执行侧由后端 5 个测试覆盖。

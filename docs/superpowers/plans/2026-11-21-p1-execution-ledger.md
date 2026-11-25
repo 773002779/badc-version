@@ -572,3 +572,84 @@ Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有�
   联调前需重新保存审批人或种回角色行。PUT 还会把 `updatedBy/updatedAt` 写成 `dev` + 本次时间，配置值虽恢复默认，
   元数据无法通过 API 还原为 `null`。前端**无单测**、截图未人眼复核；没有「改配置 → 真发布 → 观察新实例」的端到端
   取证，效果由 17 个后端测试（真实 DB + stub 引擎）覆盖。`9a13915` / `5827141`
+
+## R111+（P6-D 紧急放行，2026-11-26）
+
+> **编号说明**：正式台账此前停在 R110（P6-B 补写）。P6-D 的代码先于文档合并、在本次收口，按「接续最大编号」从
+> **R111** 起，不改写 R80–R110，也不改动 P6-A/B/C 的三节正文（技术方案 §8.13–§8.15、§12.2.10–§12.2.12，
+> 前端设计 §18–§20）。
+>
+> **来源**：契约与计划为 `docs/superpowers/{specs,plans}/2026-11-26-p6d-emergency-release*.md`（`ad5fb97`）；代码以
+> `10b9d6d`（后端 23 文件，+2145/−19，全量 964 绿 = 基线 937 + 27）与 `7b44de2`（前端/脚本/截图 10 文件，971 插入；
+> `npm run build` 绿、`verify-p6d-ui.mjs` 双主题真实放行通过并重播种恢复）为准；任务报告在
+> `.superpowers/sdd/p6d-emergency/{task-1-report.md,task-2-report.md}`（`.gitignore` 的 `.superpowers/` 下，未进提交），
+> 进度见同目录 `progress.md`。lead 复核：964 绿（本轮按 surefire 报告逐类累计：100 个当前测试类、
+> 0 失败/0 错误/0 跳过；目录里另有两条 2026-11-22 的陈旧报告，累加会得到 974，**不计**）、独立 `npm run build` 绿
+> （`web/dist` 产物时间 2026-11-26 02:34:38）、探针输出见前端设计 §21 与技术方案 §12.2.13、dev 库已恢复
+> `PO-DEMO-EMERGENCY` 为 `PENDING_APPROVAL`/0 历史。
+
+- Ruling R111: 模型是 **`release_order` 四列 + `emergency_release` 历史表（V32）**：订单列
+  `emergency_release TINYINT NOT NULL DEFAULT 0`/`emergency_reason VARCHAR(512)`/`emergency_by VARCHAR(32)`/
+  `emergency_at DATETIME(3)` 是**读标记**（详情/记录不出新 join，直接在既有 `release_order` 关联上加四列），历史表
+  `(id, order_id, publish_no, reason, actor, created_at, KEY(order_id, created_at))` 是**每次一行**的 append-only
+  证据（`EmergencyReleaseMapper` 只有 `INSERT`）。四列**永不清除**、**没有撤销端点**；重跑后再次放行追加第二行历史，
+  订单列保留最近一次。历史表**没有读接口**（设计未要求；探针直接读 MySQL）。`10b9d6d`
+- Ruling R112: 权限是**平台角色 `ADMIN`**，不是权限点：`EmergencyReleaseService#requireAdmin` 用
+  `UserContext.current().hasRole(Roles.ADMIN)`，`EmergencyReleaseController` **无** `@RequirePerm`、无 `@DataScope`
+  （端点因此不是 `ReleaseController` 的新方法，而是独立控制器）；非 ADMIN 在**读单号之前** 40009（payload
+  `roles`），持 `control:approve` 的 `OPS_LEAD` 同样被拒；未登录由拦截器 40009。服务**不做数据范围校验**：ADMIN 在
+  `JdbcAuthProvider` 中即 allUnits，设计未要求 SCOPE；将来若允许「受限 ADMIN」需补 `ScopeGuard`。`10b9d6d`
+- Ruling R113: 状态矩阵**只判变更项状态**（`AdmissionService.statusOf(item)`，外层预检 + 事务内重读；`release_order.status`
+  不参与，只被镜像）：`PENDING_APPROVAL → APPROVE_ALL → READY`、`SUBMITTED → NO_APPROVAL → READY`；`READY`（专用文案
+  「发布单已经是待执行状态（READY），无需紧急放行」）与**其它全部状态**（含 `GATE_PENDING/GATE_FAILED/FAILED/REJECTED/
+  DONE/TESTING/BUILDING/PENDING/PROD_DEPLOYING/CLOSED/TERMINATED/ROLLED_BACK`）都是 40001，payload
+  `{publishNo, itemId, currentStatus}`；成功后重复调用 40001；单号不存在/变更项缺失 40000。一个事务内顺序：
+  `selectByIdForUpdate`（订单行）→ 重读变更项 → 作废审批 → `ItemTransitions.apply`（`row_version` CAS）→ 订单镜像
+  `READY` + 四列（`row_version` CAS）→ 追加历史；订单 CAS 失手 → 40001 且整事务回滚。`10b9d6d`
+- Ruling R114: **审批作废复用 P5-B 的 `ApprovalService#cancelPendingOfLatestSnapshot`**，不走新路径：最新快照链上所有
+  `PENDING` 步骤 → `CANCELED`、`decided_by=NULL`、`decided_at=now`、comment「紧急放行：<reason>」（全角冒号）；
+  已决策步骤不动；无快照或没有待签返回 **0**（不是错误）。同一把订单行锁保证签名与放行不交错。`10b9d6d`
+- Ruling R115: **封板跳过必须改两处**（设计只点名了 `ProductionBoundaryProbeService`）：执行入口
+  `ReviewService#reviewOf`（`ExecuteProdService` 的 40002 来源）只把封板从 `reasons`/`blocked` 中移除，批次边界
+  `ProductionBoundaryProbeService#blockedReason`（`ProdDeployNodeHandler` 的暂停原因）跳过 `FreezeService#active`；
+  两处都以 `order.emergency_release != 0` 判定。**只跳过封板等待**：`frozen`/`freezeIds` 仍如实上报（页面同时显示
+  封板告警与「审批链已作废」）；镜像 digest 不一致仍 40007、豁免过期仍 40002、门禁 `INVALID`/不可豁免 `BLOCK`
+  仍暂停、状态机与审批照旧；窗口不重算（J5）。连带效果：`ExecuteProdService` 的「快照后新封板把 READY 拉回
+  `PENDING_APPROVAL`」分支对紧急单不触发。只改 probe 会让 J11 在冻结期不可用。`10b9d6d`
+- Ruling R116: 理由校验**分两层、web 在前**：请求体复用 `ControlDtos.ReasonRequest`（`@NotBlank` +
+  `@Size(max=200)`），空/超长在进入 controller 前被 `GlobalExceptionHandler` 拒成 **40000**（message「参数不合法」、
+  `data.reason` 为校验文案）；服务层再 trim、按 `MAX_REASON_LENGTH=200` 兜底（「紧急放行理由不能为空」/
+  「紧急放行理由不能超过 200」）。因此**非 ADMIN + 非法 body 返回 40000 而不是 40009**；长度按原始字符串（trim
+  之前）算，`"  "` 由 `@NotBlank` 拦、`" x "` 放行后 trim 落库。`10b9d6d`
+- Ruling R117: **响应与读模型的类型不同**：`POST` 响应 `EmergencyResponse{status,itemStatus,emergency}` 的
+  `emergency` 是 **JSON boolean `true`**（`EmergencyResult`/`EmergencyResponse` 字段都是 `boolean`），
+  `status`/`itemStatus` 是字符串 `READY`（服务返回常量，不回读）；详情/记录四字段**都是字符串**——
+  `emergencyRelease` 恒 `"true"`/`"false"`（列默认 0 与 pre-V32 `null` 都算 `"false"`；`emergencyFlagOf`），
+  `emergencyReason`/`emergencyBy` 原文，`emergencyAt` 是 `Instant.toString()` 的 ISO-8601；未放过行后三者
+  `null`。`ReleaseQueryMapper`/`ReleaseRecordsMapper` 各加四列，**无新 join、无 N+1**。`10b9d6d`
+- Ruling R118: **审计与通知在事务提交后写、失败不回流**：`AuditAction.EMERGENCY_RELEASE("紧急放行", ORDER, false)`
+  写**一行**（object_id=object_label=publishNo、reason=理由、summary「紧急放行：发布单 X（变更项 CRID）」、
+  `before_json={itemStatus, emergencyRelease:false}`、`after_json` 7 键含 `approvalsCancelled`、
+  `scope_unit_id`/`scope_subsystem_id` 取变更项与其单元）；`NotificationEventKey.EMERGENCY_RELEASE("紧急放行", ORDER)`
+  发给 `NotificationAudiences.taskMembers(orderId, {OPS, DEV})` = 任务 OPS/DEV 成员 + 创建人（`TreeSet` 去重，
+  同一人一行，可能 0 行），dedupe key `emergency:<orderId>:<epochMilli>`，body 写明「待签审批已作废，封板等待已跳过；
+  镜像/门禁/豁免复核仍照常执行」「不可撤销」。两者沿用 `REQUIRES_NEW` + 吞异常（P4-B/P4-C 口径），
+  审计表/通知表故障时放行仍成功（各有测试）。设计 §1 的「复核结果仍写审计」**未实现**（`ReviewService` 只读，
+  执行只多 `EXECUTE_PROD` 一行）。`10b9d6d`
+- Ruling R119: 前端口径：发布页 `PageHeader` 第一颗按钮 `.emergency-release`（`type="danger"`）**只对 `/me` 的
+  `roles` 含 `ADMIN` 渲染**，非 ADMIN 连按钮都不存在（`ops-lead` 验证）；**状态不合格是 disabled + title 原因**
+  （顺序：`/me` 未回 → 身份失败 → admission 未回 → admission 失败 → 已放行 → READY → 其它状态），可放行时 title
+  是能力说明；确认框复用 `ReasonDialog` 并新增可选 `warningType: 'warning'|'error'`（只有紧急放行传 `error`，
+  停止/退出/归档/关闭仍是黄色），空理由/超长禁用确认，`40001` 关框并刷新、其它错误保留输入；已放行时页头
+  `.emergency-banner`（理由/操作人/时间）+ 准入面板 `emergency` prop 的「审批链已作废」红色 alert + 步骤 `CANCELED`；
+  父组件用 `:key="isEmergency ? 'admission-emergency' : 'admission-normal'"` 重挂面板以重拉 admission；记录页在
+  「发布单」列（190→210）加 `chip-danger emergency-chip` + hover tooltip（理由/操作人/时间）。红色全部来自既有
+  `--danger`/`--danger-weak`：`ReasonDialog`/`AdmissionPanel` 把 Element Plus 的 `--el-color-error*` **局部**绑到
+  `--danger`，不改全局色板。**截图是全页 1440×2351**（横幅 y≈157、作废链 y≈1572–2116，900 高视口无法同图呈现）。`7b44de2`
+- Ruling R120: 证据口径与坑：探针 `verify-p6d-ui.mjs` 依赖 **dev MySQL 客户端**重播种 `scripts/demo-emergency.sql`
+  （`root/root`、幂等、每次运行前/每主题前/finally 各一次），必须从仓库根目录运行（`--shots` 与 SQL 路径都相对
+  CWD），且 `puppeteer-core` 只在 scratch 目录可解析（拷到 `%TEMP%\rp-shot-tools` 执行）；脚本对 demo 单
+  `PO-DEMO-EMERGENCY` **真实放行两次**（每主题一次），结束时断言恢复 `emergencyRelease=false /
+  itemStatus=PENDING_APPROVAL / chain=PENDING/PENDING`（否则退出码非 0），历史行随重播种清除、审计/通知行保留为证据。
+  前端**无单测**、截图未人眼复核（本轮文档模型无图像输入，只核实文件尺寸 1440×2351）；执行侧只在真实 DB + stub
+  引擎上验证，没有真实 CODING 租户端到端。`7b44de2` / `10b9d6d`
