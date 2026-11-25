@@ -86,7 +86,9 @@ public final class GateDtos {
             check.deadlineAt(),
             check.passed(),
             check.blocking(),
-            check.waiverHint());
+            check.waiverHint(),
+            check.disabled(),
+            check.disabledLabel());
     }
 
     private static WaiverViewView waiverOf(WaiverView waiver) {
@@ -157,7 +159,11 @@ public final class GateDtos {
         Instant deadlineAt,
         boolean passed,
         boolean blocking,
-        String waiverHint) {
+        String waiverHint,
+        /** The check is turned off by the platform gate settings (P6-B §2.1). */
+        boolean disabled,
+        /** {@code "已停用"} for a disabled check, otherwise {@code null}. */
+        String disabledLabel) {
     }
 
     /** The item's waiver (only the newest one), including whether it still counts. */

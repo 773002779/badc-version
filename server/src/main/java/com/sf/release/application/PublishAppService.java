@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.sf.release.application.audit.AuditCommand;
 import com.sf.release.application.audit.AuditService;
+import com.sf.release.application.settings.SettingsService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.domain.audit.AuditAction;
@@ -131,6 +132,7 @@ public class PublishAppService {
     private final GitCommitProbe commitProbe;
     private final PipelineOrchestrator orchestrator;
     private final AuditService audit;
+    private final SettingsService settings;
     private final TransactionTemplate transactionTemplate;
 
     /**
@@ -153,6 +155,7 @@ public class PublishAppService {
                              GitCommitProbe commitProbe,
                              PipelineOrchestrator orchestrator,
                              AuditService audit,
+                             SettingsService settings,
                              @Value("${release.pipeline.auto-start:true}") boolean autoStart,
                              PlatformTransactionManager transactionManager) {
         this.itemMapper = itemMapper;
@@ -168,6 +171,7 @@ public class PublishAppService {
         this.commitProbe = commitProbe;
         this.orchestrator = orchestrator;
         this.audit = audit;
+        this.settings = settings;
         this.autoStart = autoStart;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -336,7 +340,7 @@ public class PublishAppService {
                                                String baseCommit) {
         PublishStart start = beginPublish(itemId, baseCommit);
         PipelineInstance instance = PipelineFactory.createOnline(start.order(), start.item(),
-            envDes);
+            envDes, settings.enabledChecks());
         long instanceId = persistInstance(instance, unitId, itemId);
         log.info("release published: itemId={}, unitId={}, publishNo={}, pipelineNo={}",
             itemId, unitId, start.order().publishNo(), instance.pipelineNo());
@@ -438,7 +442,7 @@ public class PublishAppService {
                                                 PipelineInstance previous) {
         List<EnvDe> envDes = loadEnvDes(unitId);
         PipelineInstance instance = PipelineFactory.createRerun(order, item, envDes,
-            triggerType, fromNode, imageDigest, commitSha, previous);
+            triggerType, fromNode, imageDigest, commitSha, previous, settings.enabledChecks());
         long instanceId = persistInstance(instance, unitId, item.id());
         log.info("rerun pipeline created: itemId={}, unitId={}, publishNo={}, pipelineNo={},"
                 + " triggerType={}, fromNode={}, imageDigest={}",

@@ -3,6 +3,7 @@ package com.sf.release.application;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.sf.release.application.audit.AuditCommand;
 import com.sf.release.application.audit.AuditService;
+import com.sf.release.application.settings.SettingsService;
 import com.sf.release.common.BizError;
 import com.sf.release.common.BizException;
 import com.sf.release.domain.audit.AuditAction;
@@ -32,6 +33,7 @@ import com.sf.release.infra.repo.po.ReleaseItemPO;
 import com.sf.release.infra.repo.po.ReleaseOrderPO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -39,6 +41,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -85,8 +89,39 @@ public class GateCheckService {
     private final ReleaseOrderMapper orderMapper;
     private final PipelineRepository repository;
     private final AuditService audit;
+    /** Gate switches; {@code null} in the legacy constructor means "every check enabled". */
+    private final SettingsService settings;
     private final TransactionTemplate transactionTemplate;
 
+    /**
+     * Production constructor: the gate switches are read on every trigger/evaluation, so disabling
+     * a check stops new trigger rows on the very next round (P6-B design §2.1).
+     */
+    @Autowired
+    public GateCheckService(CicdEngine engine,
+                            GateCheckMapper checkMapper,
+                            NodeTaskMapper taskMapper,
+                            ReleaseItemMapper itemMapper,
+                            ReleaseOrderMapper orderMapper,
+                            PipelineRepository repository,
+                            AuditService audit,
+                            PlatformTransactionManager transactionManager,
+                            SettingsService settings) {
+        this.engine = Objects.requireNonNull(engine, "engine must not be null");
+        this.checkMapper = Objects.requireNonNull(checkMapper, "checkMapper must not be null");
+        this.taskMapper = Objects.requireNonNull(taskMapper, "taskMapper must not be null");
+        this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper must not be null");
+        this.orderMapper = Objects.requireNonNull(orderMapper, "orderMapper must not be null");
+        this.repository = Objects.requireNonNull(repository, "repository must not be null");
+        this.audit = Objects.requireNonNull(audit, "audit must not be null");
+        this.settings = settings;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
+    }
+
+    /**
+     * Test/legacy constructor without the settings seam: every check is treated as enabled, which
+     * is exactly the pre-P6-B behaviour the tests that build this service by hand expect.
+     */
     public GateCheckService(CicdEngine engine,
                             GateCheckMapper checkMapper,
                             NodeTaskMapper taskMapper,
@@ -95,14 +130,22 @@ public class GateCheckService {
                             PipelineRepository repository,
                             AuditService audit,
                             PlatformTransactionManager transactionManager) {
-        this.engine = Objects.requireNonNull(engine, "engine must not be null");
-        this.checkMapper = Objects.requireNonNull(checkMapper, "checkMapper must not be null");
-        this.taskMapper = Objects.requireNonNull(taskMapper, "taskMapper must not be null");
-        this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper must not be null");
-        this.orderMapper = Objects.requireNonNull(orderMapper, "orderMapper must not be null");
-        this.repository = Objects.requireNonNull(repository, "repository must not be null");
-        this.audit = Objects.requireNonNull(audit, "audit must not be null");
-        this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this(engine, checkMapper, taskMapper, itemMapper, orderMapper, repository, audit,
+            transactionManager, null);
+    }
+
+    // ------------------------------------------------------------------ gate switches
+
+    /**
+     * The enabled check types read from the platform settings on every call (no cache: a save must
+     * be effective on the next trigger/evaluation). A read failure is handled by the settings
+     * service, which falls back to "all checks enabled".
+     */
+    public Set<CheckType> enabledChecks() {
+        if (settings == null) {
+            return Collections.unmodifiableSet(EnumSet.allOf(CheckType.class));
+        }
+        return settings.enabledChecks();
     }
 
     /**
@@ -112,12 +155,17 @@ public class GateCheckService {
      * (a from-node rerun reuses it), environment-level results are bound to the deployment, so a
      * result recorded by a <em>different</em> instance is re-run.
      *
+     * <p><strong>Disabled checks are skipped.</strong> The platform's gate switches decide which
+     * checks a new run should start (P6-B design §2.1); historical rows of a disabled check stay in
+     * the table but are ignored by the gate, so no new row is created for them.
+     *
      * @return the number of checks actually triggered
      */
     public int startChecks(PipelineInstance instance) {
         if (instance == null || instance.id() == null) {
             return 0;
         }
+        Set<CheckType> enabled = enabledChecks();
         CheckContext context = contextOf(instance);
         if (context.missingObject() != null) {
             // Never start a check without the object it must scan: an empty scan would either fail
@@ -125,12 +173,17 @@ public class GateCheckService {
             String reason = "STATE_NOT_ALLOWED: 检查缺少扫描对象（" + context.missingObject() + "）";
             log.warn("gate checks not started: instanceId={}, reason={}", instance.id(), reason);
             for (CheckType type : CheckType.values()) {
-                upsertUnknown(instance, type, context, reason);
+                if (enabled.contains(type)) {
+                    upsertUnknown(instance, type, context, reason);
+                }
             }
             return 0;
         }
         int started = 0;
         for (CheckType type : CheckType.values()) {
+            if (!enabled.contains(type)) {
+                continue;
+            }
             GateCheck existing = find(context.itemId(), type);
             if (!needsStart(existing, instance, type)) {
                 continue;
@@ -138,8 +191,8 @@ public class GateCheckService {
             start(instance, type, context, existing);
             started++;
         }
-        log.info("gate checks started: instanceId={}, itemId={}, started={}",
-            instance.id(), context.itemId(), started);
+        log.info("gate checks started: instanceId={}, itemId={}, started={}, enabled={}",
+            instance.id(), context.itemId(), started, enabled);
         return started;
     }
 

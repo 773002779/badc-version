@@ -82,9 +82,12 @@ public final class LibSecurityNodeHandler implements NodeHandler {
         for (GateCheck check : checkService.checks(itemId)) {
             existing.add(check.checkType());
         }
+        // The platform gate switches apply to the library path too: a disabled artifact check is
+        // not triggered (P6-B design §2.1/§5.2). The gate's completeness guard ignores it as well.
+        Set<CheckType> enabled = checkService.enabledChecks();
         int started = 0;
         for (CheckType type : CheckType.libSecurityChecks()) {
-            if (existing.contains(type)) {
+            if (!enabled.contains(type) || existing.contains(type)) {
                 continue;
             }
             // The existing gate refresh path: it records/restarts the row and triggers the
@@ -92,8 +95,8 @@ public final class LibSecurityNodeHandler implements NodeHandler {
             checkService.refresh(itemId, type.name(), current.id());
             started++;
         }
-        log.info("library security node started: instanceId={}, itemId={}, checksStarted={}",
-            current.id(), itemId, started);
+        log.info("library security node started: instanceId={}, itemId={}, checksStarted={},"
+                + " enabled={}", current.id(), itemId, started, enabled);
     }
 
     /** The node may complete when the three checks passed or are covered by a valid waiver. */

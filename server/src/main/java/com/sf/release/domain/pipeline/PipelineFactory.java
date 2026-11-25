@@ -29,8 +29,9 @@ import java.util.UUID;
  * <ol>
  *   <li>{@code BUILD}: {@code CODE_CHECK → PKG_BUILD → IMG_BUILD};</li>
  *   <li>{@code TEST_DEPLOY}: one {@code DEPLOY} per TEST DE, no batch (batch 0);</li>
- *   <li>{@code VERIFY}: one {@code CHECK} per {@link CheckType} — the seven plan check types,
- *       because there is no check-catalogue table yet; {@code targetId} is the check-type code;</li>
+ *   <li>{@code VERIFY}: one {@code CHECK} per enabled {@link CheckType} — by default the seven
+ *       plan check types — because there is no check-catalogue table yet; {@code targetId} is the
+ *       check-type code (P6-B §2.1: a disabled check produces no task);</li>
  *   <li>{@code PROD_DEPLOY}: one {@code DEPLOY} per PROD/DR/BLUE DE, carrying the DE's
  *       {@code deploy_batch_no}; tasks and DEs are ordered by batch then id so the serial
  *       deployment is deterministic (C14).</li>
@@ -53,9 +54,30 @@ public final class PipelineFactory {
     /**
      * Pre-generates an online instance for {@code order}. The instance is not persisted and
      * has no database ids yet; its {@code nodes} carry the tasks of every node.
+     *
+     * <p>This overload keeps the original contract (every {@link CheckType} enabled) for callers
+     * that have no settings context; the publish use case passes the platform's enabled set to
+     * {@link #createOnline(ReleaseOrder, ReleaseItem, List, Set)}.
      */
     public static PipelineInstance createOnline(ReleaseOrder order, ReleaseItem item,
                                                 List<EnvDe> envDes) {
+        return createOnline(order, item, envDes, Set.of(CheckType.values()));
+    }
+
+    /**
+     * Pre-generates an online instance whose {@code VERIFY} node carries one {@code CHECK} task per
+     * <em>enabled</em> check type (P6-B design §2.1).
+     *
+     * <p>A disabled check produces no new task: the switch is a configuration of what a new
+     * pipeline should run, not a deletion of history. Existing instances keep their rows; the gate
+     * ignores the rows of a disabled check when it evaluates (see {@code GateService}).
+     *
+     * @param enabledChecks the enabled check types; {@code null} means "all", an empty set is a
+     *                      programming error because the settings service refuses to save zero
+     *                      checks (the design routes "run nothing" through the explicit waiver path)
+     */
+    public static PipelineInstance createOnline(ReleaseOrder order, ReleaseItem item,
+                                                List<EnvDe> envDes, Set<CheckType> enabledChecks) {
         Objects.requireNonNull(order, "order must not be null");
         Objects.requireNonNull(item, "item must not be null");
         if (item.type() != UnitType.UNIT) {
@@ -63,6 +85,12 @@ public final class PipelineFactory {
             // keeps the online factory from silently building the wrong pipeline.
             throw new IllegalArgumentException(
                 "the online pipeline requires a UNIT item, got " + item.type());
+        }
+        Set<CheckType> enabled = enabledChecks == null
+            ? Set.of(CheckType.values()) : Set.copyOf(enabledChecks);
+        if (enabled.isEmpty()) {
+            throw new IllegalArgumentException(
+                "the online pipeline requires at least one enabled check type");
         }
         List<EnvDe> des = envDes == null ? List.of() : List.copyOf(envDes);
 
@@ -93,8 +121,11 @@ public final class PipelineFactory {
         }
         nodes.add(PipelineNode.pending(NodeType.TEST_DEPLOY, 1, testTasks));
 
-        List<NodeTask> checkTasks = new ArrayList<>(CheckType.values().length);
+        List<NodeTask> checkTasks = new ArrayList<>(enabled.size());
         for (CheckType checkType : CheckType.values()) {
+            if (!enabled.contains(checkType)) {
+                continue;
+            }
             checkTasks.add(NodeTask.pending(NodeType.VERIFY, TaskType.CHECK, NO_BATCH,
                 checkType.code()));
         }
@@ -179,8 +210,22 @@ public final class PipelineFactory {
                                                List<EnvDe> envDes, TriggerType triggerType,
                                                NodeType fromNode, String imageDigest,
                                                String commitSha, PipelineInstance previous) {
+        return createRerun(order, item, envDes, triggerType, fromNode, imageDigest, commitSha,
+            previous, null);
+    }
+
+    /**
+     * The enabled-check-aware rerun (P6-B design §2.1): a rerun is a new instance, so it carries
+     * only the currently enabled {@code CHECK} tasks. The previous execution's completed batches
+     * are still carried over unchanged.
+     */
+    public static PipelineInstance createRerun(ReleaseOrder order, ReleaseItem item,
+                                               List<EnvDe> envDes, TriggerType triggerType,
+                                               NodeType fromNode, String imageDigest,
+                                               String commitSha, PipelineInstance previous,
+                                               Set<CheckType> enabledChecks) {
         Objects.requireNonNull(fromNode, "fromNode must not be null");
-        PipelineInstance base = createOnline(order, item, envDes);
+        PipelineInstance base = createOnline(order, item, envDes, enabledChecks);
         PipelineNode start = base.node(fromNode);
         if (start == null) {
             throw new IllegalArgumentException(

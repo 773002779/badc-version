@@ -3,6 +3,7 @@ package com.sf.release.infra.job;
 import com.sf.release.application.notification.NotificationAudiences;
 import com.sf.release.application.notification.NotificationCommand;
 import com.sf.release.application.notification.NotificationService;
+import com.sf.release.application.settings.SettingsService;
 import com.sf.release.domain.notification.NotificationEventKey;
 import com.sf.release.domain.pipeline.port.UnitLease;
 import com.sf.release.infra.repo.DeployUnitLockMapper;
@@ -31,7 +32,10 @@ import java.util.List;
  * <p><strong>An abandoned pause stops being renewed.</strong> Renewing a {@code PAUSED} row
  * unconditionally would hold the unit forever (independent review I3): a rejected release nobody
  * resubmits, or a pause nobody resumes, has no close/force-release API in this phase. The job
- * therefore stops extending a pause older than {@link #maxPaused} (configurable, 7 days by default);
+ * therefore stops extending a pause older than the bound of the round: the platform LOCK setting
+ * ({@code pauseBoundHours}), falling back to {@link #maxPaused} (the deployment's
+ * {@code release.unit-lease.max-paused-hours}, seven days by default) when the row cannot be read.
+ * The setting is re-read every round, so a save is effective on the next renewal (P6-B design §2.3);
  * its four-hour lease then expires and the next publish may reclaim the unit. A pause recorded
  * before V24 has no {@code paused_at} and keeps the previous unbounded behaviour; the first pause
  * after the migration records the value, so the bound applies from then on. A resumed instance is
@@ -55,7 +59,10 @@ public class UnitLeaseRenewJob {
     private final DeployUnitLockMapper lockMapper;
     private final UnitLease unitLease;
     private final NotificationService notifications;
+    /** The deployment's bound; also the fallback when the settings row cannot be read. */
     private final Duration maxPaused;
+    /** The platform LOCK setting, read on every round; {@code null} keeps the constructor bound. */
+    private final SettingsService settings;
 
     /** Test/legacy constructor: no notification subsystem (the lease logic stays unchanged). */
     public UnitLeaseRenewJob(DeployUnitLockMapper lockMapper, UnitLease unitLease) {
@@ -72,14 +79,27 @@ public class UnitLeaseRenewJob {
     }
 
     /**
-     * The production constructor: the same renewal rules, plus the {@code LOCK_TIMEOUT_RELEASED}
-     * notification when a pause crosses the bound (P4-B notification design section 3/4.4).
+     * The pre-P6-B production constructor: the bound comes from
+     * {@code release.unit-lease.max-paused-hours} and is not re-read.
      *
      * @param notifications the notification service; {@code null} disables the notification (used by
      *                      the lease tests that construct the job directly)
      */
     public UnitLeaseRenewJob(DeployUnitLockMapper lockMapper, UnitLease unitLease,
                              NotificationService notifications, Duration maxPaused) {
+        this(lockMapper, unitLease, notifications, maxPaused, null);
+    }
+
+    /**
+     * The P6-B production constructor (design §2.3): {@code maxPaused} stays the environment
+     * default and {@link SettingsService#pauseBoundHours(int)} is consulted <em>every round</em>.
+     *
+     * @param settings the platform LOCK setting; {@code null} means "use {@code maxPaused} only"
+     *                 (the legacy constructors)
+     */
+    public UnitLeaseRenewJob(DeployUnitLockMapper lockMapper, UnitLease unitLease,
+                             NotificationService notifications, Duration maxPaused,
+                             SettingsService settings) {
         if (maxPaused == null || maxPaused.isNegative() || maxPaused.isZero()) {
             throw new IllegalArgumentException("maxPaused must be a positive duration");
         }
@@ -87,6 +107,7 @@ public class UnitLeaseRenewJob {
         this.unitLease = unitLease;
         this.notifications = notifications;
         this.maxPaused = maxPaused;
+        this.settings = settings;
     }
 
     /** Every 60 seconds: well inside the four-hour lease, so one missed round is not fatal. */
@@ -94,7 +115,11 @@ public class UnitLeaseRenewJob {
     public void renewLeases() {
         try {
             Instant now = Instant.now();
-            Instant cutoff = now.minus(maxPaused);
+            // P6-B design §2.3: the LOCK setting is read every round, so a saved bound is
+            // effective on the next renewal without a restart. A missing/broken row falls back to
+            // the deployment's max-paused-hours (this.maxPaused).
+            Duration bound = pauseBoundForRound();
+            Instant cutoff = now.minus(bound);
             List<LockedInstanceRow> owners = lockMapper.selectLiveOwners(RENEW_LIMIT);
             int renewed = 0;
             int lost = 0;
@@ -105,7 +130,7 @@ public class UnitLeaseRenewJob {
                 }
                 if (isAbandonedPause(owner, cutoff)) {
                     abandoned++;
-                    notifyAbandoned(owner);
+                    notifyAbandoned(owner, bound);
                     continue;
                 }
                 try {
@@ -127,10 +152,31 @@ public class UnitLeaseRenewJob {
             if (abandoned > 0) {
                 log.warn("{} paused instance(s) outlived the {} pause bound and will lose their"
                         + " unit lease: a release paused this long must be re-published; the unit is"
-                        + " reclaimed when the four-hour lease expires", abandoned, maxPaused);
+                        + " reclaimed when the four-hour lease expires", abandoned, bound);
             }
         } catch (RuntimeException ex) {
             log.error("unit lease renew round failed; the next round retries", ex);
+        }
+    }
+
+    /**
+     * The bound this round applies. The platform setting wins; the environment value is both the
+     * fallback when the row cannot be read and the bound for the legacy constructors. The settings
+     * service never throws, but the extra guard keeps one broken settings read from aborting a
+     * whole renewal round (the same rule the round's other failures follow).
+     */
+    private Duration pauseBoundForRound() {
+        if (settings == null) {
+            return maxPaused;
+        }
+        int fallbackHours = (int) Math.max(1L, maxPaused.toHours());
+        try {
+            int hours = settings.pauseBoundHours(fallbackHours);
+            return hours > 0 ? Duration.ofHours(hours) : maxPaused;
+        } catch (RuntimeException ex) {
+            log.warn("LOCK setting could not be read; keeping the configured {} pause bound: {}",
+                maxPaused, ex.getMessage());
+            return maxPaused;
         }
     }
 
@@ -152,13 +198,13 @@ public class UnitLeaseRenewJob {
      * {@code LOCK_TIMEOUT_RELEASED}). The dedupe key uses the instance id, so the notification is
      * written once even though every following round sees the same abandoned pause again.
      */
-    private void notifyAbandoned(LockedInstanceRow owner) {
+    private void notifyAbandoned(LockedInstanceRow owner, Duration bound) {
         if (notifications == null || owner.getUnitId() == null || owner.getInstanceId() == null) {
             return;
         }
         long unitId = owner.getUnitId();
-        String limit = maxPaused.toHours() > 0
-            ? maxPaused.toHours() + " 小时" : maxPaused.toMinutes() + " 分钟";
+        String limit = bound.toHours() > 0
+            ? bound.toHours() + " 小时" : bound.toMinutes() + " 分钟";
         NotificationCommand command = new NotificationCommand(
             NotificationEventKey.LOCK_TIMEOUT_RELEASED,
             String.valueOf(unitId),

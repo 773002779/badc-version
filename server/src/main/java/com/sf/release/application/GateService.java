@@ -53,6 +53,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * The gate decision of one 变更项 (requirements §4.3/§4.4/§4.6, tech design §7): combines the two
@@ -256,8 +257,9 @@ public class GateService {
      *
      * <p>Unlike {@link #verifySatisfied} this asks <strong>only</strong> the check gate: a
      * second-party library has no test deployment, so there is no test gate to satisfy. The
-     * completeness guard (all three {@link CheckType#libSecurityChecks()} rows present) keeps a
-     * partially triggered security node from completing on a subset of its checks.
+     * completeness guard (every <em>enabled</em> {@link CheckType#libSecurityChecks()} row present)
+     * keeps a partially triggered security node from completing on a subset of its checks; a check
+     * disabled by the platform settings is not required (P6-B design §2.1).
      *
      * <p>Read-only: the orchestrator calls it from inside its advance transaction.
      */
@@ -269,7 +271,11 @@ public class GateService {
         ReleaseItemPO po = requireItem(itemId);
         ReleaseItem item = po.toDomain();
         List<GateCheck> checks = checkService.checks(itemId);
+        Set<CheckType> enabled = checkService.enabledChecks();
         for (CheckType type : CheckType.libSecurityChecks()) {
+            if (!enabled.contains(type)) {
+                continue;
+            }
             boolean present = checks.stream().anyMatch(check -> check.checkType() == type);
             if (!present) {
                 return false;
@@ -292,6 +298,16 @@ public class GateService {
         }
         ReleaseItemPO po = requireItem(itemId);
         ReleaseItem item = po.toDomain();
+        Set<CheckType> enabled = checkService.enabledChecks();
+        boolean anyArtifactCheck = CheckType.libSecurityChecks().stream()
+            .anyMatch(enabled::contains);
+        if (!anyArtifactCheck) {
+            // The design refuses "zero enabled checks" for the platform as a whole, but a
+            // configuration could still disable all three artifact checks. Failing the node with a
+            // clear reason is fail-closed and, unlike waiting on a zero-row completeness guard,
+            // cannot leave the release RUNNING forever.
+            return "二方库安全检查已全部停用，请至少启用一项（Sonar / 应用组件漏洞 / 版本缺陷）";
+        }
         GateDecision decision = decide(item, snapshotOf(item));
         if (finalBlock(decision)) {
             return "二方库安全检查未通过：" + decision.summary()
@@ -303,8 +319,24 @@ public class GateService {
 
     /** The item's current check decision against the latest instance snapshot. */
     private GateDecision decide(ReleaseItem item, Snapshot snapshot) {
-        return GateEvaluator.evaluate(checkService.checks(item.id()), snapshot.waiver(),
-            Instant.now(), snapshot.commitSha(), snapshot.imageDigest());
+        Set<CheckType> enabled = checkService.enabledChecks();
+        return GateEvaluator.evaluate(enabledChecks(checkService.checks(item.id()), enabled),
+            snapshot.waiver(), Instant.now(), snapshot.commitSha(), snapshot.imageDigest());
+    }
+
+    /**
+     * The check rows the gate may read: a disabled check's historical rows are evidence, not a
+     * current verdict, so they are filtered out before {@link GateEvaluator} sees them (P6-B design
+     * §2.1: "停用对在途发布立即生效"). The rows are never deleted.
+     */
+    private static List<GateCheck> enabledChecks(List<GateCheck> checks, Set<CheckType> enabled) {
+        List<GateCheck> applicable = new ArrayList<>(checks.size());
+        for (GateCheck check : checks) {
+            if (enabled.contains(check.checkType())) {
+                applicable.add(check);
+            }
+        }
+        return applicable;
     }
 
     /**
@@ -631,7 +663,11 @@ public class GateService {
     /** Image-level checks whose scanned object is not the image the item will deploy (C23). */
     private List<String> imageMismatches(long itemId, String digest) {
         List<String> issues = new ArrayList<>();
+        Set<CheckType> enabled = checkService.enabledChecks();
         for (GateCheck check : checkService.checks(itemId)) {
+            if (!enabled.contains(check.checkType())) {
+                continue;
+            }
             if (check.checkType().stage() != CheckType.CheckStage.IMAGE) {
                 continue;
             }
@@ -655,6 +691,7 @@ public class GateService {
         GateDecision decision = decide(item, snapshot);
         Admission admission = admission(itemId);
         List<GateCheck> checks = checkService.checks(itemId);
+        Set<CheckType> enabled = checkService.enabledChecks();
         List<CheckGroup> groups = new ArrayList<>(2);
         for (CheckType.CheckStage stage : CheckType.CheckStage.values()) {
             List<CheckView> views = new ArrayList<>();
@@ -665,7 +702,7 @@ public class GateService {
                 GateCheck check = checks.stream()
                     .filter(candidate -> candidate.checkType() == type)
                     .findFirst().orElse(null);
-                views.add(checkView(type, check, decision));
+                views.add(checkView(type, check, decision, enabled.contains(type)));
             }
             int passed = (int) views.stream().filter(CheckView::passed).count();
             groups.add(new CheckGroup(stage.name(), stageLabel(stage), passed, views.size(), views));
@@ -699,7 +736,8 @@ public class GateService {
             snapshot.commitSha());
     }
 
-    private CheckView checkView(CheckType type, GateCheck check, GateDecision decision) {
+    private CheckView checkView(CheckType type, GateCheck check, GateDecision decision,
+                                boolean enabled) {
         GateCheckStatus status = check == null ? GateCheckStatus.PENDING : check.status();
         Severity severity = check == null ? Severity.NONE : check.severity();
         boolean blocking = check != null && status != GateCheckStatus.INVALID
@@ -722,7 +760,9 @@ public class GateService {
             check != null && status == GateCheckStatus.PASS,
             blocking,
             blocking && severity.waivable() && decision.conclusion() == GateConclusion.BLOCK
-                ? "可申请豁免" : (blocking ? "不可豁免" : null));
+                ? "可申请豁免" : (blocking ? "不可豁免" : null),
+            !enabled,
+            enabled ? null : "已停用");
     }
 
     private WaiverView waiverView(long itemId) {
@@ -933,7 +973,11 @@ public class GateService {
         Instant deadlineAt,
         boolean passed,
         boolean blocking,
-        String waiverHint) {
+        String waiverHint,
+        /** {@code true} when the platform gate switches turned this check off. */
+        boolean disabled,
+        /** {@code "已停用"} for a disabled check, otherwise {@code null}. */
+        String disabledLabel) {
     }
 
     /** The item's waiver as the page shows it. */

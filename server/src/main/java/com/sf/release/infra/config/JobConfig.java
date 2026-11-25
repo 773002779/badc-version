@@ -6,6 +6,7 @@ import com.sf.release.application.GateService;
 import com.sf.release.application.GateWaiverService;
 import com.sf.release.application.notification.NotificationDispatchService;
 import com.sf.release.application.notification.NotificationService;
+import com.sf.release.application.settings.SettingsService;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.port.DistributedLock;
 import com.sf.release.domain.pipeline.port.ItemFailureRepairer;
@@ -84,10 +85,13 @@ public class JobConfig {
      * could take the unit while the release still owns it. Its own switch, like the other jobs: the
      * test profile turns it off and the tests call {@link UnitLeaseRenewJob#renewLeases()} explicitly.
      *
-     * <p>{@code release.unit-lease.max-paused-hours} bounds how long an abandoned pause keeps its
-     * lease renewed (independent review I3): a rejection nobody resubmits must not lock the unit
-     * forever, and this phase has no close/force-release endpoint. Seven days covers an approval and
-     * a long freeze; after that the four-hour lease is allowed to expire and the unit is reclaimable.
+     * <p>{@code release.unit-lease.max-paused-hours} is the <em>fallback</em> bound for how long an
+     * abandoned pause keeps its lease renewed (independent review I3): the platform LOCK setting
+     * ({@code pauseBoundHours}, P6-B design §2.3) overrides it and is read on every round; when that
+     * row is missing or unreadable the job keeps this deployment value. A rejection nobody resubmits
+     * must not lock the unit forever, and this phase has no close/force-release endpoint. Seven days
+     * covers an approval and a long freeze; after that the four-hour lease is allowed to expire and
+     * the unit is reclaimable.
      */
     @Bean
     @ConditionalOnProperty(name = "release.unit-lease.renew-enabled", havingValue = "true",
@@ -96,13 +100,14 @@ public class JobConfig {
         DeployUnitLockMapper lockMapper,
         UnitLease unitLease,
         NotificationService notifications,
+        SettingsService settings,
         @Value("${release.unit-lease.max-paused-hours:168}") long maxPausedHours) {
         if (maxPausedHours <= 0) {
             throw new IllegalArgumentException(
                 "release.unit-lease.max-paused-hours must be positive: " + maxPausedHours);
         }
         return new UnitLeaseRenewJob(lockMapper, unitLease, notifications,
-            java.time.Duration.ofHours(maxPausedHours));
+            java.time.Duration.ofHours(maxPausedHours), settings);
     }
 
     /**
