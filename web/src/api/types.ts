@@ -542,6 +542,37 @@ export interface NotificationSettingView {
   updatedAt?: string | null
 }
 
+// --------------------------------------------------------- platform settings (P6-B)
+
+/**
+ * The 「门禁规则」 block: the enabled check types by their machine names (design §3). The web keeps
+ * no enum of its own; `enabledChecks` is authoritative and unknown names are preserved.
+ */
+export interface GateSettingView {
+  enabledChecks: string[]
+  updatedBy?: string | null
+  updatedAt?: string | null
+}
+
+/**
+ * The 「审批人名单」 block: one user id list per approval role. These are the *effective* lists: a
+ * stored empty list falls back to the role's current `user_role` members (design §1), so the page
+ * shows the roles that can actually approve right now.
+ */
+export interface ApproverSettingView {
+  opsLead: string[]
+  deptManager: string[]
+  updatedBy?: string | null
+  updatedAt?: string | null
+}
+
+/** The 「锁超时」 block: the abandoned-pause bound in hours; the lease TTL itself stays 4h. */
+export interface LockSettingView {
+  pauseBoundHours: number
+  updatedBy?: string | null
+  updatedAt?: string | null
+}
+
 // ---------------------------------------------------------------- audit (P4-C)
 
 /**

@@ -1,6 +1,7 @@
 import { ApiError, api, currentUser, qs } from './http'
 import type {
   AdmissionView,
+  ApproverSettingView,
   ArchiveResult,
   AuditFilter,
   AuditPage,
@@ -15,9 +16,11 @@ import type {
   EnvDeView,
   ExecuteResult,
   FreezeView,
+  GateSettingView,
   ItemGate,
   ItemView,
   LibDependentsView,
+  LockSettingView,
   MeView,
   NotificationPage,
   NotificationSettingView,
@@ -477,6 +480,44 @@ export const saveNotificationSetting = (body: {
   wecomWebhook?: string | null
 }) =>
   api<NotificationSettingView>('/api/v1/settings/notifications', {
+    method: 'PUT',
+    body: JSON.stringify(body)
+  })
+
+// ------------------------------------------------------ platform settings (P6-B)
+
+/** The 「门禁规则」 block; requires `setting:manage`. */
+export const getGateSetting = () => api<GateSettingView>('/api/v1/settings/gate')
+
+/**
+ * Saves the enabled check names. The backend needs at least one known check and answers 40000 for
+ * an empty list or an unknown name; the names travel as the server's machine values.
+ */
+export const saveGateSetting = (body: { enabledChecks: string[] }) =>
+  api<GateSettingView>('/api/v1/settings/gate', {
+    method: 'PUT',
+    body: JSON.stringify(body)
+  })
+
+/** The 「审批人名单」 block; returns the effective role members, not just the stored JSON. */
+export const getApproverSetting = () => api<ApproverSettingView>('/api/v1/settings/approvers')
+
+/**
+ * Replaces both approval-role member lists in one save. Every id must exist and be ACTIVE; an empty
+ * list is legal and clears the role (the backend then falls back to "system owner").
+ */
+export const saveApproverSetting = (body: { opsLead: string[]; deptManager: string[] }) =>
+  api<ApproverSettingView>('/api/v1/settings/approvers', {
+    method: 'PUT',
+    body: JSON.stringify(body)
+  })
+
+/** The 「锁超时」 block; the pause bound in hours (1–8760), the lease TTL stays fixed at 4h. */
+export const getLockSetting = () => api<LockSettingView>('/api/v1/settings/lock')
+
+/** Saves the pause bound; out-of-range values answer 40000. */
+export const saveLockSetting = (body: { pauseBoundHours: number }) =>
+  api<LockSettingView>('/api/v1/settings/lock', {
     method: 'PUT',
     body: JSON.stringify(body)
   })

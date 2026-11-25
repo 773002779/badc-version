@@ -1,19 +1,32 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  getApproverSetting,
   getCodingConn,
+  getGateSetting,
+  getLockSetting,
   getMe,
   getNotificationSetting,
   listSubsystems,
+  saveApproverSetting,
   saveCodingConn,
+  saveGateSetting,
+  saveLockSetting,
   saveNotificationSetting,
   testCodingConn
 } from '../api'
 import { ApiError, currentUser, setCurrentUser } from '../api/http'
 import { applyTheme, currentTheme } from '../theme'
 import type { Theme } from '../theme'
-import type { CodingConnView, CodingProbeView, NotificationSettingView } from '../api/types'
+import type {
+  ApproverSettingView,
+  CodingConnView,
+  CodingProbeView,
+  GateSettingView,
+  LockSettingView,
+  NotificationSettingView
+} from '../api/types'
 import { formatDateTime } from '../utils/format'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
@@ -228,16 +241,292 @@ async function saveNotify() {
   }
 }
 
+// ---------------------------------------------------------------- 平台设置 (P6-B)
+//
+// The three `setting:manage` blocks of design §4, after 消息通知: 门禁规则 / 审批人名单 / 锁超时.
+// They share one `/me` read and one loader: unlike the CODING and 消息通知 blocks (each owns its own
+// permission flag because they are independent features), these three are one settings slice and
+// always appear together, so a single permission check keeps the page from calling `/me` five times.
+//
+// The check labels below are display-only. The machine value is the contract the API stores and
+// returns (`enabledChecks`); the Chinese names mirror CheckType so the checkbox reads like the
+// verification panel, and an unknown value from a newer server is still rendered and kept.
+const GATE_CHECKS: Array<{ value: string; label: string; stage: string }> = [
+  { value: 'SONAR', label: 'Sonar 扫描', stage: '镜像检查 · 构建后' },
+  { value: 'COMPONENT_VULN', label: '应用组件漏洞', stage: '镜像检查 · 构建后' },
+  { value: 'ARCHITECTURE', label: '架构规范', stage: '镜像检查 · 构建后' },
+  { value: 'VERSION_DEFECT', label: '版本缺陷', stage: '镜像检查 · 构建后' },
+  { value: 'SECURITY_DYNAMIC', label: '安全动态测试', stage: '环境检查 · 测试部署后' },
+  { value: 'AUTO_TEST', label: '自动化测试', stage: '环境检查 · 测试部署后' },
+  { value: 'DB_NORM', label: '数据库规范', stage: '环境检查 · 测试部署后' }
+]
+
+const settingsLoading = ref(true)
+const settingsCanManage = ref(false)
+const gateTotal = GATE_CHECKS.length
+
+const gateView = ref<GateSettingView | null>(null)
+const gateEnabled = ref<string[]>([])
+const gateError = ref<string | null>(null)
+const gateSaving = ref(false)
+
+const approverView = ref<ApproverSettingView | null>(null)
+const opsLead = ref<string[]>([])
+const deptManager = ref<string[]>([])
+const opsLeadDraft = ref('')
+const deptManagerDraft = ref('')
+const approverError = ref<string | null>(null)
+const approverSaving = ref(false)
+
+const lockView = ref<LockSettingView | null>(null)
+const pauseHours = ref('168')
+const lockError = ref<string | null>(null)
+const lockSaving = ref(false)
+
+function errorMessage(e: unknown, fallback: string): string {
+  return e instanceof ApiError ? e.message : fallback
+}
+
+/** All seven known checks, plus any value the server returned that this page does not know. */
+const gateChecks = computed(() => {
+  const known = new Set(GATE_CHECKS.map((check) => check.value))
+  const extras = gateEnabled.value
+    .filter((value) => !known.has(value))
+    .map((value) => ({ value, label: value, stage: '服务端返回的检查项（本页未收录）' }))
+  return [...GATE_CHECKS, ...extras]
+})
+
+const gateStatus = computed(() => {
+  if (settingsLoading.value) return { label: '读取中…', tone: 'neutral' as const }
+  if (!settingsCanManage.value) return { label: '只读', tone: 'neutral' as const }
+  return gateView.value?.updatedBy
+    ? { label: '已保存', tone: 'success' as const }
+    : { label: '默认全开', tone: 'neutral' as const }
+})
+
+const gateSubtitle = computed(() => {
+  if (settingsLoading.value) return '读取中…'
+  if (!settingsCanManage.value) return '仅平台管理员可见'
+  const view = gateView.value
+  if (!view) return '未保存过，默认七项全开'
+  const state = `${view.enabledChecks.length} / ${GATE_CHECKS.length} 项启用`
+  return view.updatedBy
+    ? `${state} · ${view.updatedBy} 更新于 ${formatDateTime(view.updatedAt)}`
+    : `${state} · 默认配置`
+})
+
+const approverStatus = computed(() => {
+  if (settingsLoading.value) return { label: '读取中…', tone: 'neutral' as const }
+  if (!settingsCanManage.value) return { label: '只读', tone: 'neutral' as const }
+  return approverView.value?.updatedBy
+    ? { label: '已保存', tone: 'success' as const }
+    : { label: '默认名单', tone: 'neutral' as const }
+})
+
+const approverSubtitle = computed(() => {
+  if (settingsLoading.value) return '读取中…'
+  if (!settingsCanManage.value) return '仅平台管理员可见'
+  const view = approverView.value
+  if (!view) return '默认沿用角色成员'
+  const state = `运营负责人 ${view.opsLead.length} 人 · 部门经理 ${view.deptManager.length} 人`
+  return view.updatedBy
+    ? `${state} · ${view.updatedBy} 更新于 ${formatDateTime(view.updatedAt)}`
+    : `${state} · 默认沿用角色成员`
+})
+
+const lockStatus = computed(() => {
+  if (settingsLoading.value) return { label: '读取中…', tone: 'neutral' as const }
+  if (!settingsCanManage.value) return { label: '只读', tone: 'neutral' as const }
+  return lockView.value?.updatedBy
+    ? { label: '已保存', tone: 'success' as const }
+    : { label: '默认值', tone: 'neutral' as const }
+})
+
+const lockSubtitle = computed(() => {
+  if (settingsLoading.value) return '读取中…'
+  if (!settingsCanManage.value) return '仅平台管理员可见'
+  const view = lockView.value
+  if (!view) return '默认 168 小时'
+  const state = `暂停上限 ${view.pauseBoundHours} 小时`
+  return view.updatedBy
+    ? `${state} · ${view.updatedBy} 更新于 ${formatDateTime(view.updatedAt)}`
+    : `${state} · 默认值`
+})
+
+function fillGate(view: GateSettingView) {
+  gateView.value = view
+  gateEnabled.value = [...view.enabledChecks]
+}
+
+function fillApprovers(view: ApproverSettingView) {
+  approverView.value = view
+  opsLead.value = [...view.opsLead]
+  deptManager.value = [...view.deptManager]
+  opsLeadDraft.value = ''
+  deptManagerDraft.value = ''
+}
+
+function fillLock(view: LockSettingView) {
+  lockView.value = view
+  pauseHours.value = String(view.pauseBoundHours)
+}
+
+async function loadPlatformSettings() {
+  settingsLoading.value = true
+  let me
+  try {
+    me = await getMe()
+  } catch (e) {
+    const message = errorMessage(e, '读取当前账号权限失败')
+    gateError.value = message
+    approverError.value = message
+    lockError.value = message
+    settingsLoading.value = false
+    return
+  }
+  settingsCanManage.value = me.perms.includes('setting:manage')
+  if (!settingsCanManage.value) {
+    // No permission means no read either: the endpoints answer 403, so do not call them.
+    settingsLoading.value = false
+    return
+  }
+  const [gate, approvers, lock] = await Promise.allSettled([
+    getGateSetting(),
+    getApproverSetting(),
+    getLockSetting()
+  ])
+  if (gate.status === 'fulfilled') fillGate(gate.value)
+  else gateError.value = errorMessage(gate.reason, '读取门禁规则失败')
+  if (approvers.status === 'fulfilled') fillApprovers(approvers.value)
+  else approverError.value = errorMessage(approvers.reason, '读取审批人名单失败')
+  if (lock.status === 'fulfilled') fillLock(lock.value)
+  else lockError.value = errorMessage(lock.reason, '读取锁超时配置失败')
+  settingsLoading.value = false
+}
+
+function gateLabel(value: string): string {
+  return GATE_CHECKS.find((check) => check.value === value)?.label ?? value
+}
+
+async function saveGate() {
+  if (!gateEnabled.value.length) {
+    ElMessage.warning('至少需要启用一项检查')
+    return
+  }
+  const removed = (gateView.value?.enabledChecks ?? []).filter(
+    (check) => !gateEnabled.value.includes(check)
+  )
+  if (removed.length) {
+    try {
+      await ElMessageBox.confirm(
+        `即将停用 ${removed.map(gateLabel).join('、')}。停用对在途发布立即生效，且不会补跑：` +
+          '已停用检查的历史结果在评估时被忽略，新实例也不再生成这些检查任务。',
+        '保存门禁规则',
+        { type: 'warning', confirmButtonText: '确认停用', cancelButtonText: '取消' }
+      )
+    } catch {
+      return
+    }
+  }
+  gateSaving.value = true
+  try {
+    const view = await saveGateSetting({ enabledChecks: [...gateEnabled.value] })
+    fillGate(view)
+    ElMessage.success('门禁规则已保存')
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '保存门禁规则失败'))
+  } finally {
+    gateSaving.value = false
+  }
+}
+
+type ApproverRole = 'opsLead' | 'deptManager'
+
+function roleList(role: ApproverRole) {
+  return role === 'opsLead' ? opsLead : deptManager
+}
+
+function roleDraft(role: ApproverRole) {
+  return role === 'opsLead' ? opsLeadDraft : deptManagerDraft
+}
+
+function addApprover(role: ApproverRole) {
+  const draft = roleDraft(role)
+  const userId = draft.value.trim()
+  if (!userId) {
+    ElMessage.warning('请先填写工号')
+    return
+  }
+  const list = roleList(role)
+  if (list.value.includes(userId)) {
+    draft.value = ''
+    ElMessage.warning(`${userId} 已在名单中`)
+    return
+  }
+  list.value = [...list.value, userId]
+  draft.value = ''
+}
+
+function removeApprover(role: ApproverRole, userId: string) {
+  const list = roleList(role)
+  list.value = list.value.filter((id) => id !== userId)
+}
+
+/** Trims and de-duplicates; the backend applies the same rule, this only keeps the form tidy. */
+function normalizeApprovers(ids: string[]): string[] {
+  return [...new Set(ids.map((id) => id.trim()).filter(Boolean))]
+}
+
+async function saveApprovers() {
+  // A value typed but not yet added is committed by this save; the tag then shows what is sent.
+  for (const role of ['opsLead', 'deptManager'] as const) {
+    if (roleDraft(role).value.trim()) addApprover(role)
+  }
+  approverSaving.value = true
+  try {
+    const view = await saveApproverSetting({
+      opsLead: normalizeApprovers(opsLead.value),
+      deptManager: normalizeApprovers(deptManager.value)
+    })
+    fillApprovers(view)
+    ElMessage.success('审批人名单已保存')
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '保存审批人名单失败'))
+  } finally {
+    approverSaving.value = false
+  }
+}
+
+async function saveLock() {
+  const raw = pauseHours.value.trim()
+  const hours = Number(raw)
+  if (!raw || !Number.isInteger(hours) || hours < 1 || hours > 8760) {
+    ElMessage.warning('暂停上限需为 1–8760 之间的整数小时')
+    return
+  }
+  lockSaving.value = true
+  try {
+    const view = await saveLockSetting({ pauseBoundHours: hours })
+    fillLock(view)
+    ElMessage.success('锁超时设置已保存')
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '保存锁超时设置失败'))
+  } finally {
+    lockSaving.value = false
+  }
+}
+
 onMounted(() => {
   checkBackend()
   loadConn()
   loadNotify()
+  loadPlatformSettings()
 })
 </script>
 
 <template>
   <div>
-    <PageHeader title="设置" description="本地偏好、身份，以及 CODING 对接与消息通知配置。" />
+    <PageHeader title="设置" description="本地偏好、身份、平台规则，以及 CODING 对接与消息通知配置。" />
 
     <DataSection
       title="CODING 对接"
@@ -397,6 +686,235 @@ onMounted(() => {
         <p v-if="notifyView?.updatedBy" class="weak small notify-audit">
           最近保存：{{ notifyView.updatedBy }} · {{ formatDateTime(notifyView.updatedAt) }}
         </p>
+      </template>
+    </DataSection>
+
+    <DataSection
+      class="settings-gate"
+      title="门禁规则"
+      :subtitle="gateSubtitle"
+      style="margin-bottom: 16px"
+    >
+      <template #actions>
+        <span class="chip" :class="`chip-${gateStatus.tone}`">{{ gateStatus.label }}</span>
+        <el-button
+          v-if="settingsCanManage"
+          type="primary"
+          class="gate-save"
+          :disabled="gateSaving"
+          :loading="gateSaving"
+          @click="saveGate"
+        >
+          保存
+        </el-button>
+      </template>
+
+      <el-alert
+        v-if="gateError"
+        type="error"
+        :closable="false"
+        show-icon
+        :title="gateError"
+        style="margin-bottom: 12px"
+      />
+
+      <div v-if="!settingsLoading && !settingsCanManage" class="restricted">
+        <span class="strong">需要平台管理员权限</span>
+        <span class="weak small">
+          门禁规则决定每个发布实例执行哪些检查，只有具备 <code class="mono">setting:manage</code>
+          的账号可以查看和修改；当前账号无权读取该配置。
+        </span>
+      </div>
+
+      <template v-else-if="settingsCanManage">
+        <el-checkbox-group v-model="gateEnabled" class="gate-checks">
+          <el-checkbox
+            v-for="check in gateChecks"
+            :key="check.value"
+            :value="check.value"
+            class="gate-check"
+          >
+            <span class="check-label">{{ check.label }}</span>
+            <code class="mono check-code">{{ check.value }}</code>
+            <span class="weak small check-note">{{ check.stage }}</span>
+          </el-checkbox>
+        </el-checkbox-group>
+        <div class="field hint gate-hint">
+          <span>
+            停用对在途发布立即生效，且不会补跑：已停用检查的历史结果在评估时被忽略，
+            新实例也不再生成该检查任务。
+          </span>
+          <span>至少保留 1 项检查；当前启用 <b>{{ gateEnabled.length }}</b> / {{ gateTotal }} 项。</span>
+        </div>
+      </template>
+    </DataSection>
+
+    <DataSection
+      class="settings-approvers"
+      title="审批人名单"
+      :subtitle="approverSubtitle"
+      style="margin-bottom: 16px"
+    >
+      <template #actions>
+        <span class="chip" :class="`chip-${approverStatus.tone}`">{{ approverStatus.label }}</span>
+        <el-button
+          v-if="settingsCanManage"
+          type="primary"
+          class="approver-save"
+          :disabled="approverSaving"
+          :loading="approverSaving"
+          @click="saveApprovers"
+        >
+          保存
+        </el-button>
+      </template>
+
+      <el-alert
+        v-if="approverError"
+        type="error"
+        :closable="false"
+        show-icon
+        :title="approverError"
+        style="margin-bottom: 12px"
+      />
+
+      <div v-if="!settingsLoading && !settingsCanManage" class="restricted">
+        <span class="strong">需要平台管理员权限</span>
+        <span class="weak small">
+          审批人名单决定生产发布由谁审批，只有具备 <code class="mono">setting:manage</code>
+          的账号可以查看和修改；当前账号无权读取该配置。
+        </span>
+      </div>
+
+      <template v-else-if="settingsCanManage">
+        <div class="approver-grid">
+          <div class="field approver-role" data-role="opsLead">
+            <span class="field-label">
+              运营负责人 <code class="mono">OPS_LEAD</code>
+            </span>
+            <div class="tag-row">
+              <el-tag
+                v-for="id in opsLead"
+                :key="id"
+                class="approver-tag"
+                closable
+                @close="removeApprover('opsLead', id)"
+              >
+                {{ id }}
+              </el-tag>
+              <span v-if="!opsLead.length" class="weak small">未配置</span>
+            </div>
+            <div class="tag-input">
+              <el-input
+                v-model="opsLeadDraft"
+                class="approver-input"
+                placeholder="输入工号后回车，或点「添加」"
+                spellcheck="false"
+                @keyup.enter="addApprover('opsLead')"
+              />
+              <el-button class="approver-add" @click="addApprover('opsLead')">添加</el-button>
+            </div>
+          </div>
+
+          <div class="field approver-role" data-role="deptManager">
+            <span class="field-label">
+              部门经理 <code class="mono">DEPT_MANAGER</code>
+            </span>
+            <div class="tag-row">
+              <el-tag
+                v-for="id in deptManager"
+                :key="id"
+                class="approver-tag"
+                closable
+                @close="removeApprover('deptManager', id)"
+              >
+                {{ id }}
+              </el-tag>
+              <span v-if="!deptManager.length" class="weak small">未配置</span>
+            </div>
+            <div class="tag-input">
+              <el-input
+                v-model="deptManagerDraft"
+                class="approver-input"
+                placeholder="输入工号后回车，或点「添加」"
+                spellcheck="false"
+                @keyup.enter="addApprover('deptManager')"
+              />
+              <el-button class="approver-add" @click="addApprover('deptManager')">添加</el-button>
+            </div>
+          </div>
+        </div>
+
+        <div class="field hint approver-hint">
+          <span>留空 = 由系统负责人兜底（该角色无人时沿用既有审批兜底），不会阻断发版。</span>
+          <span>
+            保存会把 <code class="mono">user_role</code> 中该角色的成员整体替换为名单，审批权限即时生效。
+            接口回显的是生效名单：存储名单为空时回退显示角色当前成员，因此保存空名单后通常回显也为空。
+          </span>
+          <span>工号需存在于 <code class="mono">app_user</code> 且为启用状态；提交前自动去除首尾空格并去重。</span>
+        </div>
+      </template>
+    </DataSection>
+
+    <DataSection
+      class="settings-lock"
+      title="锁超时"
+      :subtitle="lockSubtitle"
+      style="margin-bottom: 16px"
+    >
+      <template #actions>
+        <span class="chip" :class="`chip-${lockStatus.tone}`">{{ lockStatus.label }}</span>
+        <el-button
+          v-if="settingsCanManage"
+          type="primary"
+          class="lock-save"
+          :disabled="lockSaving"
+          :loading="lockSaving"
+          @click="saveLock"
+        >
+          保存
+        </el-button>
+      </template>
+
+      <el-alert
+        v-if="lockError"
+        type="error"
+        :closable="false"
+        show-icon
+        :title="lockError"
+        style="margin-bottom: 12px"
+      />
+
+      <div v-if="!settingsLoading && !settingsCanManage" class="restricted">
+        <span class="strong">需要平台管理员权限</span>
+        <span class="weak small">
+          暂停上限直接影响发布单元的租约回收，只有具备 <code class="mono">setting:manage</code>
+          的账号可以查看和修改；当前账号无权读取该配置。
+        </span>
+      </div>
+
+      <template v-else-if="settingsCanManage">
+        <div class="lock-grid">
+          <label class="field">
+            <span class="field-label">暂停上限</span>
+            <div class="lock-row">
+              <el-input
+                v-model="pauseHours"
+                class="lock-hours"
+                inputmode="numeric"
+                placeholder="168"
+                style="max-width: 200px"
+              >
+                <template #append>小时</template>
+              </el-input>
+              <span class="weak small">默认 168 小时（7 天），可填 1–8760 的整数。</span>
+            </div>
+          </label>
+          <div class="field hint">
+            <span>发布挂起超过该小时数视为放弃，单元租约由巡检任务在下一轮释放；修改在下一轮巡检生效。</span>
+            <span>租约本身仍为 <b>4 小时</b>（TTL 是代码常量，不随此项变化）。</span>
+          </div>
+        </div>
       </template>
     </DataSection>
 
@@ -588,6 +1106,94 @@ onMounted(() => {
   margin: 12px 0 0;
 }
 
+/* 「门禁规则」 block: seven checkboxes in two columns; each row shows label + machine value. */
+.gate-checks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 22px;
+  max-width: 940px;
+}
+
+.gate-check {
+  height: auto;
+  min-height: 34px;
+  align-items: flex-start;
+  margin-right: 0;
+  padding: 5px 0;
+}
+
+.gate-check :deep(.el-checkbox__label) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  line-height: 1.45;
+}
+
+.check-label {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.check-code {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.check-note {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.gate-hint {
+  margin-top: 10px;
+}
+
+/* 「审批人名单」 block: one tag editor per approval role. */
+.approver-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 18px;
+  max-width: 940px;
+}
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+}
+
+.tag-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.approver-input {
+  max-width: 280px;
+}
+
+.approver-hint {
+  margin-top: 12px;
+}
+
+/* 「锁超时」 block: the number field plus the fixed-lease reminder. */
+.lock-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  max-width: 760px;
+}
+
+.lock-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
 .grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -602,7 +1208,9 @@ onMounted(() => {
 
 @media (max-width: 960px) {
   .grid,
-  .conn-grid {
+  .conn-grid,
+  .gate-checks,
+  .approver-grid {
     grid-template-columns: 1fr !important;
   }
 
