@@ -628,3 +628,41 @@ export interface ArchiveResult {
   closedItems: number
   terminatedInstances: number
 }
+
+// -------------------------------------------------------------- todos (P5-C)
+
+/**
+ * One row of the 待办中心 (todo design §1/§3). Every field is a server string, including the ids and
+ * `waitingHours`: the page only renders and navigates, and the Chinese status label comes from the
+ * server's domain enums, so the web keeps no copy of them. `link` is the ready-made relative path
+ * (`/tasks/{id}?item={itemId}`, `/releases/{publishNo}` or `/tasks/{id}`) the web must not rebuild.
+ */
+export interface TodoItemView {
+  objectType: string
+  objectId: string
+  label: string
+  status: string
+  statusLabel: string
+  waitingSince?: string | null
+  /** Whole hours elapsed on the server clock, as a string; `"0"` means "刚刚". */
+  waitingHours: string
+  unitId?: string | null
+  link?: string | null
+}
+
+/**
+ * One of the four queues: `count` is the full count, `items` at most the requested `limit` rows in
+ * oldest-waiting-first order, so the page can say "共 N 项，显示前 M 项".
+ */
+export interface TodoGroupView {
+  count: number
+  items: TodoItemView[]
+}
+
+/** The four groups of `GET /api/v1/todos`; all four are present even when empty. */
+export interface TodoBoardView {
+  test: TodoGroupView
+  approval: TodoGroupView
+  execute: TodoGroupView
+  mine: TodoGroupView
+}

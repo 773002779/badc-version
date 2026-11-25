@@ -6,6 +6,7 @@ import {
   Checked,
   Document,
   Grid,
+  List,
   Memo,
   Monitor,
   Moon,
@@ -15,7 +16,7 @@ import {
   Tickets,
   User
 } from '@element-plus/icons-vue'
-import { getUnreadNotificationCount, listNotifications, markNotificationRead } from './api'
+import { getUnreadNotificationCount, listNotifications, listTodos, markNotificationRead } from './api'
 import { ApiError, currentUser, setCurrentUser } from './api/http'
 import type { NotificationView } from './api/types'
 import { currentTheme, toggleTheme } from './theme'
@@ -122,6 +123,7 @@ watch(
   () => {
     closeBell()
     loadUnread()
+    loadTodoBadge()
   }
 )
 
@@ -130,14 +132,38 @@ watch(notificationRevision, () => loadUnread())
 
 onMounted(() => {
   loadUnread()
+  loadTodoBadge()
   unreadTimer = window.setInterval(loadUnread, 30_000)
+  todoTimer = window.setInterval(loadTodoBadge, 30_000)
   document.addEventListener('click', onDocumentClick)
 })
 
 onUnmounted(() => {
   if (unreadTimer !== undefined) window.clearInterval(unreadTimer)
+  if (todoTimer !== undefined) window.clearInterval(todoTimer)
   document.removeEventListener('click', onDocumentClick)
 })
+
+// ------------------------------------------------------------------ todos (P5-C)
+
+/**
+ * The 待办 sidebar badge: the sum of the four group counts, refreshed on every route change and
+ * every 30s like the bell. It asks for the smallest page size because only `count` matters here.
+ */
+const todoTotal = ref(0)
+let todoTimer: number | undefined
+
+const todoBadge = computed(() => (todoTotal.value > 99 ? '99+' : String(todoTotal.value)))
+
+async function loadTodoBadge() {
+  try {
+    const board = await listTodos(1)
+    todoTotal.value =
+      board.test.count + board.approval.count + board.execute.count + board.mine.count
+  } catch {
+    // Sidebar chrome, not page data: keep the last good number and retry on the next tick.
+  }
+}
 
 // ------------------------------------------------------------------- identity
 
@@ -182,6 +208,14 @@ const initial = computed(() => (userId.value || '?').slice(0, 1).toUpperCase())
       </router-link>
 
       <div class="nav-group">平台</div>
+      <router-link
+        class="nav-item"
+        to="/todos"
+        :aria-label="todoTotal > 0 ? `待办，${todoTotal} 项` : '待办'"
+      >
+        <el-icon><List /></el-icon><span>待办</span>
+        <span v-if="todoTotal > 0" class="nav-badge" aria-hidden="true">{{ todoBadge }}</span>
+      </router-link>
       <router-link class="nav-item" to="/control">
         <el-icon><Checked /></el-icon><span>生产管控</span>
       </router-link>
@@ -437,6 +471,24 @@ const initial = computed(() => (userId.value || '?').slice(0, 1).toUpperCase())
 
 .notify-more:hover {
   text-decoration: underline;
+}
+
+/* Sidebar 待办 badge (P5-C): the four group counts, hidden at zero. */
+.nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 600px) {

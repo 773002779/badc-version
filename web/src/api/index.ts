@@ -29,6 +29,7 @@ import type {
   SubsystemView,
   TaskDetailView,
   TaskView,
+  TodoBoardView,
   UnitView,
   WindowCheckView,
   WindowView
@@ -508,3 +509,13 @@ export async function exportAudit(
   const named = /filename="?([^";]+)"?/i.exec(disposition)
   return { blob: await res.blob(), filename: named?.[1] ?? `audit-${Date.now()}.csv` }
 }
+
+// ------------------------------------------------------------------ todos (P5-C)
+
+/**
+ * The four queues of the 待办中心 (todo design §1). The server owns the data scope and the
+ * "is it my turn" rules; `limit` (1–20) only caps `items` per group, never `count`. The sidebar
+ * badge polls a small limit because it only sums the four counts.
+ */
+export const listTodos = (limit = 5) =>
+  api<TodoBoardView>(`/api/v1/todos${qs({ limit })}`)
