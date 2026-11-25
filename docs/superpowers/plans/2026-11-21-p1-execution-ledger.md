@@ -410,3 +410,52 @@ Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有�
   无 N+1）。前端在文档收口期间随后提交 `c805568`（`/todos` + 侧栏徽标 + 四段 + 探针 + 2 张截图）：页面请求
   `limit=20`、徽标请求 `limit=1`，`mine` 段文案写「N 个未完成项」，等待文案 0→「刚刚」、只到整点；页面只渲染
   服务端字段，不拼路由。`2bdff21` / `c805568`
+
+## R80+（P6-A 二方库，2026-11-26）
+
+> **编号说明**：正式台账此前停在 R79（P5-C），本节按「接续最大编号」从 R80 起。来源文件在 `.gitignore` 的
+> `.superpowers/` 下，未进提交；代码以 `d81b980`（后端）、`ef87f0f`（修复）、`7032bf9`（前端）为准。
+>
+> **实现历史（不是裁决、也不是产品偏差）**：Task 1 的后端实现者中途退出，lead 接手并把 6 个回归测试修复并入
+> `d81b980`——状态机真值表（`ItemStateMachineTest` 补 `LIB_OK`/`LIB_FAIL` 两条边）、handler 注册
+> （`P2BoundaryEndToEndTest` 期望 7 个 handler）、引擎端点清单（`CodingEngineTest` 13→15）、两条 unit-service
+> fixture（`UnitServiceTest` 的 LIB 创建/更新补坐标）、监听器 item 查找（`ItemTransitionFailureTest` 夹具补
+> `release_item`）。这 6 处是既有测试随新契约更新期望/夹具，不是产品行为偏差；随后 `ef87f0f` 的 order 状态镜像
+> 按 R82 记为 review 修复。
+
+- Ruling R80: LIB 流水线是独立三节点 `BUILD`（仅 `CODE_CHECK`/`PKG_BUILD`）→ `LIB_SECURITY`（零 `node_task`）
+  → `LIB_PUBLISH`（一个 `LIB_PUBLISH` 任务），但仍是**真实发布单**（`order.id`）、`exec_type=LIB`、
+  `trigger=INITIAL`、`currentNode=BUILD`，并**继续占单元锁**——同一库的并发发布必须串行化，防止制品版本
+  冲突；不新建表。`d81b980`
+- Ruling R81: 安全检查复用 P2 的 `gate_check` 与豁免，不建 `CHECK` 任务、不进 VERIFY：节点进入时只为**尚无检查行**
+  的类型调 `GateCheckService.refresh`（不重跑已完成项），完成条件是三行**齐全**且 `GateEvaluator` 结论
+  `admits()`（PASS/WAIVED，含等级/失效规则），只有不可豁免/失效才 `failureReason`；`WAIVED` 是**聚合结论**，
+  `gate_check.status` 仍为 `FAIL`。`d81b980`
+- Ruling R82: 发布单状态**镜像**变更项：`release_order.status` 在监听器每次 `APPLIED` 后写成变更项新状态，不带
+  `row_version` CAS（状态是变更项的派生；stop/exit/close、提交/审批/执行等显式动作仍按既有写法用发布单
+  `row_version` CAS）；否则 BUILD 失败/入库完成的发布记录页永远停在 `INIT`。该修复对 UNIT 同样生效，属全局读模型
+  修正，不是 LIB 专属。`ef87f0f`
+- Ruling R83: 依赖影响面是文档化启发式——**同系统 + `type=UNIT` + `module_path == artifactId`**，按名称/id 排序，
+  响应固定 `source:"MODULE_PATH"`；同 `module_path` 的另一个 LIB 不算依赖；Q4/CODING 依赖 API 未定，替换实现
+  不改契约。`d81b980`
+- Ruling R84: 枚举只**追加在末尾**：`NodeType` 第 6/7（`LIB_SECURITY`/`LIB_PUBLISH`）、`TaskType` 第 9
+  （`LIB_PUBLISH`）、`TaskKind` 第 5（`LIB_PUBLISH`）、`ExecType` 第 3（`LIB`）；设计未列 `JobKind`，代码另加
+  `JobKind.PUBLISH`（第 3 个命名空间），否则 `publish.query`/webhook 会误落到 build/deploy。
+  `CheckType` 不新增值，只加 `libSecurityChecks()` 选择器。`d81b980`
+- Ruling R85: LIB **不发通知**：FR-N-01 未列二方库，节点失败与实例完成两条通知路径都按 `isLibOrder`/`item.type`
+  守卫；LIB 的历史 = 发布页节点/任务 + 实例 + 一行 `PUBLISH` 审计。`d81b980`
+- Ruling R86: 两个 LIB handler 放**应用层**（`application/LibSecurityNodeHandler`、`LibPublishNodeHandler`），
+  不进 `domain/pipeline/handler`：它们需要 `GateCheckService`/`GateService` 与 `CicdEngine`/事务/完成服务；
+  domain 只保留 `NodeHandler` 契约与 `NodeHandlerRegistry`，注册由
+  `PipelineConfig#nodeHandlerRegistry(ObjectProvider<NodeHandler>)` 自动收集 `@Component`。`d81b980`
+- Ruling R87: 入库端点：`CicdEngine#startPublish` 是 **default** 可选能力（其他引擎得到
+  `ENGINE_UNAVAILABLE: 当前引擎不支持制品入库`）；`publish.start`/`publish.query` 的 URL、body、响应 JSONPath
+  是**占位模板**（`/open-api/artifact/publish/start`、PascalCase body、`$.Response.Data.*`），真实租户未验证；
+  `WAITING_EXTERNAL` 期限 60min，webhook `kind=PUBLISH` 与 30s reconcile 的 `LIB_PUBLISH→PUBLISH` 是收敛路径。
+  `d81b980`
+- Ruling R88: 坐标校验：LIB 的 `artifactGroupId`/`artifactArtifactId` 必填、trim、`^[A-Za-z0-9._-]{1,128}$`，
+  UNIT 忽略入参并落 **`NULL`**；错误码 **40000 `PARAM_INVALID`**（设计未规定码），payload 带字段名。发布前置校验
+  是坐标 + **BUILD** + **LIB_PUBLISH** 三个绑定，缺一项 40001 且**不取锁、不建单/实例**。`d81b980`
+- Ruling R89: 发布入口复用既有 `PUBLISH` 审计动作（不新增动作码，after 带 `type=LIB`），响应
+  `PublishResult(publishNo,pipelineNo,type)` 对 UNIT 也回 `type`；ENGINE 失败不回滚已提交的发布单/实例，失败原因
+  落任务 `result_summary` 与实例 `status_reason`，HTTP 仍按发布成功返回。`d81b980`

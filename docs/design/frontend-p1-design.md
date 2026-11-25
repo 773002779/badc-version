@@ -839,3 +839,133 @@
 - 没有前端单测；覆盖靠 `scripts/verify-p5c-ui.mjs` 的 DOM 断言（无 CI 浏览器）。
 - 截图未人眼复核（实现模型无图像输入）；探针数据来自种子 + live 后端，**没有真实审批/测试操作后的界面证据**
   （只验证队列呈现与跳转）。
+
+---
+
+## 18. P6-A · 二方库制品与发布（2026-11-26）
+
+二方库从「单元可建、发布被拒」变成一条独立的三节点发布路径：单元详情多出「制品坐标 / 依赖单元」，发布页
+只显示 `构建 → 安全检测 → 入库`、隐藏全部生产语义，创建/编辑单元时坐标必填。**不新增路由、不新增导航、
+不新增依赖**；`web/src/utils/artifact.ts` 是后端坐标规则在前端的镜像。
+
+截图（1440×900，探针生成，`git add -f`）：
+
+![二方库单元详情（浅色）](shots/lib-light.png)
+![二方库单元详情（暗色）](shots/lib-dark.png)
+![二方库发布（浅色）](shots/lib-release-light.png)
+![二方库发布（暗色）](shots/lib-release-dark.png)
+
+**单元详情 · LIB 分支（`web/src/views/UnitDetailView.vue`）**
+
+- `isLib = unit.type === 'LIB'`。只有 LIB 才请求 `GET /api/v1/libs/{id}/dependents`（UNIT 不请求、不显示两块）。
+- 「制品坐标」`DataSection`（副标题 `Maven`）：`groupId`/`artifactId` 两个 `KeyValue`、一行 mono
+  `com.sf.group:artifact`、说明「发布时版本取自变更项的 version；本阶段不接私服，只记录坐标与入库结果」。
+- 「依赖单元」`DataSection`（副标题「N 个」）：来源说明「依赖来源 `MODULE_PATH`：启发式，同系统内 module_path
+  等于制品 artifactId 的部署单元；接口能力确定后替换实现不改契约」；表格两列——单元名（`router-link` 到
+  `/units/{unitId}`）、`modulePath`（mono，空显示 `—`）；无行时 `EmptyState`「暂无依赖单元」，加载时骨架，
+  请求失败显示 `lib-error` 文案且不阻塞页面其余部分。
+- LIB **隐藏**「环境 DE」与「发布前置条件」两块（库没有部署环境/测试与生产 DE）；「CODING 任务绑定」收窄为
+  `BUILD` + `LIB_PUBLISH` 两类（摘要「已绑定 N / 2」），隐藏 `TEST_DEPLOY`/`PROD_DEPLOY`/`DAILY_DEPLOY`，并在
+  说明里写「二方库只有构建与制品上传（LIB_PUBLISH）两类绑定」与「制品坐标 + 构建任务 + 入库发布任务齐全」。
+- 编辑对话框：`type=LIB` 时显示两个必填输入（`maxlength=128`，占位 `com.sf.demo`/`demo-sdk`），提示
+  「二方库必须填写制品坐标；groupId 与 artifactId 分别匹配 仅字母、数字、点、下划线、连字符，1-128 位」；
+  切回 UNIT 立即隐藏并清空输入，保存时 UNIT 不发送这两个字段（服务端落 `NULL`）。
+
+**发布内容页 · LIB 分支（`web/src/views/ReleaseView.vue`）**
+
+- 识别：`unitType === 'LIB'` **或** 节点里出现 `LIB_SECURITY`/`LIB_PUBLISH`（后者保证 unit 接口失败时页面仍是
+  LIB 形态）。只有 LIB 才额外读 `GET /units/{id}`（坐标）与 `GET /items/{id}/gate`（三条检查），两者都
+  best-effort，失败不挡主页面。
+- `StepBar` 三节点：`构建`/`安全检测`/`入库`；摘要区多「发布类型 二方库 · 制品发布」「制品坐标
+  com.sf.group:artifact」，**隐藏**「门禁（检查）」「门禁（测试）」「镜像摘要」「commit」。
+- `LIB_SECURITY` 节点只渲染 `SONAR`/`COMPONENT_VULN`/`VERSION_DEFECT` 三条 `gate_check`（从 `getItemGate` 的
+  分组里按 `kind` 过滤，不显示另外四项）：每行状态点 + 中文名 + `kind` + 等级 + `summary` + 报告外链；头文案
+  「制品安全检测：三条检查通过或豁免后才允许入库」；无行时 `EmptyState`「安全检查尚未回传」。
+- 豁免标记：后端 `GateCheckStatus` 没有 `WAIVED`，豁免是「检查 FAIL + 有效豁免 → 聚合结论 `WAIVED`」，所以
+  `libWaived = libGate.conclusion === 'WAIVED'`（不是只看 `waiver.active`，避免过期/不匹配快照误报）。
+  满足时 `LIB_SECURITY` 标题旁显示 el-tag「豁免入库」（title 带到期时间），节点内显示「存在有效豁免（豁免入库），
+  允许制品入库；豁免到期不自动下架，只在此标注。到期 …」，被豁免的 FAIL 行加「已豁免」。
+- 隐藏（生产专用）：「停止发布」「进入生产回滚」、`AdmissionPanel`（生产准入）、`VerifyPanel`（验证/测试门禁）、
+  门禁与测试人员、镜像/commit、重跑起点/全量重跑；保留「退出流水线」「刷新」「发布记录」Tab。页脚文案：
+  「二方库流水线：构建（CODE_CHECK → PKG_BUILD，不产镜像）→ 安全检测（SONAR / 组件漏洞 / 版本缺陷）→
+  入库（制品上传）。不进入生产准入，也没有测试部署、生产部署与回滚。」
+- 发布记录 Tab 照常列实例：演示数据给出 `PL-DEMO-LIB-DONE`（已完成）与 `PL-DEMO-LIB-FAIL`（失败）两行；
+  取证时真实 live 记录的实例是 `FAILED`（BUILD 的 `ENGINE_UNAVAILABLE`），页面按实例状态显示。
+
+**创建/编辑单元表单（`web/src/views/SubsystemDetailView.vue`）**
+
+- 「新建部署单元」对话框的 `type` 下拉含 `LIB`（`二方库`）；选中后出现「制品 groupId」「制品 artifactId」两个
+  必填项 + 格式提示，UNIT 下完全不出现；切回 UNIT 清空已输入坐标。
+- 前端先拦：空值提示 `制品 groupId必填（二方库）`（第二字段同理），非法格式提示
+  `制品 groupId格式不合法：仅字母、数字、点、下划线、连字符，1-128 位`；对话框不关闭、不发请求。
+- `web/src/utils/artifact.ts`：`ARTIFACT_COORDINATE_MAX=128`、`ARTIFACT_COORDINATE_RE=/^[A-Za-z0-9._-]{1,128}$/`、
+  `ARTIFACT_COORDINATE_HINT`、`isArtifactCoordinate`、`artifactCoordinateError`；与后端
+  `UnitAppService` 的规则逐字一致，**前端拦截不替代后端 40000 校验**。
+
+**API / 类型**
+
+- `web/src/api/index.ts#getLibDependents(unitId)` → `GET /api/v1/libs/{unitId}/dependents`；
+  创建/更新单元请求体加可选 `artifactGroupId`/`artifactArtifactId`。
+- `web/src/api/types.ts`：`UnitView` 加两个可空字段；新增 `LibDependentView {unitId,name,modulePath}`、
+  `LibDependentsView {libUnitId,artifactId,source,dependents}`。
+- `publishItem` 的返回类型仍是 `{publishNo,pipelineNo}`（后端多了 `type`，页面不依赖它，LIB 形态由单元/节点判断）。
+
+**演示数据与探针**
+
+- `scripts/demo-lib.sql`：LIB 单元 91001（`com.sf.demo:demo-sdk`）、同系统 UNIT 91002
+  `demo-sdk-consumer`（`module_path=demo-sdk`，让启发式非空）、一条 LIB 任务/变更项/发布单
+  `PO-DEMO-LIB`、两条实例 `PL-DEMO-LIB-FAIL`（BUILD 失败）与 `PL-DEMO-LIB-DONE`（三检查 + 一条豁免 + 入库成功）、
+  `CR-DEMO-LIB-LIVE`（供真实发布取证）；固定 ID/CRID，幂等，只删自己的行。
+- `scripts/verify-p6a-ui.mjs`（从 `scripts/` 拷到 `%TEMP%\rp-shot-tools` 执行，双主题）：
+  LIB 单元坐标/依赖块（`MODULE_PATH`/`启发式`/1 行/链接 `/units/91002`）、无环境 DE/发布前置条件；UNIT 回归
+  （无两块、编辑框无坐标、原样保存后类型与坐标不变）；LIB 发布页三节点/三条检查/「豁免入库」/到期文案/
+  无生产准入与验证面板/无停止与回滚；发布记录两行 DONE/FAILED；创建表单 UNIT 隐藏坐标、LIB 两个必填、空值与
+  非法格式均被拦；0 console error。
+
+**验收（P6-A）**
+
+- `cd web; npm run build`（`vue-tsc -b && vite build`）通过：`✓ built in 981ms`（无新依赖）。
+- 探针原文（双主题）：
+
+  ```
+  p6a-light: libUnit coords=com.sf.demo:demo-sdk dependentRows=1 source=MODULE_PATH unitRegression=yes steps=构建/安全检测/入库 checks=3 waiver=豁免入库 noProdPanels=true records=2 createGuard=blank+badFormat errors=0
+  p6a-dark: libUnit coords=com.sf.demo:demo-sdk dependentRows=1 source=MODULE_PATH unitRegression=yes steps=构建/安全检测/入库 checks=3 waiver=豁免入库 noProdPanels=true records=2 createGuard=blank+badFormat errors=0
+  OK all second-party library assertions passed
+  ```
+
+- 真实接口：`POST /api/v1/items/91002/publish`（`X-User-Id: dev`）返回
+  `{"publishNo":"PO-20261125-036E37","pipelineNo":"PL-20261125-A5D696","type":"LIB"}`；实例 `90044` 在 BUILD 以
+  `ENGINE_UNAVAILABLE: CODING 连接未配置：build.start` 失败，`LIB_SECURITY`/`LIB_PUBLISH` `PENDING`；单元锁
+  `unit 91001`、审计 `PUBLISH`；按设计 LIB 不发通知。抓取时 `release_order.status=INIT`（`ef87f0f` 之前），
+  修复后监听器把变更项状态镜像到发布单（测试断言 `DONE`/`FAILED`）；该 live 数据已由 `demo-lib.sql` 恢复。
+- 截图 4 张入库；**未人眼复核**（实现模型无图像输入）。
+
+**与设计不一致（前端，代码为准）**
+
+1. **创建表单在 `SubsystemDetailView.vue`，不是 `UnitListView.vue`**：后者只有列表、没有创建/编辑对话框；
+   坐标字段落在「新建部署单元」与单元详情「编辑部署单元」两处，UNIT 两处都不显示。
+2. **LIB 的 CODING 绑定面板是设计之外的补充**：设计只说 LIB 无部署/环境配置，但后端 `assertPublishable` 要求
+   `LIB_PUBLISH` 绑定；不补这个选择器，页面无法为 LIB 配齐发布条件。面板只显示 `BUILD` + `LIB_PUBLISH`。
+3. **LIB 隐藏「环境 DE」与「发布前置条件」**：两块对库没有意义；UNIT 原样保留（探针断言）。
+4. **发布页额外隐藏「停止发布」「进入生产回滚」、测试门禁/镜像/commit/重跑信息**：设计只要求隐藏生产准入与
+   测试人员；这些同属生产语义，保留会误导。保留「退出流水线」。
+5. **`WAIVED` 不是检查状态**：`gate_check.status` 仍是 `FAIL`，页面以 `ItemGate.conclusion === 'WAIVED'` 显示
+   「豁免入库」，并在 FAIL 行标「已豁免」；只看 `waiver.active` 会把过期/不匹配快照误报为已豁免。
+6. **`isLib` 的两路判断**：除单元类型外，节点里出现 LIB 节点即按 LIB 渲染；`publishItem` 类型声明不包含后端新增的
+   `type`（页面不依赖它）。这是有意的降级，避免单元接口失败时整页回退成 UNIT 形态。
+7. **探针的 UNIT 回归会真实保存一次 UNIT 2**（原值回写），每次运行产生一条 `RESOURCE_UPDATE` 审计；不影响 LIB
+   页面与截图。
+8. **演示数据多造一个 UNIT** `demo-sdk-consumer`：否则依赖启发式在种子环境里恒为空，无法验证非空表格与链接；
+   脚本幂等且只删自己的固定行，不改既有 demo 单。
+9. **依赖块在加载完成前显示占位来源**：`libInfo?.source ?? 'MODULE_PATH'`，失败时只显示错误文案；接口契约中的
+   `source` 仍以服务端为准。
+
+**未做（P6-A 明确不做）**
+
+- **没有制品详情/下载链接**：不接私服（Q4），页面只显示坐标与入库任务结果。
+- **没有版本规则**：版本取自变更项，页面不自动递增/校验重复。
+- **没有依赖 API**：依赖仍是 `module_path` 启发式，页面上明确标注。
+- **没有 LIB 通知/待办/回滚/日常入口**：库不进入生产准入，也没有测试部署与生产部署。
+- **没有前端单测**：覆盖靠 `scripts/verify-p6a-ui.mjs`；探针的 LIB 成功/失败数据来自种子，**不是真实上传成功后的
+  界面证据**（真实 live 只到 BUILD 失败）。
+- **截图未人眼复核**；端到端成功路径（`publish.start` 真正返回）未在本机验证。
