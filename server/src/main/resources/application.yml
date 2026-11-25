@@ -59,3 +59,8 @@ release:
     dispatch-enabled: true
     # The WeCom webhook must be https://. Enable only for an internal robot or a local test server.
     allow-insecure-http: false
+  approval:
+    # 10min approval-SLA scan (P6-E design §1): remind at 12h / escalate at 24h by default, both
+    # configurable in the platform settings. Disable it in environments that run a single externally
+    # scheduled scanner.
+    reminder-enabled: true

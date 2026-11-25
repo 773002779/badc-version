@@ -33,12 +33,13 @@ import java.util.Set;
 
 /**
  * The P6-B platform settings (design §1/§2/§3): the gate check switches, the two approval-role
- * member lists and the abandoned-pause bound, stored as three sections of the generic
- * {@code app_setting} key/value table.
+ * member lists and the abandoned-pause bound, plus the P6-E approval SLA, stored as four sections
+ * of the generic {@code app_setting} key/value table.
  *
- * <p><strong>Typed views, one JSON section each.</strong> The three rows are addressed by
- * {@code GATE} / {@code APPROVER} / {@code LOCK}; {@link #gate()}, {@link #approvers()} and
- * {@link #lock()} expose them as typed records, and each {@code save*} method validates the payload,
+ * <p><strong>Typed views, one JSON section each.</strong> The four rows are addressed by
+ * {@code GATE} / {@code APPROVER} / {@code LOCK} / {@code APPROVAL}; {@link #gate()},
+ * {@link #approvers()}, {@link #lock()} and {@link #approvalSla()} expose them as typed records, and
+ * each {@code save*} method validates the payload,
  * writes the section and then records one {@code SETTING_UPDATE} audit row whose {@code before} and
  * {@code after} are the whole section payload (the design's "整段 JSON"). Platform-level settings
  * carry no scope columns, so only an ALL-scope caller can read the audit rows.
@@ -69,10 +70,25 @@ public class SettingsService {
     public static final String SECTION_GATE = "GATE";
     public static final String SECTION_APPROVER = "APPROVER";
     public static final String SECTION_LOCK = "LOCK";
+    /** P6-E: the approval SLA (enabled + the two reminder thresholds), seeded by V33. */
+    public static final String SECTION_APPROVAL = "APPROVAL";
 
     /** The two approval roles the approver section owns (design §2.2). */
     public static final String ROLE_OPS_LEAD = "OPS_LEAD";
     public static final String ROLE_DEPT_MANAGER = "DEPT_MANAGER";
+
+    /**
+     * The P6-E approval-reminder defaults (design §1/§2): the requirement's 12h remind and 24h
+     * escalate points. They are also the fallback when the {@code APPROVAL} row is unreadable,
+     * malformed or inconsistent, and the enabled switch then falls back to {@code true}: a broken
+     * settings row must not silently stop every reminder.
+     */
+    public static final int DEFAULT_REMIND_HOURS = 12;
+    public static final int DEFAULT_ESCALATE_HOURS = 24;
+    public static final int MIN_REMIND_HOURS = 1;
+    public static final int MAX_REMIND_HOURS = 72;
+    public static final int MIN_ESCALATE_HOURS = 2;
+    public static final int MAX_ESCALATE_HOURS = 168;
 
     /** {@code release.unit-lease.max-paused-hours} default, identical to the pre-P6-B bound. */
     public static final int DEFAULT_PAUSE_BOUND_HOURS = 168;
@@ -136,6 +152,27 @@ public class SettingsService {
         Integer hours = parsePauseBound(po);
         return new LockSettings(hours == null ? DEFAULT_PAUSE_BOUND_HOURS : hours,
             updatedBy(po), updatedAt(po));
+    }
+
+    /**
+     * The approval SLA (P6-E design §1/§2): the enabled switch and the two reminder thresholds.
+     *
+     * <p>A missing, unreadable, malformed or inconsistent row degrades to the documented fallback —
+     * enabled, 12 hours, 24 hours — because the safe direction for a reminder feature is to keep
+     * reminding. The {@code APPROVAL_REMIND}/{@code APPROVAL_ESCALATE} unique keys make a repeated
+     * scan harmless, so falling back to "enabled" cannot spam anybody; a threshold crossing
+     * ({@code escalateHours <= remindHours}) is treated as a broken row rather than made to work.
+     */
+    public ApprovalSla approvalSla() {
+        AppSettingPO po;
+        try {
+            po = settingMapper.selectById(SECTION_APPROVAL);
+        } catch (RuntimeException ex) {
+            log.warn("APPROVAL setting could not be read; using the enabled 12/24-hour defaults: {}",
+                ex.getMessage());
+            return defaultApprovalSla(null, null);
+        }
+        return parseApproval(po);
     }
 
     // ------------------------------------------------------------------ consumer-facing reads
@@ -267,6 +304,53 @@ public class SettingsService {
         return saved;
     }
 
+    /**
+     * Saves the approval SLA (P6-E design §2). The two thresholds must stay in their documented
+     * ranges and the escalation must stay strictly above the reminder, otherwise the same step would
+     * be escalated before anybody had a chance to sign it.
+     *
+     * @throws BizException 40000 a missing switch, a threshold outside 1–72 / 2–168 hours, or an
+     *                      escalation that is not greater than the reminder
+     */
+    public ApprovalSla saveApprovalSla(Boolean enabled, Integer remindHours,
+                                       Integer escalateHours) {
+        if (enabled == null) {
+            throw new BizException(BizError.PARAM_INVALID, "启用开关不能为空",
+                Map.of("enabled", "不能为空"));
+        }
+        if (remindHours == null || remindHours < MIN_REMIND_HOURS
+            || remindHours > MAX_REMIND_HOURS) {
+            throw new BizException(BizError.PARAM_INVALID, "提醒阈值必须在 "
+                + MIN_REMIND_HOURS + "-" + MAX_REMIND_HOURS + " 小时之间",
+                Map.of("remindHours", "超出范围"));
+        }
+        if (escalateHours == null || escalateHours < MIN_ESCALATE_HOURS
+            || escalateHours > MAX_ESCALATE_HOURS) {
+            throw new BizException(BizError.PARAM_INVALID, "升级阈值必须在 "
+                + MIN_ESCALATE_HOURS + "-" + MAX_ESCALATE_HOURS + " 小时之间",
+                Map.of("escalateHours", "超出范围"));
+        }
+        if (escalateHours <= remindHours) {
+            throw new BizException(BizError.PARAM_INVALID, "升级阈值必须大于提醒阈值",
+                Map.of("escalateHours", "必须大于提醒阈值"));
+        }
+        ApprovalSla before = approvalSla();
+        String actor = UserContext.current().userId();
+        Instant now = Instant.now();
+        writeSection(SECTION_APPROVAL,
+            approvalJson(enabled, remindHours, escalateHours), actor, now);
+        ApprovalSla saved = approvalSla();
+        audit.record(AuditCommand.of(AuditAction.SETTING_UPDATE, SECTION_APPROVAL, "审批时效设置",
+                "更新审批时效（" + (saved.enabled() ? "启用" : "停用") + "，提醒 "
+                    + saved.remindHours() + " 小时、升级 " + saved.escalateHours() + " 小时）")
+            .before(approvalAuditValues(before))
+            .after(approvalAuditValues(saved))
+            .build());
+        log.info("APPROVAL setting saved: enabled={}, remindHours={}, escalateHours={}, by={}",
+            saved.enabled(), saved.remindHours(), saved.escalateHours(), actor);
+        return saved;
+    }
+
     // ------------------------------------------------------------------ validation
 
     /** Canonical check order, de-duplicated; an empty list is the design's 40000. */
@@ -375,6 +459,14 @@ public class SettingsService {
         return json(values);
     }
 
+    private String approvalJson(boolean enabled, int remindHours, int escalateHours) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("enabled", enabled);
+        values.put("remindHours", remindHours);
+        values.put("escalateHours", escalateHours);
+        return json(values);
+    }
+
     private String json(Map<String, Object> values) {
         try {
             return objectMapper.writeValueAsString(values);
@@ -457,6 +549,56 @@ public class SettingsService {
         }
     }
 
+    /**
+     * The stored approval SLA. Missing/malformed/out-of-range values, and an escalation that is not
+     * above the reminder, all degrade to the documented enabled 12/24 fallback (see
+     * {@link #approvalSla()}); a partially valid row is not trusted field by field, because a
+     * threshold crossing is itself a broken section.
+     */
+    private ApprovalSla parseApproval(AppSettingPO po) {
+        if (po == null || po.getValueJson() == null) {
+            log.warn("APPROVAL setting is missing; using the enabled 12/24-hour defaults");
+            return defaultApprovalSla(null, null);
+        }
+        try {
+            JsonNode root = objectMapper.readTree(po.getValueJson());
+            Boolean enabled = booleanOrNull(root.path("enabled"));
+            Integer remind = intOrNull(root.path("remindHours"));
+            Integer escalate = intOrNull(root.path("escalateHours"));
+            if (enabled == null
+                || !inRange(remind, MIN_REMIND_HOURS, MAX_REMIND_HOURS)
+                || !inRange(escalate, MIN_ESCALATE_HOURS, MAX_ESCALATE_HOURS)
+                || escalate <= remind) {
+                log.warn("APPROVAL setting is invalid; using the enabled 12/24-hour defaults");
+                return defaultApprovalSla(updatedBy(po), updatedAt(po));
+            }
+            return new ApprovalSla(enabled, remind, escalate, updatedBy(po), updatedAt(po));
+        } catch (JsonProcessingException ex) {
+            log.warn("APPROVAL setting is not valid JSON; using the enabled 12/24-hour defaults: {}",
+                ex.getMessage());
+            return defaultApprovalSla(updatedBy(po), updatedAt(po));
+        }
+    }
+
+    private static ApprovalSla defaultApprovalSla(String updatedBy, Instant updatedAt) {
+        return new ApprovalSla(true, DEFAULT_REMIND_HOURS, DEFAULT_ESCALATE_HOURS, updatedBy,
+            updatedAt);
+    }
+
+    private static boolean inRange(Integer value, int min, int max) {
+        return value != null && value >= min && value <= max;
+    }
+
+    /** A numeric JSON field, or {@code null} when absent or of the wrong shape. */
+    private static Integer intOrNull(JsonNode node) {
+        return node != null && node.isNumber() && node.canConvertToInt() ? node.asInt() : null;
+    }
+
+    /** A boolean JSON field, or {@code null} when absent or of the wrong shape. */
+    private static Boolean booleanOrNull(JsonNode node) {
+        return node != null && node.isBoolean() ? node.asBoolean() : null;
+    }
+
     private static List<String> strings(JsonNode node) {
         if (node == null || !node.isArray()) {
             return List.of();
@@ -510,6 +652,14 @@ public class SettingsService {
         return values;
     }
 
+    private static Map<String, Object> approvalAuditValues(ApprovalSla settings) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("enabled", settings.enabled());
+        values.put("remindHours", settings.remindHours());
+        values.put("escalateHours", settings.escalateHours());
+        return values;
+    }
+
     // ------------------------------------------------------------------ views
 
     /**
@@ -546,6 +696,14 @@ public class SettingsService {
 
     /** The abandoned-pause bound in hours. */
     public record LockSettings(int pauseBoundHours, String updatedBy, Instant updatedAt) {
+    }
+
+    /**
+     * The approval SLA of P6-E: the on/off switch and the two wait thresholds in hours. The record is
+     * the read view of the {@code APPROVAL} section and the consumer-facing value the scan uses.
+     */
+    public record ApprovalSla(boolean enabled, int remindHours, int escalateHours,
+                              String updatedBy, Instant updatedAt) {
     }
 
     /** The two lists of the {@code APPROVER} JSON section. */

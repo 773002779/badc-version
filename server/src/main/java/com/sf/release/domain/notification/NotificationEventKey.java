@@ -20,6 +20,11 @@ public enum NotificationEventKey {
     TEST_ENV_READY("测试部署已就绪", NotificationObjectType.ORDER),
     APPROVAL_PENDING("待审批", NotificationObjectType.ORDER),
     APPROVAL_DECIDED("审批结果", NotificationObjectType.ORDER),
+    // P6-E (GAP-12): the approval SLA scan. REMIND is the 12h notice to the pending step's role;
+    // ESCALATE is the 24h notice to ADMIN + the system owner that also suppresses the reminder
+    // (escalation already carries the reminder's meaning). Both point at the 发布单.
+    APPROVAL_REMIND("审批待处理提醒", NotificationObjectType.ORDER),
+    APPROVAL_ESCALATE("审批超时升级", NotificationObjectType.ORDER),
     GATE_INVALIDATED("门禁失效", NotificationObjectType.ORDER),
     PROD_DONE("生产完成", NotificationObjectType.ORDER),
     WAIVER_PENDING("豁免待审批", NotificationObjectType.WAIVER),

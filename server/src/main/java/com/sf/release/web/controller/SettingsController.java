@@ -5,6 +5,8 @@ import com.sf.release.common.ApiResponse;
 import com.sf.release.common.security.Permissions;
 import com.sf.release.common.security.RequirePerm;
 import com.sf.release.web.dto.SettingsDtos;
+import com.sf.release.web.dto.SettingsDtos.ApprovalSettingsRequest;
+import com.sf.release.web.dto.SettingsDtos.ApprovalSettingsResponse;
 import com.sf.release.web.dto.SettingsDtos.ApproverSettingsRequest;
 import com.sf.release.web.dto.SettingsDtos.ApproverSettingsResponse;
 import com.sf.release.web.dto.SettingsDtos.GateSettingsRequest;
@@ -26,7 +28,9 @@ import org.springframework.web.bind.annotation.RestController;
  *   <li>{@code GET/PUT /api/v1/settings/gate} — the enabled {@code CheckType} names;</li>
  *   <li>{@code GET/PUT /api/v1/settings/approvers} — the {@code OPS_LEAD} /
  *       {@code DEPT_MANAGER} member lists;</li>
- *   <li>{@code GET/PUT /api/v1/settings/lock} — {@code pauseBoundHours} (1–8760).</li>
+ *   <li>{@code GET/PUT /api/v1/settings/lock} — {@code pauseBoundHours} (1–8760);</li>
+ *   <li>{@code GET/PUT /api/v1/settings/approval} — the P6-E approval SLA: {@code enabled} plus
+ *       {@code remindHours} (1–72) and {@code escalateHours} (2–168, above the reminder).</li>
  * </ul>
  *
  * <p><strong>The saving user comes from the request identity.</strong> The body never carries an
@@ -85,5 +89,19 @@ public class SettingsController {
     public ApiResponse<LockSettingsResponse> saveLock(
             @Valid @RequestBody LockSettingsRequest request) {
         return ApiResponse.ok(SettingsDtos.lockOf(settings.saveLock(request.pauseBoundHours())));
+    }
+
+    @RequirePerm(Permissions.SETTING_MANAGE)
+    @GetMapping("/settings/approval")
+    public ApiResponse<ApprovalSettingsResponse> approval() {
+        return ApiResponse.ok(SettingsDtos.approvalOf(settings.approvalSla()));
+    }
+
+    @RequirePerm(Permissions.SETTING_MANAGE)
+    @PutMapping("/settings/approval")
+    public ApiResponse<ApprovalSettingsResponse> saveApproval(
+            @Valid @RequestBody ApprovalSettingsRequest request) {
+        return ApiResponse.ok(SettingsDtos.approvalOf(settings.saveApprovalSla(
+            request.enabled(), request.remindHours(), request.escalateHours())));
     }
 }

@@ -167,6 +167,53 @@ public class NotificationRecipientResolver {
         return List.copyOf(recipients);
     }
 
+    // ------------------------------------------------------------------ approval SLA (P6-E)
+
+    /**
+     * The P6-E {@code APPROVAL_REMIND} audience: the effective approver list of the pending step's
+     * role. When that list is empty the system owner receives the message with the same
+     * "角色无人" note as {@link #approvalPendingTargets} — the two approval notices must not disagree
+     * about who a roleless step falls back to.
+     *
+     * <p>The owner id comes from the scan row (the system row is joined by the due query), so this
+     * method does not re-read the subsystem; the result is de-duplicated and id-ordered so a repeated
+     * scan writes the same rows.
+     */
+    public List<NotificationTarget> approvalReminderTargets(String ownerId, List<String> approvers,
+                                                            String baseBody) {
+        Set<String> distinct = new TreeSet<>();
+        if (approvers != null) {
+            for (String approver : approvers) {
+                addIfPresent(distinct, approver);
+            }
+        }
+        if (!distinct.isEmpty()) {
+            return distinct.stream()
+                .map(user -> new NotificationTarget(user, null)).toList();
+        }
+        String owner = trimToNull(ownerId);
+        if (owner == null) {
+            return List.of();
+        }
+        return List.of(new NotificationTarget(owner, fallbackNote(baseBody)));
+    }
+
+    /**
+     * The P6-E {@code APPROVAL_ESCALATE} audience (design §1/§3): every ADMIN user plus the system
+     * owner, de-duplicated — an owner who also holds ADMIN is one recipient, not two.
+     */
+    public List<NotificationTarget> approvalEscalateTargets(String ownerId,
+                                                            List<String> adminUserIds) {
+        Set<String> recipients = new TreeSet<>();
+        if (adminUserIds != null) {
+            for (String admin : adminUserIds) {
+                addIfPresent(recipients, admin);
+            }
+        }
+        addIfPresent(recipients, ownerId);
+        return recipients.stream().map(user -> new NotificationTarget(user, null)).toList();
+    }
+
     // ------------------------------------------------------------------ freeze impact (4.3)
 
     /**

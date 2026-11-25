@@ -43,6 +43,9 @@ release:
     dispatch-enabled: false
     # MockWebServer speaks plain HTTP; the suite publishes its own webhook address.
     allow-insecure-http: true
+  approval:
+    # Same reason: the 10min approval-SLA scan is invoked explicitly with a fixed clock.
+    reminder-enabled: false
   redis:
     enabled: false
   pipeline:

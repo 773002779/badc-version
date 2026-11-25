@@ -1,5 +1,6 @@
 package com.sf.release.web.dto;
 
+import com.sf.release.application.settings.SettingsService.ApprovalSla;
 import com.sf.release.application.settings.SettingsService.ApproverSettings;
 import com.sf.release.application.settings.SettingsService.GateSettings;
 import com.sf.release.application.settings.SettingsService.LockSettings;
@@ -16,9 +17,10 @@ import java.util.List;
  * {@code enabledCheckNames()} instead of the enum. A check's machine name is the contract; the
  * label belongs to the verification panel.
  *
- * <p>The three blocks mirror the stored sections one-to-one
- * ({@code enabledChecks}, {@code opsLead/deptManager}, {@code pauseBoundHours}) and carry the same
- * {@code updatedBy/updatedAt} metadata as the 「消息通知」 block.
+ * <p>The four blocks mirror the stored sections one-to-one
+ * ({@code enabledChecks}, {@code opsLead/deptManager}, {@code pauseBoundHours},
+ * {@code enabled/remindHours/escalateHours}) and carry the same {@code updatedBy/updatedAt}
+ * metadata as the 「消息通知」 block.
  */
 public final class SettingsDtos {
 
@@ -37,6 +39,11 @@ public final class SettingsDtos {
 
     public static LockSettingsResponse lockOf(LockSettings view) {
         return new LockSettingsResponse(view.pauseBoundHours(), view.updatedBy(), view.updatedAt());
+    }
+
+    public static ApprovalSettingsResponse approvalOf(ApprovalSla view) {
+        return new ApprovalSettingsResponse(view.enabled(), view.remindHours(),
+            view.escalateHours(), view.updatedBy(), view.updatedAt());
     }
 
     /** The 「门禁规则」 block: enabled check types plus who last saved it. */
@@ -81,5 +88,27 @@ public final class SettingsDtos {
     public record LockSettingsRequest(
         @NotNull(message = "暂停上限不能为空")
         Integer pauseBoundHours) {
+    }
+
+    /** The P6-E 「审批时效」 block: the switch plus the two reminder thresholds in hours. */
+    public record ApprovalSettingsResponse(
+        boolean enabled,
+        int remindHours,
+        int escalateHours,
+        String updatedBy,
+        Instant updatedAt) {
+    }
+
+    /**
+     * Save form of the approval SLA. The request names all three values (a partial save would leave
+     * an ambiguous threshold pair); the service validates 1–72 / 2–168 and {@code escalate > remind}.
+     */
+    public record ApprovalSettingsRequest(
+        @NotNull(message = "启用开关不能为空")
+        Boolean enabled,
+        @NotNull(message = "提醒阈值不能为空")
+        Integer remindHours,
+        @NotNull(message = "升级阈值不能为空")
+        Integer escalateHours) {
     }
 }

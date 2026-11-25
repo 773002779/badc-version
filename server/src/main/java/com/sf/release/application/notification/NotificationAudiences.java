@@ -4,6 +4,7 @@ import com.sf.release.domain.approval.ApprovalRole;
 import com.sf.release.domain.task.MemberRole;
 
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -33,6 +34,22 @@ public final class NotificationAudiences {
     public static NotificationAudience waiverApprovers(long itemId) {
         return (resolver, baseBody) -> resolver.waiverRecipients(itemId)
             .stream().map(user -> new NotificationTarget(user, null)).toList();
+    }
+
+    /**
+     * The P6-E reminder audience: the effective approver list of the pending step's role, else the
+     * system owner. The list is the P6-B settings view, resolved by the caller before {@code notify}.
+     */
+    public static NotificationAudience approvalReminder(String ownerId, List<String> approvers) {
+        List<String> effective = approvers == null ? List.of() : List.copyOf(approvers);
+        return (resolver, baseBody) ->
+            resolver.approvalReminderTargets(ownerId, effective, baseBody);
+    }
+
+    /** The P6-E escalation audience: the ADMIN users plus the system owner (design §3). */
+    public static NotificationAudience approvalEscalate(String ownerId, List<String> adminUserIds) {
+        List<String> admins = adminUserIds == null ? List.of() : List.copyOf(adminUserIds);
+        return (resolver, baseBody) -> resolver.approvalEscalateTargets(ownerId, admins);
     }
 
     /** The frozen scope's in-flight releases, aggregated per person (4.3); {@code 0} = global. */

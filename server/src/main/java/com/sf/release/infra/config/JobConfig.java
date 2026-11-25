@@ -6,6 +6,7 @@ import com.sf.release.application.GateService;
 import com.sf.release.application.GateWaiverService;
 import com.sf.release.application.notification.NotificationDispatchService;
 import com.sf.release.application.notification.NotificationService;
+import com.sf.release.application.reminder.ApprovalReminderService;
 import com.sf.release.application.settings.SettingsService;
 import com.sf.release.domain.pipeline.PipelineOrchestrator;
 import com.sf.release.domain.pipeline.port.DistributedLock;
@@ -13,6 +14,7 @@ import com.sf.release.domain.pipeline.port.ItemFailureRepairer;
 import com.sf.release.domain.pipeline.port.PipelineRepository;
 import com.sf.release.domain.pipeline.port.UnitLease;
 import com.sf.release.infra.engine.EngineRegistry;
+import com.sf.release.infra.job.ApprovalReminderJob;
 import com.sf.release.infra.job.FreezeExpiryJob;
 import com.sf.release.infra.job.GateReconcileJob;
 import com.sf.release.infra.job.NotificationDispatchJob;
@@ -26,6 +28,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+
+import java.time.Clock;
 
 /**
  * Declares the scheduled jobs. {@link ReconcileJob} is conditional on
@@ -121,5 +125,22 @@ public class JobConfig {
     public NotificationDispatchJob notificationDispatchJob(
         NotificationDispatchService dispatchService) {
         return new NotificationDispatchJob(dispatchService);
+    }
+
+    /**
+     * The 10min approval-SLA scan (P6-E design §1): remind the pending steps past the configured
+     * reminder threshold and escalate the ones past the escalation threshold. Its own switch, like
+     * the other jobs: the test profile turns it off so the shared schema is not mutated by a
+     * background thread, and the tests invoke the service/job with a fixed clock.
+     *
+     * <p>The {@link Clock} bean (P6-E) is injected instead of calling {@code Instant.now()} inside
+     * the job, so the wait figures and the two thresholds have one testable source.
+     */
+    @Bean
+    @ConditionalOnProperty(name = "release.approval.reminder-enabled", havingValue = "true",
+        matchIfMissing = true)
+    public ApprovalReminderJob approvalReminderJob(ApprovalReminderService reminderService,
+                                                   Clock clock) {
+        return new ApprovalReminderJob(reminderService, clock);
     }
 }
