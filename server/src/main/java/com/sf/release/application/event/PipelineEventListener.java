@@ -155,8 +155,14 @@ public class PipelineEventListener {
             }
             ItemTransitions.Outcome outcome = transitions.apply(itemId, itemEvent);
             switch (outcome) {
-                case APPLIED -> log.info("item state advanced: itemId={} by {} (instanceId={})",
-                    itemId, itemEvent, event.instanceId());
+                case APPLIED -> {
+                    log.info("item state advanced: itemId={} by {} (instanceId={})",
+                        itemId, itemEvent, event.instanceId());
+                    // The 发布记录 page reads release_order.status, so the order mirrors the item
+                    // status as it advances. Without this mirror a release that failed at BUILD
+                    // (or a library that ended DONE) kept showing INIT (P6-A review).
+                    mirrorOrderStatus(event.orderId(), itemId);
+                }
                 case NOT_ALLOWED -> log.warn("item {} does not accept {} (instanceId={},"
                         + " node={}, nodeStatus={}); skipped", itemId, itemEvent,
                     event.instanceId(), event.nodeType(), event.status());
@@ -395,6 +401,31 @@ public class PipelineEventListener {
         PipelineInstancePO instance = instanceMapper.selectById(instanceId);
         return instance != null
             && TriggerType.ROLLBACK.name().equals(instance.getTriggerType());
+    }
+
+    /**
+     * Mirrors the item's new status onto its 发布单 row. The global 发布记录 page shows
+     * {@code release_order.status}, so an order must not keep {@code INIT} after the pipeline moved
+     * the item to DONE/FAILED. The update is deliberately not a {@code row_version} CAS: the order
+     * status is a read model of the item and the explicit sync points (execute, approval, freeze,
+     * stop/exit) write it the same way.
+     */
+    private void mirrorOrderStatus(long orderId, long itemId) {
+        if (orderId <= 0) {
+            return;
+        }
+        ReleaseItemPO advanced = itemMapper.selectById(itemId);
+        if (advanced == null || advanced.getStatus() == null) {
+            return;
+        }
+        String status = advanced.getStatus();
+        ReleaseOrderPO order = orderMapper.selectById(orderId);
+        if (order == null || status.equals(order.getStatus())) {
+            return;
+        }
+        orderMapper.update(null, Wrappers.<ReleaseOrderPO>lambdaUpdate()
+            .eq(ReleaseOrderPO::getId, orderId)
+            .set(ReleaseOrderPO::getStatus, status));
     }
 
     private static String messageOf(RuntimeException ex) {

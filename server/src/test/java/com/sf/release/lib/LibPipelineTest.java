@@ -337,6 +337,10 @@ class LibPipelineTest {
         assertThat(nodeStatus(NodeType.LIB_PUBLISH)).isEqualTo("SUCCESS");
         assertThat(instanceStatus()).isEqualTo("DONE");
         assertThat(itemStatus()).isEqualTo("DONE");
+        assertThat(jdbc.queryForObject("SELECT status FROM release_order WHERE publish_no = ?",
+            String.class, publishNo))
+            .as("the 发布记录 order mirrors the finished item, not INIT")
+            .isEqualTo("DONE");
         assertThat(jdbc.queryForObject(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'PUBLISH' AND object_id = ?",
             Integer.class, publishNo)).isEqualTo(1);
@@ -362,6 +366,10 @@ class LibPipelineTest {
         assertThat(instanceStatus()).isEqualTo("FAILED");
         assertThat(instanceStatusReason()).contains("artifact repository 500");
         assertThat(itemStatus()).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT status FROM release_order WHERE publish_no = ?",
+            String.class, publishNo))
+            .as("a failed library release shows FAILED in the records page, not INIT")
+            .isEqualTo("FAILED");
     }
 
     // ------------------------------------------------------------------ fixtures and helpers
