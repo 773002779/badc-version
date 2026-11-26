@@ -1542,3 +1542,71 @@ GAP-12 / J7 的前端是设置页的**第四块**「审批时效」：一个开�
 - **无前端单测、截图未人眼复核**：覆盖靠 `scripts/verify-p6e-ui.mjs` 双主题 DOM 断言；模板轮文档模型无图像
   输入，两张 1440×900 截图只核对了尺寸与文件大小，未人工看图。
 - **不改变 P6-B 三块**：门禁/审批人/锁超时的行为、文案与截图不变；审批时效只是第四块。
+## 23. P6-F · 页面补齐：批量部署 / 人员列 / 豁免默认（2026-11-26）
+
+对应需求 PART-02（FR-B-02 批量部署）、PART-03（FR-P-01 人员列）、PART-06（J10 豁免默认有效期）；契约
+`docs/superpowers/specs/2026-11-26-p6f-part-fill-design.md`。
+
+### 23.1 批量部署（任务详情页）
+
+- 变更项表加 selection 列：**只有 `PENDING`（待发布）状态可勾选**——这是状态机唯一可发起 `PUBLISH` 的状态
+  （`FAILED` 走重跑、在途不可再发布）；比设计原文「DONE 不可勾选」更窄，被勾选行的语义就是「点发布会成功」。
+- `DataSection #actions` 的「批量发布（N）」按钮：空选择禁用并提示先勾选；无 `release:publish` 权限禁用并给原因。
+- 确认框（`ElMessageBox.confirm`）写明：**串行发布、逐项创建发布单、某项失败不中断后续项、结束后成败摘要**。
+- 执行：串行逐项调既有 `publishItem`（每项一个 `POST /items/{id}/publish`，行级 loading 复用 `publishing`）；
+  结束后清空选择、刷新列表，全部成功 toast「批量发布完成：N 项全部成功」，部分失败 `ElMessageBox.alert`
+  「成功 N 项，失败 M 项。失败明细：<CRID：原因>；…」。**不做后端批量端点**（设计取舍：逐项的锁/门禁/审计
+  语义与单条完全一致）。
+
+### 23.2 发布单人员列（发布内容页）
+
+- `ReleaseDetail.testers/deployers`（服务端：任务成员 `TEST/OPS` 角色按 userId 排序，常驻空数组）渲染为
+  头部「测试人员 / 部署人员」两个 summary-item：文本拼接 `name 或 userId`，title 展开全部工号，空态 `—`。
+- 纯只读：权限仍是 `release:*` / `control:*`，与人员无关。
+
+### 23.3 豁免默认有效期（设置页 + 豁免对话框）
+
+- 设置页「门禁规则」块内新增「豁免默认有效期（天）」：独立字段 + 独立保存（`GET/PUT /api/v1/settings/waiver`，
+  1–90 整数客户端校验、禁用保存于非法值），下方「最近保存」行；读失败进块内 error alert。它属于门禁规则块
+  （J10），但 API 是自己的端点，与块内「检查开关」分开保存。
+- `VerifyPanel` 豁免对话框「有效期（天）」可清空：留空提交时不传 `expireAt`（服务端按 `WAIVER.defaultDays`
+  计算），输入旁提示「留空则使用平台默认有效期（设置 → 门禁规则可配）」；显式 1–90 仍客户端计算。
+
+**探针**：`scripts/verify-p6f-ui.mjs`（种子 `demo-batchpublish.sql`：PENDING×2 + DONE×1，失败项为无绑定的
+91002 单元走真实服务端拒绝）双主题绿、0 console error；截图 `batch-publish-{light,dark}.png`（勾选态）、
+`settings-waiver-{light,dark}.png`（门禁块 + 豁免字段）。
+
+**明确不做（P6-F 前端）**：无后端批量端点与进度持久化（中途刷新丢进度，已建发布单不丢）；豁免对话框不预读
+当前配置天数；人员列不做悬停卡片。
+
+## 24. P6-G · 单 DE 重部署与任务日志（2026-11-26）
+
+对应需求 PART-04；契约 `docs/superpowers/specs/2026-11-26-p6g-redeploy-logs-design.md`。
+
+### 24.1 生产任务行与「重新部署」（发布内容页）
+
+- **节点模板重构**：`PROD_DEPLOY` 节点改为「生产准入面板 + 部署任务行」并排（此前 AdmissionPanel 独占该
+  节点，任务行不可见）；`VERIFY`/`LIB_SECURITY` 仍只渲染各自面板，其余节点照旧渲染任务行（`PENDING` 节点显示
+  「N 项任务等待执行」）。
+- 生产 `DEPLOY` 任务行尾部「重新部署」按钮（reason 字符串模式）：无 `control:execute-prod` → 权限原因；
+  任务非 `FAILED/TIMEOUT` →「只有失败或超时的任务可以重新部署；成功批次请走重跑或回滚」；变更项非
+  `FAILED/PROD_DEPLOYING` → 状态原因。构建/测试/入库任务行不渲染该按钮。
+- 确认框写明规则：**同批次 DE 一起重试、其余批次跳过；沿用上一实例镜像、不重新构建；未完成检查将失效，需要
+  重新检查**。成功 toast「已创建重跑实例 <pipelineNo>：批次 N 整批重试（目标 <deName>）」+ `load(true)`；
+  40001（状态已变）关确认框并重读。
+
+### 24.2 「日志」抽屉（发布内容页）
+
+- 每个有引擎作业的任务行（`CODE_CHECK/PKG_BUILD/IMG_BUILD/DEPLOY/LIB_PUBLISH`）渲染「日志」；`CHECK` 类
+  任务不渲染（无引擎作业，服务端也 40001）。
+- 抽屉（640px、专属 `log-drawer` 类与回滚抽屉区分）：头部为任务类型 + 批次/目标；正文等宽 `pre`（`surface-3`
+  底）追加渲染每页文本；**引擎失败显示服务端文案**（如「CODING 连接未配置：build.logs」的红色 alert）。
+- 分页按契约：一次一页（`offset += limit`，「加载更多」只在 `truncated` 时可用），「刷新」重置回第一页；
+  `truncated` 的口径是「整页即可能有下一页」。
+
+**探针**：`scripts/verify-p6g-ui.mjs`（种子 `demo-redeploy.sql`：批 1 成功 + 批 2 失败，清理自身实例与旧锁）
+双主题绿、0 console error：按钮条件与禁用原因（含无权限视角）、确认文案、一次真实 `POST`（详情 API 回
+`RERUN_FROM_NODE`、批 1 `SKIPPED`、批 2 重试）、日志抽屉引擎文案；截图 `redeploy-{light,dark}.png`。
+
+**明确不做（P6-G 前端）**：不做单 DE 粒度（整批重试）；不做历史实例日志查询（外链直达 CODING）；日志不缓存
+不落库；无前端单测（覆盖靠 27 个后端测试 + 双主题探针）。

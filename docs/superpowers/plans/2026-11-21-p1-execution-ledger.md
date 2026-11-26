@@ -722,3 +722,43 @@ Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有�
   approvalRequests=0 errors=0`）、截图 1440×900 视口（浅 94,463 B / 深 93,685 B）。探针只走 HTTP API、不依赖 MySQL、
   不改 `user_role`，但 `finally` PUT 恢复默认会把 `updatedBy/updatedAt` 写成 `dev` + 本次时间。前端**无单测**、
   截图未人眼复核；没有真实等 12 小时/真实企微收消息的端到端取证。`516a680` / `78bc195`
+## P6-F/P6-G 裁决（2026-11-26，页面补齐 + 单 DE 重部署与日志）
+
+- Ruling R128: 批量部署是**前端串行**，无后端批量端点（PART-02）：任务详情多选（只 `PENDING` 可勾——状态机
+  唯一可发起 `PUBLISH` 的状态，比设计原文「DONE 不可选」更窄）逐项调既有 `POST /items/{itemId}/publish`；
+  失败不中断、`ElMessageBox.alert` 成败摘要。逐项的锁/绑定/审计语义与单条发布完全一致；中途刷新丢批次进度
+  （已建发布单不丢）。`e67a4f9` / `ec4689a`
+- Ruling R129: 豁免默认有效期（PART-06）：`expireAt` 可空 → 服务端 `now + WAIVER.defaultDays`（V34 只插
+  `app_setting` 种子行 `{"defaultDays":7}`）；`GET/PUT /api/v1/settings/waiver`（`setting:manage` 读也 40009，
+  1–90 越界 40000，保存一行 `SETTING_UPDATE` object `WAIVER`）；显式有效期仍原样存、上限 90 天不变；前端
+  对话框不预读具体天数只提示「平台默认」。`e67a4f9` / `ec4689a`
+- Ruling R130: 发布单人员列（PART-03）：`ReleaseDetail` 常驻 `testers/deployers`（任务成员 TEST/OPS join
+  `app_user`，`LEFT JOIN` 保名、按 userId 排序、空数组），纯只读展示。`e67a4f9` / `ec4689a`
+- Ruling R131: 重部署资格（PART-04）：任务须属于该单**最新实例**、`PROD_DEPLOY/DEPLOY`、`FAILED/TIMEOUT`、该
+  `(batch,target)` 最新 attempt、目标 DE 仍在该单元生产环境、实例有可复用 `image_digest`；变更项与发布单须
+  `FAILED/PROD_DEPLOYING`。成功任务不提供（避免绕过准入）；历史实例只读。错误码：40000 不存在、40009 权限/范围、
+  40001 不合格、40006 锁。`b49f6f9`
+- Ruling R132: **整批重试**：新实例 = `PipelineFactory.createSingleDeRedeploy`（基于 `createRerun` 的
+  `RERUN_FROM_NODE@PROD_DEPLOY`，仅目标批次 DE 集合保持 PENDING，其余批次与更早节点 SKIPPED）。批次用 **DE id
+  集合**表达而非 batchNo——P6-C `REVERSE` 会重编号批次，DE 身份不变。沿用上一实例镜像/commit 不重建（J17 口径）。
+  变更项走既有 `RERUN→TESTING→EXECUTE_RERUN→PROD_DEPLOYING` 两边，无新状态/事件；`invalidateUnfinished`
+  失效未完成检查；审计 `RERUN`（ORDER，summary「单 DE 重部署（目标 <deName>）」）。`b49f6f9`
+- Ruling R133: 日志代理：`GET .../tasks/{taskId}/logs?offset=&limit=`（登录 + 范围，`@DataScope` 标记 +
+  `ScopeGuard` 在业务状态之前）。kind 映射 `CODE_CHECK/PKG_BUILD/IMG_BUILD→BUILD`、`DEPLOY→DEPLOY`、
+  `LIB_PUBLISH→PUBLISH`；`CHECK/AUTO_TEST`/`ROLLBACK/DAILY_DEPLOY` 40001（无引擎作业）；无 `external_id` 40001；
+  `offset>=0`、`limit 1–8000`（默认 8000）越界 40000；引擎异常（50001/50002）**原样透传不包装**；
+  `truncated = content.length() >= limit`（整页即可能有下一页）。不缓存不落库。`b49f6f9`
+- Ruling R134: `ReleaseTaskView` 增加 `id`（`node_task` 行 id）：发布内容任务行此前的 `taskType/batchNo/targetId`
+  无法唯一定位一行，两个新动作按 id 寻址；`batchNo/targetId` 保留用于展示。`b49f6f9`
+- Ruling R135: 发布页节点模板重构：`PROD_DEPLOY` 节点渲染「生产准入面板 + 部署任务行」并排（此前
+  AdmissionPanel 独占该节点、任务行不可见——P6-G 的必要重构）；`VERIFY`/`LIB_SECURITY` 仍只渲染各自面板；
+  「重新部署」按钮用 reason 字符串模式（权限/任务状态/变更项状态），「日志」按钮按任务类型集合渲染。
+  日志抽屉一次一页（`offset += limit`，「加载更多」仅 `truncated` 时可用；引擎失败显示服务端文案红色 alert）。
+  `ec4689a`
+- Ruling R136: 证据口径：27 个 redeploy 测试（真实库 + fake engine，覆盖设计 §4 的 1–3/5）、全量 1038 绿；
+  探针 `verify-p6g-ui.mjs`（种子 `demo-redeploy.sql`：批 1 成功 + 批 2 失败，种子按 order 清理自身全部实例与
+  旧锁）双主题绿、0 console error——断言按钮条件、确认文案、一次真实 POST（详情 API 回 `RERUN_FROM_NODE`、
+  批 1 `SKIPPED`、批 2 重试）、日志抽屉引擎文案（本机无 CODING 连接，真实成功路径只有 fake engine 单测）；
+  `verify-p6f-ui.mjs`（种子 `demo-batchpublish.sql`，失败项走真实服务端拒绝）双主题绿。截图
+  `redeploy-{light,dark}.png`、`batch-publish-{light,dark}.png`、`settings-waiver-{light,dark}.png`。`b49f6f9` /
+  `ec4689a`
