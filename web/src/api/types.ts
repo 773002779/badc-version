@@ -808,6 +808,29 @@ export interface TodoBoardView {
   mine: TodoGroupView
 }
 
+// --------------------------------------------- unit release summary (PART-01)
+
+/**
+ * The unit list's three summary columns (PART-01 design §1/§2): the newest successful production
+ * deploy (「最近发布版本 / 时间」— the same definition the rollback drawer shows) and the current
+ * lock row (「占用锁」). Both sections are null when the unit never deployed to production / is not
+ * locked.
+ */
+export interface UnitReleaseSummaryView {
+  unitId: number
+  latest?: {
+    digest: string
+    publishNo: string
+    finishedAt?: string | null
+    executedBy?: string | null
+  } | null
+  lock?: {
+    instanceId: number
+    acquiredAt?: string | null
+    expireAt?: string | null
+  } | null
+}
+
 // ---------------------------------------- unit pipeline config (P6-C)
 
 /**

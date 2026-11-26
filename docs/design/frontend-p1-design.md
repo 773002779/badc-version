@@ -1624,3 +1624,21 @@ GAP-12 / J7 的前端是设置页的**第四块**「审批时效」：一个开�
 - 按钮可用性、流水线行为、门禁与审计一概不变（`branch_mode` 不参与任何后端判定）。
 - 探针：`scripts/verify-p7-ui.mjs`（复用 `demo-redeploy.sql`，临时置 `COMPATIBLE` 后还原）双主题绿、
   0 console error；截图 `compatible-{light,dark}.png`。
+
+
+## 26. PART-01 · 单元列表摘要列与系统详情结构（2026-11-27）
+
+对应 PART-01；契约 `docs/superpowers/specs/2026-11-27-p01-page-structure-design.md`。
+
+- **单元列表**（`/units`）：新增「最近发布」（短 digest、发布单号链接、完成时间；无生产历史 `—`）与
+  「占用锁」（占用中 chip，tooltip 带实例号/到期；空 `—`）两列。数据来自新端点
+  `GET /units/{id}/release-summary`，前端对当前页单元逐行 best-effort 并发读取（`Promise.allSettled`，
+  失败行显示 `—`）。
+- **系统详情**（`/subsystems/{id}`）：右列新增「发布记录」块（`listReleases({systemId,size:10})`：发布单
+  链接、变更项 CRID/版本、部署单元、状态、创建时间；`#actions` 放「查看全部」跳记录页带系统过滤）；页头新增
+  「管控配置」按钮（`/control?subsystemId=`）。变更明细由发布记录行承接，不做按系统列变更项的新端点。
+- **生产管控页**（`/control`）：`onMounted` 读取 `route.query.subsystemId`，正数即预选
+  `targetSubsystem`（窗口与检查按它过滤；未知 id 只回显 `#id` 不报错）。
+- **单元详情「消息通知」块降级不做**（已接受残留，见未实现清单 §6）。
+- 探针：`scripts/verify-p1b-ui.mjs`（复用 `demo-redeploy.sql` + 插入锁行验证占用态 + 管控入口跳转预选）
+  双主题绿、0 console error；截图 `unit-summary-{light,dark}.png`、`subsystem-records-{light,dark}.png`。

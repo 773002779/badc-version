@@ -1,15 +1,16 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { createUnit, getMe, getSubsystem, listUnits, updateSubsystem } from '../api'
-import type { SubsystemView, UnitView } from '../api/types'
+import { createUnit, getMe, getSubsystem, listReleases, listUnits, updateSubsystem } from '../api'
+import type { ReleaseRecordRow, SubsystemView, UnitView } from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
 import EmptyState from '../components/EmptyState.vue'
 import KeyValue from '../components/KeyValue.vue'
 import StatusDot from '../components/StatusDot.vue'
+import { formatDateTime } from '../utils/format'
 import { ARTIFACT_COORDINATE_HINT, artifactCoordinateError } from '../utils/artifact'
 
 const route = useRoute()
@@ -17,6 +18,9 @@ const id = Number(route.params.id)
 
 const subsystem = ref<SubsystemView | null>(null)
 const units = ref<UnitView[]>([])
+// PART-01: the system's release records (the 变更明细 is carried by each record row's
+// CRID/version) — best-effort, an unreadable list renders the empty state.
+const releases = ref<ReleaseRecordRow[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const canManage = ref(false)
@@ -24,6 +28,8 @@ const dialog = ref(false)
 const projectDialog = ref(false)
 const projectDraft = ref('')
 const savingProject = ref(false)
+const releaseCount = ref(0)
+const hasReleases = computed(() => releases.value.length > 0)
 const form = reactive({
   name: '',
   ownerId: 'dev',
@@ -62,14 +68,18 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    const [s, u, me] = await Promise.all([
+    const [s, u, me, records] = await Promise.all([
       getSubsystem(id),
       listUnits({ pageNo: 1, pageSize: 100, subsystemId: id }),
-      getMe()
+      getMe(),
+      listReleases({ systemId: id, size: 10 }).catch(() => null)
     ])
     subsystem.value = s
     units.value = u.records
     canManage.value = me.perms.includes('setting:manage')
+    // PART-01: the system's newest release records (server-side data scope applies).
+    releases.value = records?.records ?? []
+    releaseCount.value = records?.total ?? 0
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : '加载失败'
   } finally {
@@ -139,9 +149,13 @@ async function submit() {
 
 <template>
   <div>
-    <PageHeader :title="subsystem?.name ?? '系统详情'" description="基本信息与下属部署单元。">
+    <PageHeader :title="subsystem?.name ?? '系统详情'" description="基本信息、部署单元与发布记录。">
       <el-button @click="load">刷新</el-button>
       <el-button type="primary" @click="dialog = true">新建部署单元</el-button>
+      <!-- PART-01: the 管控配置 entry jumps to the control page with this system preselected. -->
+      <router-link :to="{ path: '/control', query: { subsystemId: id } }">
+        <el-button title="查看该系统的冻结与发布窗口（生产管控页预选本系统）">管控配置</el-button>
+      </router-link>
     </PageHeader>
 
     <el-alert v-if="error" type="error" :closable="false" show-icon :title="error" style="margin-bottom: 16px" />
@@ -188,6 +202,48 @@ async function submit() {
         </el-table-column>
         </el-table>
         <EmptyState v-else-if="!loading" title="还没有部署单元" hint="部署单元是构建与部署的最小单位。" />
+        <div v-else style="padding: 24px"><el-skeleton :rows="4" animated /></div>
+      </DataSection>
+
+      <!-- PART-01: the system's release records; each row carries the 变更明细 (CRID/version). -->
+      <DataSection
+        class="system-releases"
+        title="发布记录"
+        :subtitle="releaseCount ? `最近 ${releases.length} / ${releaseCount} 条` : '暂无记录'"
+        flush
+      >
+        <template #actions>
+          <router-link :to="{ path: '/records', query: { systemId: id } }" class="small">
+            查看全部
+          </router-link>
+        </template>
+        <el-table v-if="hasReleases" :data="releases" row-key="publishNo" style="width: 100%">
+          <el-table-column label="发布单" min-width="170">
+            <template #default="{ row }">
+              <router-link :to="`/releases/${row.publishNo}`" class="mono">{{ row.publishNo }}</router-link>
+            </template>
+          </el-table-column>
+          <el-table-column label="变更项" min-width="140">
+            <template #default="{ row }">
+              <span class="mono">{{ row.crid }}</span>
+              <div class="weak small">{{ row.version }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="unitName" label="部署单元" min-width="130">
+            <template #default="{ row }">
+              <router-link :to="`/units/${row.unitId}`">{{ row.unitName ?? row.unitId }}</router-link>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="130">
+            <template #default="{ row }"><StatusDot :status="row.orderStatus" /></template>
+          </el-table-column>
+          <el-table-column label="创建时间" width="170">
+            <template #default="{ row }">
+              <span class="mono weak">{{ formatDateTime(row.createdAt) }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+        <EmptyState v-else-if="!loading" title="暂无发布记录" hint="该系统的变更项发布后，发布单会出现在这里。" />
         <div v-else style="padding: 24px"><el-skeleton :rows="4" animated /></div>
       </DataSection>
     </div>

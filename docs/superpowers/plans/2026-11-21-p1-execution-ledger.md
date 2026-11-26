@@ -773,3 +773,18 @@ Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有�
   `branchMode==='COMPATIBLE'` 时渲染 info 横幅/提示，不阻断任何操作；探针 `verify-p7-ui.mjs`（复用
   `demo-redeploy.sql`，临时置 `COMPATIBLE`、`finally` 还原 `STANDARD`）双主题绿、0 console error；截图
   `compatible-{light,dark}.png`；后端零改动（全量 1038 绿回归确认）。
+
+## PART-01 裁决（2026-11-27，页面信息结构）
+
+- Ruling R139: 单元摘要端点：`GET /units/{unitId}/release-summary`（`@DataScope` 标记 + `ScopeGuard`，
+  未知单元 40000、范围外 40009）。`latest` 复用 `RollbackRecordMapper.selectCurrent`——与回滚抽屉「当前线上
+  版本」同一查询定义（最近一次成功生产部署，任何触发类型），列表列与回滚目标不会口径漂移；`lock` 直读
+  `deploy_unit_lock` 行原样快照（过期未回收的租照样显示，与巡检回收行为一致）。无新表无迁移，读端点不写审计。
+- Ruling R140: 列表读取是前端逐行 best-effort：当前页 ≤100 行各一次小读（`Promise.allSettled`），失败行显示
+  `—`；不做后端批量聚合端点。系统详情「变更明细」由发布记录块（`listReleases({systemId})` 行含 CRID/版本）
+  承接，不做按系统列变更项的新端点。
+- Ruling R141: 管控配置入口：系统详情页头「管控配置」按钮跳 `/control?subsystemId=`；`ControlView` 读
+  `route.query.subsystemId` 正数即预选 `targetSubsystem`（窗口与检查按它过滤；未知 id 只回显 `#id` 不报错）。
+  **单元详情「消息通知」块降级不做**（通知是发布单维度、列表接口只按 page/unreadOnly 过滤，按单元聚合需新
+  join；通知中心已可查）——已接受残留。证据：5 个 `part01` 测试 + 全量 1043 绿；探针
+  `verify-p1b-ui.mjs` 双主题绿（种子 `demo-redeploy.sql` + 插锁行验证占用态、管控入口跳转预选）。

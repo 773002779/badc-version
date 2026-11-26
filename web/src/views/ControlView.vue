@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   checkWindow,
@@ -20,6 +21,7 @@ import KeyValue from '../components/KeyValue.vue'
 import { formatDateTime } from '../utils/format'
 
 const tab = ref<'freezes' | 'windows'>('freezes')
+const route = useRoute()
 const me = ref<{ perms: string[]; roles: string[]; userId: string } | null>(null)
 const subsystems = ref<SubsystemView[]>([])
 const error = ref<string | null>(null)
@@ -268,6 +270,12 @@ onMounted(async () => {
     subsystems.value = page.records
   } catch {
     subsystems.value = []
+  }
+  // PART-01: 系统详情的「管控配置」入口跳转带 subsystemId，进来即预选该系统（窗口与检查都
+  // 按它过滤；未知/被删的 id 只落在下拉里回显 `#id`，不报错）。
+  const fromQuery = Number(route.query.subsystemId)
+  if (Number.isFinite(fromQuery) && fromQuery > 0) {
+    targetSubsystem.value = fromQuery
   }
   await Promise.all([loadFreezes(), loadWindow()])
 })

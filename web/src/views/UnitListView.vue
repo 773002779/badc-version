@@ -1,17 +1,21 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { listSubsystems, listUnits } from '../api'
-import type { PageResult, SubsystemView, UnitView } from '../api/types'
+import { getUnitReleaseSummary, listSubsystems, listUnits } from '../api'
+import type { PageResult, SubsystemView, UnitView, UnitReleaseSummaryView } from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
 import EmptyState from '../components/EmptyState.vue'
 import StatusDot from '../components/StatusDot.vue'
+import { formatDateTime, shortSha } from '../utils/format'
 
 const rows = ref<PageResult<UnitView> | null>(null)
 const subsystems = ref<SubsystemView[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
+// PART-01: the three summary columns, fetched per row of the current page (best-effort; a
+// failed read renders —).
+const summaries = ref(new Map<number, UnitReleaseSummaryView>())
 const filters = reactive({
   subsystemId: undefined as number | undefined,
   type: '',
@@ -19,6 +23,9 @@ const filters = reactive({
   tag: '',
   keyword: ''
 })
+
+const latestOf = (id: number) => summaries.value.get(id)?.latest ?? null
+const lockOf = (id: number) => summaries.value.get(id)?.lock ?? null
 
 async function load() {
   loading.value = true
@@ -33,11 +40,24 @@ async function load() {
       tag: filters.tag.trim() || undefined,
       keyword: filters.keyword || undefined
     })
+    await loadSummaries()
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : '加载失败'
   } finally {
     loading.value = false
   }
+}
+
+/** One best-effort summary per row of the current page; a rejected read just leaves the dashes. */
+async function loadSummaries() {
+  const next = new Map<number, UnitReleaseSummaryView>()
+  const units = rows.value?.records ?? []
+  await Promise.allSettled(
+    units.map(async (unit) => {
+      next.set(unit.id, await getUnitReleaseSummary(unit.id))
+    })
+  )
+  summaries.value = next
 }
 
 onMounted(async () => {
@@ -112,6 +132,33 @@ const subsystemName = (id: number) => subsystems.value.find((s) => s.id === id)?
         <el-table-column prop="ownerId" label="owner" width="110" />
         <el-table-column prop="frameworkTemplate" label="框架" width="120" />
         <el-table-column prop="branchMode" label="分支模式" width="110" />
+        <el-table-column label="最近发布" min-width="150">
+          <template #default="{ row }">
+            <template v-if="latestOf(row.id)">
+              <span class="mono" :title="latestOf(row.id)!.digest">
+                {{ shortSha(latestOf(row.id)!.digest) }}
+              </span>
+              <div class="weak small mono">
+                <router-link :to="`/releases/${latestOf(row.id)!.publishNo}`" class="mono">
+                  {{ latestOf(row.id)!.publishNo }}
+                </router-link>
+              </div>
+              <div class="weak small mono">{{ formatDateTime(latestOf(row.id)!.finishedAt) }}</div>
+            </template>
+            <span v-else class="weak">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="占用锁" width="130">
+          <template #default="{ row }">
+            <el-tooltip
+              v-if="lockOf(row.id)"
+              :content="`实例 #${lockOf(row.id)!.instanceId}，到期 ${formatDateTime(lockOf(row.id)!.expireAt)}`"
+            >
+              <span class="chip chip-locked">占用中</span>
+            </el-tooltip>
+            <span v-else class="weak">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
             <StatusDot :status="row.status" />

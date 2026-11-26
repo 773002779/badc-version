@@ -37,6 +37,7 @@ import type {
   SubsystemView,
   TaskLogView,
   TaskDetailView,
+  UnitReleaseSummaryView,
   TaskView,
   TodoBoardView,
   UnitView,
@@ -88,6 +89,14 @@ export const listUnits = (
 ) => api<PageResult<UnitView>>(`/units${qs({ pageNo: 1, pageSize: 100, ...params })}`)
 
 export const getUnit = (id: number) => api<UnitView>(`/units/${id}`)
+
+/**
+ * The unit's release summary (PART-01 design §1): the newest successful production deploy and the
+ * current lock row, for the unit list's three columns. Read-only and unit-scoped; the page calls
+ * it per row best-effort, a failure renders `—`.
+ */
+export const getUnitReleaseSummary = (id: number) =>
+  api<UnitReleaseSummaryView>(`/units/${id}/release-summary`)
 
 export const updateUnit = (
   id: number,
