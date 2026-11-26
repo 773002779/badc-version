@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { executeRollback, getRollbackVersions } from '../api'
-import type { RollbackResult, RollbackVersion, RollbackVersions } from '../api/types'
+import { executeRollback, getRollbackVersions, getUnit } from '../api'
+import type { RollbackResult, RollbackVersion, RollbackVersions, UnitView } from '../api/types'
 import { ApiError } from '../api/http'
 import EmptyState from './EmptyState.vue'
 import { formatDateTime } from '../utils/format'
@@ -25,6 +25,9 @@ const loading = ref(false)
 const loadError = ref<string | null>(null)
 /** The unit never deployed to production successfully (40001) or has no unit at all. */
 const unavailable = ref(false)
+/** PART-07: the unit's branch mode (best-effort read; null hides the compatible-mode note). */
+const unit = ref<UnitView | null>(null)
+const isCompatible = computed(() => unit.value?.branchMode === 'COMPATIBLE')
 
 const targetDigest = ref('')
 const acknowledged = ref(false)
@@ -90,12 +93,22 @@ async function load() {
   data.value = null
   loadError.value = null
   unavailable.value = false
+  unit.value = null
   if (!props.unitId) {
     unavailable.value = true
     loading.value = false
     return
   }
   loading.value = true
+  // PART-07: the compatible-mode note rides on the same open (best-effort; the rollback itself
+  // never depends on it).
+  getUnit(props.unitId)
+    .then((view) => {
+      unit.value = view
+    })
+    .catch(() => {
+      unit.value = null
+    })
   try {
     data.value = await getRollbackVersions(props.unitId)
   } catch (e) {
@@ -183,6 +196,17 @@ watch(
 
     <template v-else-if="data">
       <div class="rollback">
+        <!-- PART-07: a compatible (非标) unit owns its code; the platform only rolls the image. -->
+        <el-alert
+          v-if="isCompatible"
+          type="info"
+          :closable="false"
+          show-icon
+          title="兼容模式单元"
+          class="compatible-note"
+          description="该单元为兼容（非标）流水线：平台只投递镜像，代码变更与回退由团队在 CODING 侧自行管理；本次回滚仅切换镜像。"
+        />
+
         <el-alert
           v-if="loadError"
           type="error"

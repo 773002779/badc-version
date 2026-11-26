@@ -762,3 +762,14 @@ Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有�
   `verify-p6f-ui.mjs`（种子 `demo-batchpublish.sql`，失败项走真实服务端拒绝）双主题绿。截图
   `redeploy-{light,dark}.png`、`batch-publish-{light,dark}.png`、`settings-waiver-{light,dark}.png`。`b49f6f9` /
   `ec4689a`
+
+## PART-07 裁决（2026-11-27，兼容模式语义）
+
+- Ruling R137: 语义与「不删字段」：`COMPATIBLE` = 兼容（非标）流水线——**代码变更由团队自管，平台只投递镜像**；
+  回滚仅切镜像（一期统一行为）。需求原文「跳过构建节点的合并校验并提示」在一期无可跳过之物（合并校验从未实现），
+  语义收敛为提示。`branch_mode` 不参与任何后端判定、无迁移无端点；`framework_template` 保留为描述字段
+  （FR-I-04 二期才有消费者）。不删字段：字段已被列表/详情/表单消费，删除是破坏性迁移且语义已落。
+- Ruling R138: 实现与证据：纯前端——发布页（LIB 与非 LIB 都 best-effort 读单元）与回滚抽屉在
+  `branchMode==='COMPATIBLE'` 时渲染 info 横幅/提示，不阻断任何操作；探针 `verify-p7-ui.mjs`（复用
+  `demo-redeploy.sql`，临时置 `COMPATIBLE`、`finally` 还原 `STANDARD`）双主题绿、0 console error；截图
+  `compatible-{light,dark}.png`；后端零改动（全量 1038 绿回归确认）。

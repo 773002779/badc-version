@@ -1610,3 +1610,17 @@ GAP-12 / J7 的前端是设置页的**第四块**「审批时效」：一个开�
 
 **明确不做（P6-G 前端）**：不做单 DE 粒度（整批重试）；不做历史实例日志查询（外链直达 CODING）；日志不缓存
 不落库；无前端单测（覆盖靠 27 个后端测试 + 双主题探针）。
+
+
+## 25. PART-07 · 兼容模式提示（2026-11-27）
+
+对应 PART-07；契约 `docs/superpowers/specs/2026-11-26-p7-compatible-mode-design.md`。
+
+- **发布内容页**：非 LIB 发布 best-effort 读 `getUnit`（LIB 分支本就读单元），`branchMode==='COMPATIBLE'`
+  时头部渲染 info 横幅「兼容模式单元：平台只投递镜像，代码变更与回退由团队在 CODING 侧自行管理；回滚仅切换
+  镜像，需要代码回退请人工处理」；读单元失败不渲染（容忍）。
+- **回滚抽屉**：打开时同样 best-effort 读单元，兼容单元在版本清单上方渲染同款提示（info alert，
+  `compatible-note`），**不阻断回滚**。
+- 按钮可用性、流水线行为、门禁与审计一概不变（`branch_mode` 不参与任何后端判定）。
+- 探针：`scripts/verify-p7-ui.mjs`（复用 `demo-redeploy.sql`，临时置 `COMPATIBLE` 后还原）双主题绿、
+  0 console error；截图 `compatible-{light,dark}.png`。

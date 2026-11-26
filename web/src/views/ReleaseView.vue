@@ -74,6 +74,9 @@ let timer: number | undefined
 const unitType = ref<string | null>(null)
 const libUnit = ref<UnitView | null>(null)
 const libGate = ref<ItemGate | null>(null)
+/** PART-07: the unit's branch mode drives the compatible (非标) banner; null hides it. */
+const unitBranchMode = ref<string | null>(null)
+const isCompatible = computed(() => unitBranchMode.value === 'COMPATIBLE')
 
 const nodesAreLib = computed(() =>
   (detail.value?.nodes ?? []).some(
@@ -271,10 +274,15 @@ async function load(silent = false) {
       libUnit.value = unit
       unitType.value = unit?.type ?? null
       libGate.value = gate
+      unitBranchMode.value = unit?.branchMode ?? null
     } else {
       libUnit.value = null
       unitType.value = null
       libGate.value = null
+      // PART-07: a non-LIB release also needs the unit's branch mode for the compatible banner.
+      unitBranchMode.value = d.unitId
+        ? (await getUnit(d.unitId).catch(() => null))?.branchMode ?? null
+        : null
     }
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : '加载失败'
@@ -522,6 +530,18 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
         <span class="mono">{{ formatDateTime(detail.emergencyAt) }}</span>
       </span>
     </div>
+
+    <!-- PART-07: a compatible (非标) unit owns its code; the platform only delivers images. -->
+    <el-alert
+      v-if="isCompatible && detail"
+      class="compatible-banner"
+      type="info"
+      :closable="false"
+      show-icon
+      title="兼容模式单元"
+      description="该单元为兼容（非标）流水线：平台只投递镜像，代码变更与回退由团队在 CODING 侧自行管理；回滚仅切换镜像，需要代码回退请人工处理。"
+      style="margin-bottom: 16px"
+    />
 
     <el-alert v-if="error" type="error" :closable="false" show-icon :title="error" style="margin-bottom: 16px" />
 
