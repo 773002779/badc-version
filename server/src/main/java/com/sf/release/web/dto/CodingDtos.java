@@ -56,10 +56,16 @@ public final class CodingDtos {
         String token) {
     }
 
-    /** Current connection, or {@code configured:false} with every other field null. */
+    /**
+     * Current connection, or {@code configured:false} with every other field null. {@code scope}/
+     * {@code subsystemId} tell the caller which row was answered (GLOBAL, or a subsystem override
+     * — PART-05).
+     */
     public record ConnResponse(
         boolean configured,
         Long id,
+        String scope,
+        Long subsystemId,
         String baseUrl,
         String team,
         String project,
@@ -70,11 +76,12 @@ public final class CodingDtos {
         String lastProbeMessage) {
 
         public static ConnResponse absent() {
-            return new ConnResponse(false, null, null, null, null, null, null, null, null, null);
+            return new ConnResponse(false, null, null, null, null, null, null, null, null, null, null, null);
         }
 
         public static ConnResponse of(CodingConnView view) {
-            return new ConnResponse(true, view.id(), view.baseUrl(), view.team(), view.project(),
+            return new ConnResponse(true, view.id(), view.scope(), view.subsystemId(),
+                view.baseUrl(), view.team(), view.project(),
                 view.tokenHint(), view.updatedAt(), view.lastProbeAt(), view.lastProbeOk(),
                 view.lastProbeMessage());
         }

@@ -8,7 +8,7 @@
 #   build.start  : unitId, taskId, branch, commitSha, pipelineNo, attempt
 #   build.query  : externalId
 #   build.logs   : externalId, offset, limit
-#   deploy.start : unitId, taskId, envKind, deName, imageDigest, pipelineNo, attempt
+#   deploy.start : unitId, taskId, envKind, deName, codingDeployTarget, imageDigest, pipelineNo, attempt
 #   deploy.query : externalId
 #   deploy.logs  : externalId, offset, limit
 #   publish.start : taskId, groupId, artifactId, version, pipelineNo, attempt
@@ -67,7 +67,10 @@ coding:
     "[deploy.start]":
       method: POST
       url: "/open-api/deploy/start"
-      body: '{"TaskId":"{taskId}","UnitId":{unitId},"EnvKind":"{envKind}","DeName":"{deName}","ImageDigest":"{imageDigest}","PipelineNo":"{pipelineNo}","Attempt":{attempt}}'
+      # CodingDeployTarget is the DE's explicit CODING-side target (env_de.coding_deploy_target,
+      # PART-05); the engine falls it back to DeName when the row has no mapping, so both fields
+      # carry the same value on an unmapped DE.
+      body: '{"TaskId":"{taskId}","UnitId":{unitId},"EnvKind":"{envKind}","DeName":"{deName}","CodingDeployTarget":"{codingDeployTarget}","ImageDigest":"{imageDigest}","PipelineNo":"{pipelineNo}","Attempt":{attempt}}'
       responseId: "$.Data.DeployId"
       # responseUrl: "$.Data.WebUrl"            # optional jump URL, unknown from the docs
 

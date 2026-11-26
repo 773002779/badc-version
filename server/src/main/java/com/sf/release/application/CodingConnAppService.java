@@ -237,6 +237,16 @@ public class CodingConnAppService {
         return po == null ? null : toView(po);
     }
 
+    /**
+     * One subsystem's {@code SUBSYSTEM} override, or null when it never saved one (PART-05). The
+     * system detail's override block reads this on load and must not treat "not overridden yet"
+     * as an error, exactly like the settings screen's GLOBAL read.
+     */
+    public CodingConnView subsystemOrNull(long subsystemId) {
+        CodingConnPO po = selectStored(CodingScope.SUBSYSTEM, subsystemId);
+        return po == null ? null : toView(po);
+    }
+
     private CodingProbe requireProbe(Long id) {
         CodingProbe probe = probeProvider.getIfAvailable();
         if (probe == null) {

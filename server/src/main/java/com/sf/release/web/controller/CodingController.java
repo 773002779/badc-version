@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -38,18 +39,31 @@ public class CodingController {
         this.connAppService = connAppService;
     }
 
+    /**
+     * The current connection: the tenant-wide GLOBAL row, or — with {@code subsystemId} (PART-05)
+     * — that subsystem's override. {@code configured:false} when the requested row was never saved.
+     */
     @RequirePerm(Permissions.SETTING_MANAGE)
     @GetMapping("/conn")
-    public ApiResponse<ConnResponse> get() {
-        CodingConnView view = connAppService.globalOrNull();
+    public ApiResponse<ConnResponse> get(@RequestParam(required = false) Long subsystemId) {
+        CodingConnView view = subsystemId == null
+            ? connAppService.globalOrNull()
+            : connAppService.subsystemOrNull(subsystemId);
         return ApiResponse.ok(view == null ? ConnResponse.absent() : ConnResponse.of(view));
     }
 
+    /**
+     * Saves the GLOBAL connection, or — with {@code subsystemId} — that subsystem's override
+     * (resolution order GLOBAL→SUBSYSTEM on the engine side). A blank token keeps the stored
+     * credential.
+     */
     @RequirePerm(Permissions.SETTING_MANAGE)
     @PutMapping("/conn")
-    public ApiResponse<ConnResponse> save(@Valid @RequestBody SaveConnRequest request) {
+    public ApiResponse<ConnResponse> save(@Valid @RequestBody SaveConnRequest request,
+                                         @RequestParam(required = false) Long subsystemId) {
         return ApiResponse.ok(ConnResponse.of(connAppService.save(
-            "GLOBAL", null, request.baseUrl(), request.team(), request.project(),
+            subsystemId == null ? "GLOBAL" : "SUBSYSTEM", subsystemId,
+            request.baseUrl(), request.team(), request.project(),
             request.token())));
     }
 

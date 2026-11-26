@@ -168,8 +168,24 @@ class CodingEngineTest {
         assertThat(body).contains("\"TaskId\":\"P-DEPLOY\"");
         assertThat(body).contains("\"EnvKind\":\"TEST\"");
         assertThat(body).contains("\"DeName\":\"quota-sit\"");
+        assertThat(body).contains("\"CodingDeployTarget\":\"quota-sit-target\"");
         assertThat(body).contains("\"ImageDigest\":\"sha256:ab\"");
         assertThat(body).contains("\"Attempt\":2");
+    }
+
+    @Test
+    void trigger_deploy_falls_the_target_back_to_the_de_name_when_unmapped() throws Exception {
+        server.enqueue(new MockResponse().setBody("{\"Data\":{\"DeployId\":\"d-457\"}}"));
+
+        // No explicit mapping on the DE row: the handler fills the target with the DE name, so
+        // the template receives one non-empty target field (PART-05 fallback).
+        TriggerResult result = engine().triggerDeploy(new DeployCmd(88L, "P-DEPLOY", "TEST",
+            "quota-sit", "quota-sit", "sha256:ab", "PL-1", 2));
+
+        assertThat(result.externalId()).isEqualTo("d-457");
+        String body = server.takeRequest().getBody().readUtf8();
+        assertThat(body).contains("\"CodingDeployTarget\":\"quota-sit\"");
+        assertThat(body).contains("\"DeName\":\"quota-sit\"");
     }
 
     @Test
@@ -591,7 +607,8 @@ class CodingEngineTest {
     }
 
     private static DeployCmd deployCmd() {
-        return new DeployCmd(88L, "P-DEPLOY", "TEST", "quota-sit", "sha256:ab", "PL-1", 2);
+        return new DeployCmd(88L, "P-DEPLOY", "TEST", "quota-sit", "quota-sit-target",
+            "sha256:ab", "PL-1", 2); // codingDeployTarget = the DE CODING-side mapping (PART-05)
     }
 
     // ------------------------------------------------------------------ gate checks (P2)

@@ -150,7 +150,10 @@ public final class DailyDeployNodeHandler implements NodeHandler {
                          PipelineRepository.DeployTarget target, NodeTask task,
                          Duration deadline) {
         DeployCmd cmd = new DeployCmd(context.unitId(), context.planId(), target.envKind(),
-            target.deName(), instance.imageDigest(), instance.pipelineNo(), task.attempt());
+            target.deName(),
+            // PART-05: the DE explicit CODING target, else the DE name (one non-empty field).
+            target.codingDeployTarget() == null ? target.deName() : target.codingDeployTarget(),
+            instance.imageDigest(), instance.pipelineNo(), task.attempt());
         TriggerResult result;
         try {
             result = engine.triggerDeploy(cmd);

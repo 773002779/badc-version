@@ -69,7 +69,9 @@ public class CodingJobQueryService {
         TaskKind kind = parseTaskKind(taskKind);
         UnitView unit = unitAppService.get(unitId);
         String project = codingProjectOf(unit.subsystemId());
-        List<EngineJob> jobs = engine.listJobs(project, jobKindOf(kind));
+        // PART-05: the listing is made on behalf of this unit, so its subsystem's connection
+        // override wins over the GLOBAL one.
+        List<EngineJob> jobs = engine.listJobs(unitId, project, jobKindOf(kind));
         return jobs.stream()
             .map(job -> new CodingJobView(job.taskId(), job.name(), job.type()))
             .toList();

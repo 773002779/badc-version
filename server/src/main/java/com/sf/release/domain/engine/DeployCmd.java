@@ -8,12 +8,17 @@ package com.sf.release.domain.engine;
  * {@code DR}); {@code deName} is the concrete deployment environment. {@code imageDigest}
  * may be {@code null} when the caller has no digest yet; the template then reports the
  * placeholder as unresolved instead of posting an empty image reference.
+ *
+ * <p>{@code codingDeployTarget} is the DE's explicit CODING-side deployment target
+ * ({@code env_de.coding_deploy_target}, PART-05); the handler fills it with the DE name when
+ * the row has no mapping, so the engine template always has one non-empty target field.
  */
 public record DeployCmd(
     long unitId,
     String taskId,
     String envKind,
     String deName,
+    String codingDeployTarget,
     String imageDigest,
     String pipelineNo,
     int attempt) {
@@ -22,6 +27,7 @@ public record DeployCmd(
         taskId = trimToNull(taskId);
         envKind = trimToNull(envKind);
         deName = trimToNull(deName);
+        codingDeployTarget = trimToNull(codingDeployTarget);
         imageDigest = trimToNull(imageDigest);
         pipelineNo = trimToNull(pipelineNo);
     }

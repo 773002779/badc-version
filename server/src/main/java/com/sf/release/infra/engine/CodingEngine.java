@@ -167,6 +167,9 @@ public class CodingEngine implements CicdEngine {
         put(vars, "taskId", cmd.taskId());
         put(vars, "envKind", cmd.envKind());
         put(vars, "deName", cmd.deName());
+        // PART-05: the DE's explicit CODING-side target (the handler already fell back to the
+        // DE name, so the variable is never empty).
+        put(vars, "codingDeployTarget", cmd.codingDeployTarget());
         put(vars, "imageDigest", cmd.imageDigest());
         put(vars, "pipelineNo", cmd.pipelineNo());
         put(vars, "attempt", String.valueOf(cmd.attempt()));
@@ -272,6 +275,13 @@ public class CodingEngine implements CicdEngine {
     @Override
     public List<EngineJob> listJobs(String project, JobKind kind) {
         return listJobs(connectionSupplier.get(), project, kind);
+    }
+
+    /** PART-05: a list made on behalf of one unit resolves that unit's subsystem connection. */
+    @Override
+    public List<EngineJob> listJobs(long unitId, String project, JobKind kind) {
+        return listJobs(connectionFor("job.list",
+            java.util.Map.of("unitId", String.valueOf(unitId))), project, kind);
     }
 
     /**
@@ -434,7 +444,24 @@ public class CodingEngine implements CicdEngine {
 
     private EngineHttpClient.HttpResult execute(String action, Map<String, String> vars,
                                                 String bodyOverride) {
-        return execute(action, vars, bodyOverride, connectionSupplier.get());
+        return execute(action, vars, bodyOverride, connectionFor(action, vars));
+    }
+
+    /**
+     * The connection of one action (PART-05): a start-class call carries a {@code unitId}
+     * variable, so a subsystem-aware {@link CodingConnectionSource} resolves the unit's
+     * SUBSYSTEM override first and falls back to GLOBAL. A plain supplier (the tests) always
+     * answers the GLOBAL connection; the actions without a {@code unitId} variable
+     * (query/logs/cancel) resolve the GLOBAL connection too.
+     */
+    private Connection connectionFor(String action, Map<String, String> vars) {
+        if (connectionSupplier instanceof CodingConnectionSource source) {
+            String raw = vars.get("unitId");
+            if (raw != null && raw.chars().allMatch(Character::isDigit)) {
+                return source.forUnit(Long.parseLong(raw));
+            }
+        }
+        return connectionSupplier.get();
     }
 
     /**

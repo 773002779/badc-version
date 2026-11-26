@@ -585,7 +585,7 @@ public class MybatisPipelineRepository implements PipelineRepository {
                 .orderByAsc(EnvDePO::getId))
             .stream()
             .map(de -> new DeployTarget(de.getId() == null ? 0L : de.getId(),
-                de.getEnvKind(), de.getDeName()))
+                de.getEnvKind(), de.getDeName(), de.getCodingDeployTarget()))
             .toList();
     }
 
@@ -619,7 +619,7 @@ public class MybatisPipelineRepository implements PipelineRepository {
                     .orderByAsc(EnvDePO::getId))
             .stream()
             .map(de -> new DeployTarget(de.getId() == null ? 0L : de.getId(),
-                de.getEnvKind(), de.getDeName()))
+                de.getEnvKind(), de.getDeName(), de.getCodingDeployTarget()))
             .toList();
         return new DeployContext(unitId, publishNo, planId, targets);
     }

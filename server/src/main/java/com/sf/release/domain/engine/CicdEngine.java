@@ -71,6 +71,15 @@ public interface CicdEngine {
     }
 
     /**
+     * The PART-05 variant of {@link #listJobs(String, JobKind)}: the call is made on behalf of
+     * one deployment unit, so an adapter that resolves per-subsystem connections answers the
+     * unit's subsystem override. The default simply falls back to the global form.
+     */
+    default List<EngineJob> listJobs(long unitId, String project, JobKind kind) {
+        return listJobs(project, kind);
+    }
+
+    /**
      * Starts one gate check (Sonar, component vulnerability, …) and returns the engine-side id
      * used to poll it. Like {@link #listJobs}, this is an <em>optional</em> capability: an adapter
      * that cannot run checks reports {@code ENGINE_UNAVAILABLE}, and the platform records the

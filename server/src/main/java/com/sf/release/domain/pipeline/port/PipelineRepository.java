@@ -316,7 +316,7 @@ public interface PipelineRepository {
      * One TEST DE a {@code DEPLOY} task can target: the {@code env_de} id stored as
      * {@code node_task.target_id}, its environment family and its concrete name.
      */
-    record DeployTarget(long deId, String envKind, String deName) {
+    record DeployTarget(long deId, String envKind, String deName, String codingDeployTarget) {
     }
 
     /**
