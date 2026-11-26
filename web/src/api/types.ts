@@ -116,6 +116,8 @@ export interface ItemView {
 }
 
 export interface ReleaseTask {
+  /** The node_task row id the P6-G actions (重新部署/日志) address. */
+  id: number
   taskType: string
   batchNo: number
   targetId: number
@@ -132,6 +134,12 @@ export interface ReleaseNode {
   startedAt?: string | null
   finishedAt?: string | null
   tasks: ReleaseTask[]
+}
+
+/** One member shown in the release header's 测试人员 / 部署人员 lists (P6-F design §2). */
+export interface ReleasePersonView {
+  userId: string
+  name?: string | null
 }
 
 export interface ReleaseDetail {
@@ -163,6 +171,12 @@ export interface ReleaseDetail {
   emergencyReason?: string | null
   emergencyBy?: string | null
   emergencyAt?: string | null
+  /**
+   * P6-F design §2: the task members with role TEST / OPS, ordered by user id. Read-only display;
+   * permissions still come from `release:*` / `control:*`.
+   */
+  testers: ReleasePersonView[]
+  deployers: ReleasePersonView[]
 }
 
 export interface ReleaseRecord {
@@ -172,6 +186,34 @@ export interface ReleaseRecord {
   startAt?: string | null
   endAt?: string | null
   operator?: string | null
+}
+
+// --------------------------------------------- single-DE redeploy + logs (P6-G)
+
+/**
+ * The answer of 单 DE 重新部署 (P6-G design §3): the new execution the redeploy created.
+ * `targetDeIds` is the whole retried production batch (the failed DE plus its siblings), so the
+ * page can say 「同批次一起重试」 without another read.
+ */
+export interface RedeployResultView {
+  publishNo: string
+  pipelineNo: string
+  instanceId: number
+  fromNode: string
+  batchNo: number
+  targetDeIds: number[]
+  targetDeName: string
+}
+
+/**
+ * One page of a task's engine log (P6-G design §2). `truncated` means a full page was returned, so
+ * another page may exist at `offset + limit`; `content` is the engine's text unchanged.
+ */
+export interface TaskLogView {
+  content: string
+  truncated: boolean
+  offset: number
+  limit: number
 }
 
 export interface BindingView {
@@ -597,6 +639,16 @@ export interface ApprovalSettingView {
   enabled: boolean
   remindHours: number
   escalateHours: number
+  updatedBy?: string | null
+  updatedAt?: string | null
+}
+
+/**
+ * The 「门禁规则」 block's waiver default (P6-F design §3): the validity in days used when a waiver
+ * request leaves `expireAt` empty. 1–90; 7 when the section has never been saved.
+ */
+export interface WaiverSettingView {
+  defaultDays: number
   updatedBy?: string | null
   updatedAt?: string | null
 }

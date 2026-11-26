@@ -180,7 +180,10 @@ function refresh(check: GateCheck) {
 }
 
 const waiverDialog = ref(false)
-const waiverForm = ref({ reason: '', impact: '', days: 7 })
+// `days` is nullable (P6-F PART-06): empty means "use the platform default validity"
+// (`WAIVER.defaultDays`, 7 days unless changed in 设置); an explicit 1–90 window keeps its
+// pre-P6-F behaviour of being computed client-side.
+const waiverForm = ref({ reason: '', impact: '', days: 7 as number | null })
 
 async function submitWaiver() {
   const reason = waiverForm.value.reason.trim()
@@ -188,14 +191,18 @@ async function submitWaiver() {
     ElMessage.warning('请填写豁免原因')
     return
   }
-  const expireAt = new Date(Date.now() + waiverForm.value.days * 24 * 3600 * 1000).toISOString()
+  const days = waiverForm.value.days
+  const expireAt =
+    days === null || days === undefined
+      ? null
+      : new Date(Date.now() + days * 24 * 3600 * 1000).toISOString()
   waiverDialog.value = false
   await act(
     () =>
       requestWaiver(props.itemId, {
         reason,
         impact: waiverForm.value.impact.trim() || undefined,
-        expireAt
+        expireAt: expireAt ?? undefined
       }),
     '已提交豁免申请，等待审核'
   )
@@ -409,7 +416,8 @@ function checkDot(check: GateCheck): string {
             <el-input v-model="waiverForm.impact" placeholder="例如：仅影响报表页，不影响交易主链路" />
           </el-form-item>
           <el-form-item label="有效期（天）">
-            <el-input-number v-model="waiverForm.days" :min="1" :max="90" />
+            <el-input-number v-model="waiverForm.days" :min="1" :max="90" placeholder="留空使用平台默认" />
+            <span class="weak small waiver-days-hint">留空则使用平台默认有效期（设置 → 门禁规则可配）。</span>
           </el-form-item>
         </el-form>
         <template #footer>
@@ -649,6 +657,11 @@ function checkDot(check: GateCheck): string {
   padding-left: 18px;
   font-size: 12px;
   color: var(--text-2);
+}
+
+/* The nullable waiver validity (P6-F PART-06): the hint names the platform default. */
+.waiver-days-hint {
+  margin-left: 10px;
 }
 
 @media (max-width: 960px) {

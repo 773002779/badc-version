@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   emergencyRelease,
   exitRelease,
@@ -10,11 +10,23 @@ import {
   getMe,
   getRelease,
   getReleaseRecords,
+  getTaskLogs,
   getUnit,
+  redeployTask,
   resumeRelease,
   stopRelease
 } from '../api'
-import type { AdmissionView, GateCheck, ItemGate, MeView, ReleaseDetail, ReleaseRecord, UnitView } from '../api/types'
+import type {
+  AdmissionView,
+  GateCheck,
+  ItemGate,
+  MeView,
+  ReleaseDetail,
+  ReleasePersonView,
+  ReleaseRecord,
+  ReleaseTask,
+  UnitView
+} from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
@@ -124,6 +136,18 @@ const rollbackBlock = computed(() => {
 const itemStatus = computed(() => admission.value?.itemStatus ?? null)
 
 const hasPerm = (perm: string) => me.value?.perms.includes(perm) ?? false
+
+// ---- release people (P6-F design §2) ---------------------------------------
+// Read-only member lists of the item's task: role TEST → 测试人员, role OPS → 部署人员. They say
+// nothing about permissions; the buttons above still gate on `release:*` / `control:*`.
+function peopleText(people?: ReleasePersonView[] | null): string {
+  if (!people?.length) return '—'
+  return people.map((person) => person.name || person.userId).join('、')
+}
+
+function peopleTitle(people?: ReleasePersonView[] | null): string {
+  return people?.length ? people.map((person) => person.userId).join('、') : '任务成员中没有该角色'
+}
 
 /** Why 停止发布 is unavailable; empty when enabled. */
 const stopBlock = computed(() => {
@@ -309,6 +333,105 @@ async function submitControl(kind: 'stop' | 'exit', reason: string) {
 const onStop = (reason: string) => submitControl('stop', reason)
 const onExit = (reason: string) => submitControl('exit', reason)
 
+// ------------------------------------------------------- task actions (P6-G)
+// 生产部署任务行 offers 重新部署 (a failed DE's whole batch is retried on a new
+// RERUN_FROM_NODE instance that reuses the previous image); every engine job row offers the log
+// proxy. Both server actions address the node_task id, which the row carries since P6-G.
+const RETRYABLE_TASK_STATUS = new Set(['FAILED', 'TIMEOUT'])
+const REDEPLOYABLE_ITEM_STATUS = new Set(['FAILED', 'PROD_DEPLOYING'])
+const LOGGABLE_TASK_TYPES = new Set(['CODE_CHECK', 'PKG_BUILD', 'IMG_BUILD', 'DEPLOY', 'LIB_PUBLISH'])
+
+function isRedeployRow(nodeType: string, task: ReleaseTask): boolean {
+  return nodeType === 'PROD_DEPLOY' && task.taskType === 'DEPLOY'
+}
+
+/** Why 重新部署 is unavailable on this task row; empty when enabled. */
+function redeployBlock(task: ReleaseTask): string {
+  if (!meLoaded.value) return '正在读取权限'
+  if (!me.value) return '无法读取当前身份（GET /me）'
+  if (!hasPerm('control:execute-prod')) {
+    return '只有运维可以重新部署生产任务（control:execute-prod）'
+  }
+  if (!RETRYABLE_TASK_STATUS.has(task.status)) {
+    return '只有失败或超时的任务可以重新部署；成功批次请走重跑或回滚'
+  }
+  if (!admissionLoaded.value || !itemStatus.value) return '正在读取变更项状态'
+  if (!REDEPLOYABLE_ITEM_STATUS.has(itemStatus.value)) {
+    return `变更项当前状态「${statusLabel(itemStatus.value)}」不允许重新部署`
+  }
+  return ''
+}
+
+const redeployBusy = ref(false)
+
+async function onRedeploy(task: ReleaseTask) {
+  const target = task.targetId ? `#${task.targetId}` : ''
+  try {
+    await ElMessageBox.confirm(
+      `将重新部署批次 ${task.batchNo}（目标 DE ${target}）：同批次 DE 一起重试，其余批次跳过；沿用上一实例镜像，不重新构建；未完成检查将失效，需要重新检查。`,
+      '单 DE 重新部署',
+      { type: 'warning', confirmButtonText: '重新部署', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  redeployBusy.value = true
+  try {
+    const result = await redeployTask(publishNo, task.id)
+    ElMessage.success(
+      `已创建重跑实例 ${result.pipelineNo}：批次 ${result.batchNo} 整批重试（目标 ${result.targetDeName}）`
+    )
+    await load(true)
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 40001) {
+      ElMessage.error(e.message)
+      await load(true)
+    } else {
+      ElMessage.error(e instanceof ApiError ? e.message : '重新部署失败')
+    }
+  } finally {
+    redeployBusy.value = false
+  }
+}
+
+// ---- the task-log drawer: one engine page at a time, 加载更多 follows `truncated`.
+const LOG_PAGE = 4000
+const logOpen = ref(false)
+const logTask = ref<ReleaseTask | null>(null)
+const logText = ref('')
+const logOffset = ref(0)
+const logTruncated = ref(false)
+const logLoading = ref(false)
+const logError = ref<string | null>(null)
+
+function openLog(task: ReleaseTask) {
+  logTask.value = task
+  logOpen.value = true
+  loadLog(true)
+}
+
+async function loadLog(reset: boolean) {
+  if (!logTask.value) return
+  if (reset) {
+    logText.value = ''
+    logOffset.value = 0
+    logTruncated.value = false
+    logError.value = null
+  }
+  logLoading.value = true
+  try {
+    const page = await getTaskLogs(publishNo, logTask.value.id, logOffset.value, LOG_PAGE)
+    logText.value += page.content
+    logOffset.value = page.offset + page.limit
+    logTruncated.value = page.truncated
+  } catch (e) {
+    logError.value = e instanceof ApiError ? e.message : '读取日志失败'
+    logTruncated.value = false
+  } finally {
+    logLoading.value = false
+  }
+}
+
 function schedule() {
   if (timer) window.clearInterval(timer)
   if (busy.value) {
@@ -420,6 +543,14 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
                 <span class="weak small">触发方式</span>
                 <span class="small">{{ statusLabel(detail.triggerType) }}</span>
               </div>
+              <div class="summary-item release-testers">
+                <span class="weak small">测试人员</span>
+                <span class="small" :title="peopleTitle(detail.testers)">{{ peopleText(detail.testers) }}</span>
+              </div>
+              <div class="summary-item release-deployers">
+                <span class="weak small">部署人员</span>
+                <span class="small" :title="peopleTitle(detail.deployers)">{{ peopleText(detail.deployers) }}</span>
+              </div>
               <template v-if="isLib">
                 <div class="summary-item lib-kind">
                   <span class="weak small">发布类型</span>
@@ -525,29 +656,64 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
                 <span v-if="libWaiver?.expireAt" class="weak">到期 {{ formatDateTime(libWaiver.expireAt) }}</span>
               </p>
             </div>
-            <div v-else-if="node.status !== 'PENDING' && node.tasks.length" class="task-list">
-              <div v-for="(t, i) in node.tasks" :key="`${t.taskType}-${t.batchNo}-${t.targetId}-${i}`" class="task-row">
-                <StatusDot :status="t.status" domain="task" :dot-only="false" />
-                <span class="task-name mono">{{ t.taskType }}</span>
-                <span class="weak small">{{ t.batchNo ? `批次 ${t.batchNo}` : '' }}</span>
-                <span class="task-target mono weak small">
-                  {{ t.targetId ? `#${t.targetId}` : '' }}
-                </span>
-                <span class="topbar-spacer" />
-                <span class="weak small mono">{{ formatDuration(t.durationMs) }}</span>
-                <span v-if="t.resultSummary" class="task-summary truncate" :title="t.resultSummary">
-                  {{ t.resultSummary }}
-                </span>
-                <a v-if="t.externalUrl" :href="t.externalUrl" target="_blank" rel="noreferrer" class="small">
-                  查看
-                </a>
-              </div>
+            <!-- P6-G: the engine task rows are no longer hidden behind the node panels — the
+                 production node renders its AdmissionPanel AND its deployment task rows (the
+                 重新部署/日志 actions live on those rows). VERIFY/LIB_SECURITY keep their own
+                 panels instead of raw task rows. -->
+            <div
+              v-if="node.nodeType !== 'VERIFY' && node.nodeType !== 'LIB_SECURITY' && node.tasks.length"
+              :class="node.status !== 'PENDING' ? 'task-list' : 'task-pending'"
+            >
+              <template v-if="node.status !== 'PENDING'">
+                <div v-for="(t, i) in node.tasks" :key="`${t.taskType}-${t.batchNo}-${t.targetId}-${i}`" class="task-row">
+                  <StatusDot :status="t.status" domain="task" :dot-only="false" />
+                  <span class="task-name mono">{{ t.taskType }}</span>
+                  <span class="weak small">{{ t.batchNo ? `批次 ${t.batchNo}` : '' }}</span>
+                  <span class="task-target mono weak small">
+                    {{ t.targetId ? `#${t.targetId}` : '' }}
+                  </span>
+                  <span class="topbar-spacer" />
+                  <span class="weak small mono">{{ formatDuration(t.durationMs) }}</span>
+                  <span v-if="t.resultSummary" class="task-summary truncate" :title="t.resultSummary">
+                    {{ t.resultSummary }}
+                  </span>
+                  <a v-if="t.externalUrl" :href="t.externalUrl" target="_blank" rel="noreferrer" class="small">
+                    查看
+                  </a>
+                  <el-button
+                    v-if="isRedeployRow(node.nodeType, t)"
+                    class="task-action"
+                    link
+                    type="primary"
+                    size="small"
+                    :disabled="!!redeployBlock(t) || redeployBusy"
+                    :title="redeployBlock(t) || '只重试该任务所在批次，沿用镜像；未完成检查将失效'"
+                    @click="onRedeploy(t)"
+                  >
+                    重新部署
+                  </el-button>
+                  <el-button
+                    v-if="LOGGABLE_TASK_TYPES.has(t.taskType)"
+                    class="task-action"
+                    link
+                    size="small"
+                    title="读取引擎侧的任务执行日志（仅最新实例）"
+                    @click="openLog(t)"
+                  >
+                    日志
+                  </el-button>
+                </div>
+              </template>
+              <template v-else>
+                <span class="weak small">{{ node.tasks.length }} 项任务</span>
+                <span class="weak small">等待执行</span>
+              </template>
             </div>
-            <div v-else-if="node.tasks.length" class="task-pending">
-              <span class="weak small">{{ node.tasks.length }} 项任务</span>
-              <span class="weak small">等待执行</span>
-            </div>
-            <EmptyState v-else-if="node.nodeType !== 'VERIFY'" title="该节点没有任务" hint="空节点的实例不会自动完成。" />
+            <EmptyState
+              v-else-if="node.nodeType !== 'VERIFY' && node.nodeType !== 'LIB_SECURITY'"
+              title="该节点没有任务"
+              hint="空节点的实例不会自动完成。"
+            />
           </section>
         </div>
         <div v-else-if="!loading" class="panel panel-pad">
@@ -647,6 +813,34 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
       :publish-no="publishNo"
       @changed="load(true)"
     />
+
+    <!-- P6-G: the engine log proxy drawer. One page at a time; 加载更多 only while truncated. -->
+    <el-drawer v-model="logOpen" class="log-drawer" size="640px" :close-on-click-modal="false">
+      <template #header>
+        <div class="log-head">
+          <span class="log-title">任务日志</span>
+          <span class="weak small mono">
+            {{ logTask?.taskType }}{{ logTask?.batchNo ? ` · 批次 ${logTask.batchNo}` : '' }}{{ logTask?.targetId ? ` · #${logTask.targetId}` : '' }}
+          </span>
+        </div>
+      </template>
+      <div v-loading="logLoading" class="log-body-wrap">
+        <el-alert v-if="logError" type="error" :closable="false" show-icon :title="logError" />
+        <pre v-else class="log-body">{{ logText || '（暂无日志内容）' }}</pre>
+        <div class="log-foot">
+          <el-button size="small" :disabled="logLoading" @click="loadLog(true)">刷新</el-button>
+          <el-button
+            size="small"
+            :disabled="!logTruncated || logLoading"
+            title="只读下一页：引擎侧按 offset/limit 追加"
+            @click="loadLog(false)"
+          >
+            加载更多
+          </el-button>
+          <span class="weak small">{{ logTruncated ? '可能还有更多内容' : '已到末尾' }}</span>
+        </div>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -782,5 +976,44 @@ onBeforeUnmount(() => timer && window.clearInterval(timer))
   margin: 10px 0 0;
   color: var(--warn);
   line-height: 1.6;
+}
+
+/* P6-G: the engine log drawer and the task-row actions. */
+.log-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.log-title {
+  font-weight: 600;
+}
+.log-body-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 100%;
+}
+.log-body {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  color: var(--text);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow: auto;
+  max-height: 70vh;
+}
+.log-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.task-action {
+  padding: 0;
 }
 </style>

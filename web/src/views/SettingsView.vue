@@ -9,6 +9,7 @@ import {
   getLockSetting,
   getMe,
   getNotificationSetting,
+  getWaiverSetting,
   listSubsystems,
   saveApprovalSetting,
   saveApproverSetting,
@@ -16,6 +17,7 @@ import {
   saveGateSetting,
   saveLockSetting,
   saveNotificationSetting,
+  saveWaiverSetting,
   testCodingConn
 } from '../api'
 import { ApiError, currentUser, setCurrentUser } from '../api/http'
@@ -28,7 +30,8 @@ import type {
   CodingProbeView,
   GateSettingView,
   LockSettingView,
-  NotificationSettingView
+  NotificationSettingView,
+  WaiverSettingView
 } from '../api/types'
 import { formatDateTime } from '../utils/format'
 import PageHeader from '../components/PageHeader.vue'
@@ -287,6 +290,43 @@ const pauseHours = ref('168')
 const lockError = ref<string | null>(null)
 const lockSaving = ref(false)
 
+// 「豁免默认有效期」 (P6-F PART-06): lives inside the 门禁规则 block because it is a gate rule
+// (J10), but owns its field and save — the section is one visual block, the API is its own
+// `GET/PUT /api/v1/settings/waiver`. The input is a string so a bad value shows its reason
+// instead of being silently coerced; the server re-checks 1–90 on save (40000).
+const waiverView = ref<WaiverSettingView | null>(null)
+const waiverDays = ref('7')
+const waiverError = ref<string | null>(null)
+const waiverSaving = ref(false)
+
+const waiverInvalid = computed(() => {
+  const days = Number(waiverDays.value)
+  if (!Number.isInteger(days) || days < 1 || days > 90) return '豁免默认有效期必须是 1–90 的整数'
+  return ''
+})
+
+async function fillWaiver(view: WaiverSettingView) {
+  waiverView.value = view
+  waiverDays.value = String(view.defaultDays)
+}
+
+async function saveWaiver() {
+  if (waiverInvalid.value) {
+    ElMessage.warning(waiverInvalid.value)
+    return
+  }
+  waiverSaving.value = true
+  try {
+    const view = await saveWaiverSetting({ defaultDays: Number(waiverDays.value) })
+    await fillWaiver(view)
+    ElMessage.success('豁免默认有效期已保存')
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '保存豁免默认有效期失败'))
+  } finally {
+    waiverSaving.value = false
+  }
+}
+
 // 「审批时效」 (P6-E §2): the switch plus the two thresholds of the pending-approval reminder scan.
 // The inputs are strings so the page can show the reason for a bad value instead of silently
 // coercing it; the server re-checks the same three rules on save (40000).
@@ -461,6 +501,7 @@ async function loadPlatformSettings() {
     approverError.value = message
     lockError.value = message
     approvalError.value = message
+    waiverError.value = message
     settingsLoading.value = false
     return
   }
@@ -470,11 +511,12 @@ async function loadPlatformSettings() {
     settingsLoading.value = false
     return
   }
-  const [gate, approvers, lock, approval] = await Promise.allSettled([
+  const [gate, approvers, lock, approval, waiver] = await Promise.allSettled([
     getGateSetting(),
     getApproverSetting(),
     getLockSetting(),
-    getApprovalSetting()
+    getApprovalSetting(),
+    getWaiverSetting()
   ])
   if (gate.status === 'fulfilled') fillGate(gate.value)
   else gateError.value = errorMessage(gate.reason, '读取门禁规则失败')
@@ -484,6 +526,8 @@ async function loadPlatformSettings() {
   else lockError.value = errorMessage(lock.reason, '读取锁超时配置失败')
   if (approval.status === 'fulfilled') fillApproval(approval.value)
   else approvalError.value = errorMessage(approval.reason, '读取审批时效配置失败')
+  if (waiver.status === 'fulfilled') await fillWaiver(waiver.value)
+  else waiverError.value = errorMessage(waiver.reason, '读取豁免默认有效期失败')
   settingsLoading.value = false
 }
 
@@ -856,6 +900,37 @@ onMounted(() => {
             新实例也不再生成该检查任务。
           </span>
           <span>至少保留 1 项检查；当前启用 <b>{{ gateEnabled.length }}</b> / {{ gateTotal }} 项。</span>
+        </div>
+        <div class="waiver-days">
+          <label class="field">
+            <span class="field-label">豁免默认有效期</span>
+            <div class="lock-row">
+              <el-input
+                v-model="waiverDays"
+                class="waiver-days-input"
+                inputmode="numeric"
+                placeholder="7"
+                style="max-width: 200px"
+              >
+                <template #append>天</template>
+              </el-input>
+              <el-button
+                type="primary"
+                class="waiver-save"
+                :disabled="!!waiverInvalid || waiverSaving"
+                :loading="waiverSaving"
+                @click="saveWaiver"
+              >
+                保存
+              </el-button>
+              <span class="weak small waiver-days-hint">
+                申请豁免时有效期留空即按此天数（默认 7 天，可填 1–90 的整数；显式填写的上限仍是 90 天）。
+              </span>
+            </div>
+          </label>
+          <p v-if="waiverView?.updatedBy" class="weak small waiver-audit">
+            最近保存：{{ waiverView.updatedBy }} · {{ formatDateTime(waiverView.updatedAt) }}
+          </p>
         </div>
       </template>
     </DataSection>
@@ -1370,6 +1445,19 @@ onMounted(() => {
 
 .gate-hint {
   margin-top: 10px;
+}
+
+/* 「豁免默认有效期」 field inside the gate block (P6-F PART-06). */
+.waiver-days {
+  padding-top: 12px;
+  margin-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.waiver-days .lock-row {
+  flex-wrap: wrap;
+}
+.waiver-audit {
+  margin: 8px 0 0;
 }
 
 /* 「审批人名单」 block: one tag editor per approval role. */

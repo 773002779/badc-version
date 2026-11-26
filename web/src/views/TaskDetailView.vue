@@ -45,6 +45,8 @@ const units = ref<UnitView[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const publishing = ref<number | null>(null)
+/** The 变更项 table: cleared after a batch so a reloaded list starts unselected. */
+const itemsTable = ref()
 
 // ------------------------------------------------ stop-loss actions (P5-B)
 const closeOpen = ref(false)
@@ -484,6 +486,73 @@ async function publish(row: ItemView) {
   }
 }
 
+// ------------------------------------------------------ batch publish (P6-F PART-02)
+// 勾选多行 → 串行逐项调用既有的单条发布；一项失败不中断后续项，结束后给成败摘要。不做后端
+// 批量端点：每项的锁/门禁/审计语义与单条发布完全一致（P6-F design §5.4）。
+// PENDING 是状态机里唯一可发起 PUBLISH 的状态（ FAILED 走重跑），所以只有它可勾选。
+const PUBLISHABLE_ITEM_STATUS = 'PENDING'
+const selection = ref<ItemView[]>([])
+const batchPublishing = ref(false)
+
+/** Only a not-yet-published item of a live task can join a batch. */
+function selectable(row: ItemView): boolean {
+  return !isArchived.value && row.status === PUBLISHABLE_ITEM_STATUS
+}
+
+function onSelectionChange(rows: ItemView[]) {
+  selection.value = rows
+}
+
+/** Why 批量部署 is unavailable; empty when there is something to run. */
+const batchBlock = computed(() => {
+  if (!selection.value.length) return '先勾选要发布的变更项（只有「待发布」状态可勾选）'
+  if (!canPublish.value) return '当前账号缺少 release:publish 权限，无法发布'
+  return ''
+})
+
+async function batchPublish() {
+  const rows = selection.value
+  if (!rows.length) return
+  try {
+    await ElMessageBox.confirm(
+      `将串行发布选中的 ${rows.length} 个变更项：逐项创建发布单并部署测试环境；某一项失败不会中断后续项，结束后会给出成败摘要。`,
+      '批量发布确认',
+      { confirmButtonText: '开始发布', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  batchPublishing.value = true
+  const done: string[] = []
+  const failed: string[] = []
+  for (const row of rows) {
+    publishing.value = row.id
+    try {
+      const result = await publishItem(row.id)
+      done.push(`${row.crid} → ${result.publishNo}`)
+    } catch (e) {
+      failed.push(`${row.crid}：${e instanceof ApiError ? e.message : '发布失败'}`)
+    } finally {
+      publishing.value = null
+    }
+  }
+  batchPublishing.value = false
+  selection.value = []
+  itemsTable.value?.clearSelection()
+  await load()
+  if (!failed.length) {
+    ElMessage.success(`批量发布完成：${done.length} 项全部成功`)
+  } else if (!done.length) {
+    ElMessage.error(`批量发布失败：全部 ${failed.length} 项未发布成功`)
+  } else {
+    ElMessageBox.alert(
+      `成功 ${done.length} 项，失败 ${failed.length} 项。失败明细：${failed.join('；')}`,
+      '批量发布结果',
+      { confirmButtonText: '知道了' }
+    )
+  }
+}
+
 async function submitMember() {
   if (!memberForm.userId.trim()) {
     ElMessage.warning('成员工号必填')
@@ -550,7 +619,30 @@ async function submitMember() {
         </DataSection>
 
         <DataSection class="items-block" title="变更项" :subtitle="`${items.length} 项`" flush>
-          <el-table v-if="items.length" :data="items" row-key="id" style="width: 100%">
+          <template #actions>
+            <el-button
+              v-if="!isArchived"
+              class="batch-publish"
+              size="small"
+              type="primary"
+              plain
+              :disabled="!!batchBlock || batchPublishing"
+              :loading="batchPublishing"
+              :title="batchBlock || '串行发布勾选的变更项：失败不中断，结束后给出成败摘要'"
+              @click="batchPublish"
+            >
+              批量发布{{ selection.length ? `（${selection.length}）` : '' }}
+            </el-button>
+          </template>
+          <el-table
+            v-if="items.length"
+            ref="itemsTable"
+            :data="items"
+            row-key="id"
+            style="width: 100%"
+            @selection-change="onSelectionChange"
+          >
+            <el-table-column type="selection" width="36" :selectable="selectable" />
             <el-table-column label="CRID / 分支" width="170">
               <template #default="{ row }">
                 <span class="mono">{{ row.crid }}</span>

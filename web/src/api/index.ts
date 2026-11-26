@@ -28,16 +28,19 @@ import type {
   NotificationSettingView,
   PageResult,
   PipelineConfigView,
+  RedeployResultView,
   ReleaseDetail,
   ReleaseRecord,
   ReleaseRecordRow,
   RollbackResult,
   RollbackVersions,
   SubsystemView,
+  TaskLogView,
   TaskDetailView,
   TaskView,
   TodoBoardView,
   UnitView,
+  WaiverSettingView,
   WindowCheckView,
   WindowView
 } from './types'
@@ -273,6 +276,26 @@ export const resumeRelease = (publishNo: string) =>
     { method: 'POST' }
   )
 
+// ------------------------------------------ single-DE redeploy + logs (P6-G)
+
+/**
+ * 单 DE 重新部署 (P6-G design §1): re-executes a failed production DE row on a new
+ * `RERUN_FROM_NODE` instance at `PROD_DEPLOY`, reusing the previous image. The whole target batch
+ * is retried together and the unfinished checks are invalidated. `control:execute-prod`.
+ */
+export const redeployTask = (publishNo: string, taskId: number) =>
+  api<RedeployResultView>(`/api/v1/releases/${publishNo}/tasks/${taskId}/redeploy`, {
+    method: 'POST'
+  })
+
+/**
+ * 任务日志 (P6-G design §2): one page of the task's engine log, proxied read-only. Only the
+ * latest instance's build/deploy/publish tasks have an engine job; the server answers 40001 for
+ * the rest and 50001/50002 when the engine call itself fails.
+ */
+export const getTaskLogs = (publishNo: string, taskId: number, offset = 0, limit = 8000) =>
+  api<TaskLogView>(`/api/v1/releases/${publishNo}/tasks/${taskId}/logs${qs({ offset, limit })}`)
+
 // ------------------------------------------------ stop / exit / close / archive (P5-B)
 
 /**
@@ -335,9 +358,14 @@ export const refreshGateCheck = (itemId: number, kind: string, instanceId = 0) =
     method: 'POST'
   })
 
+/**
+ * 申请豁免 (P6-F design §3): `expireAt` may be omitted — the server then uses the configured default
+ * validity (`WAIVER.defaultDays`, 7 days unless changed in 设置). An explicit ISO instant keeps the
+ * unchanged window (later than now, at most 90 days).
+ */
 export const requestWaiver = (
   itemId: number,
-  body: { reason: string; impact?: string; expireAt: string }
+  body: { reason: string; impact?: string; expireAt?: string | null }
 ) => api<ItemGate>(`/api/v1/items/${itemId}/gate/waiver`, { method: 'POST', body: JSON.stringify(body) })
 
 export const approveWaiver = (itemId: number, waiverId: number, note?: string) =>
@@ -581,6 +609,21 @@ export const saveApprovalSetting = (body: {
   escalateHours: number
 }) =>
   api<ApprovalSettingView>('/api/v1/settings/approval', {
+    method: 'PUT',
+    body: JSON.stringify(body)
+  })
+
+// ------------------------------------------------ waiver defaults (P6-F)
+
+/** The 「门禁规则」 block's waiver default (P6-F design §3); requires `setting:manage`. */
+export const getWaiverSetting = () => api<WaiverSettingView>('/api/v1/settings/waiver')
+
+/**
+ * Saves the default validity in days. The server re-checks 1–90 (40000), so the page guard is only
+ * a convenience; the value is what an empty `expireAt` waiver request will use.
+ */
+export const saveWaiverSetting = (body: { defaultDays: number }) =>
+  api<WaiverSettingView>('/api/v1/settings/waiver', {
     method: 'PUT',
     body: JSON.stringify(body)
   })
