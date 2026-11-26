@@ -170,4 +170,47 @@ public final class UnitDtos {
         @Min(value = 0, message = "部署批次号不能为负数")
         Integer deployBatchNo) {
     }
+    // -------------------------------------------------------- PART-01 release summary
+
+    /** Maps the summary read model of the unit list's three new columns (PART-01 design §2). */
+    public static UnitReleaseSummaryResponse ofReleaseSummary(
+            com.sf.release.application.UnitReleaseSummaryService.Summary view) {
+        return new UnitReleaseSummaryResponse(
+            view.unitId(),
+            view.latest() == null ? null : new LatestReleaseView(
+                view.latest().digest(),
+                view.latest().publishNo(),
+                view.latest().finishedAt(),
+                view.latest().executedBy()),
+            view.lock() == null ? null : new UnitLockView(
+                view.lock().instanceId(),
+                view.lock().acquiredAt(),
+                view.lock().expireAt()));
+    }
+
+    /**
+     * The unit list's summary columns (PART-01 design §1): the newest successful production deploy
+     * (「最近发布版本 / 时间」) and the current lock row (「占用锁」). Both sections are null when
+     * the unit never deployed to production / is not locked — the page renders {@code —}.
+     */
+    public record UnitReleaseSummaryResponse(
+        long unitId,
+        LatestReleaseView latest,
+        UnitLockView lock) {
+    }
+
+    /** The newest successful production deploy; the same definition the rollback drawer shows. */
+    public record LatestReleaseView(
+        String digest,
+        String publishNo,
+        java.time.Instant finishedAt,
+        String executedBy) {
+    }
+
+    /** The current lock row; a row past its lease stays visible until the reclaim job runs. */
+    public record UnitLockView(
+        long instanceId,
+        java.time.Instant acquiredAt,
+        java.time.Instant expireAt) {
+    }
 }

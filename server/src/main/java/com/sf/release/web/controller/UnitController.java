@@ -10,6 +10,7 @@ import com.sf.release.application.UnitAppService.PageQuery;
 import com.sf.release.application.UnitAppService.PageResult;
 import com.sf.release.application.UnitAppService.UnitView;
 import com.sf.release.application.UnitAppService.UpdateCmd;
+import com.sf.release.application.UnitReleaseSummaryService;
 import com.sf.release.common.ApiResponse;
 import com.sf.release.common.security.DataScope;
 import com.sf.release.common.security.Permissions;
@@ -18,6 +19,7 @@ import com.sf.release.web.dto.UnitDtos.AddEnvDeRequest;
 import com.sf.release.web.dto.UnitDtos.BindCodingTasksRequest;
 import com.sf.release.web.dto.UnitDtos.BindingRequest;
 import com.sf.release.web.dto.UnitDtos.CreateUnitRequest;
+import com.sf.release.web.dto.UnitDtos.UnitReleaseSummaryResponse;
 import com.sf.release.web.dto.UnitDtos.UpdateUnitRequest;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -47,11 +49,14 @@ public class UnitController {
 
     private final UnitAppService unitAppService;
     private final CodingJobQueryService codingJobQueryService;
+    private final UnitReleaseSummaryService releaseSummaryService;
 
     public UnitController(UnitAppService unitAppService,
-                          CodingJobQueryService codingJobQueryService) {
+                          CodingJobQueryService codingJobQueryService,
+                          UnitReleaseSummaryService releaseSummaryService) {
         this.unitAppService = unitAppService;
         this.codingJobQueryService = codingJobQueryService;
+        this.releaseSummaryService = releaseSummaryService;
     }
 
     @DataScope
@@ -155,6 +160,18 @@ public class UnitController {
     @GetMapping("/{id}/env-des")
     public ApiResponse<List<EnvDeView>> listEnvDe(@PathVariable long id) {
         return ApiResponse.ok(unitAppService.listEnvDe(id));
+    }
+
+    /**
+     * PART-01 design §1/§2: the unit list's three summary columns (最近发布版本 / 时间 / 占用锁)
+     * in one read. Read-only and unit-scoped; the page calls it per row of the current page
+     * (best-effort), no batch endpoint.
+     */
+    @DataScope
+    @GetMapping("/{id}/release-summary")
+    public ApiResponse<UnitReleaseSummaryResponse> releaseSummary(@PathVariable long id) {
+        return ApiResponse.ok(com.sf.release.web.dto.UnitDtos.ofReleaseSummary(
+            releaseSummaryService.summary(id)));
     }
 
     @RequirePerm(Permissions.SETTING_MANAGE)
