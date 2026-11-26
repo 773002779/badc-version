@@ -1642,3 +1642,17 @@ GAP-12 / J7 的前端是设置页的**第四块**「审批时效」：一个开�
 - **单元详情「消息通知」块降级不做**（已接受残留，见未实现清单 §6）。
 - 探针：`scripts/verify-p1b-ui.mjs`（复用 `demo-redeploy.sql` + 插入锁行验证占用态 + 管控入口跳转预选）
   双主题绿、0 console error；截图 `unit-summary-{light,dark}.png`、`subsystem-records-{light,dark}.png`。
+
+
+## 27. PART-05 · CODING 连接覆盖与部署目标映射（2026-11-27）
+
+对应 PART-05；契约 `docs/superpowers/specs/2026-11-27-p05-coding-multi-conn-design.md`。
+
+- **系统详情页（`/subsystems/{id}`）**：右列新增「CODING 连接覆盖」块——四个字段（地址/团队/项目/凭证，
+  原生 input + 既有 field 样式）、「保存覆盖」按钮与「全局 → 系统覆盖」解析说明；`setting:manage` 才可读写，
+  无权限显示提示；未配置块态为「未配置（走全局连接）」`configured:false`。凭证只显 `tokenHint`，留空沿用。
+  （块内用原生 input 是 vue-tsc 对同文件多个 reactive 对象的 el-input v-model 泛型推断污染的规避。）
+- **单元详情页 DE 添加表单**：新增「CODING 部署目标」输入（`env_de.coding_deploy_target`，留空用 DE 名称）。
+- **设置页全局连接块**：不变；系统覆盖只在系统详情页维护。
+- 探针：`scripts/verify-p05-ui.mjs`（保存真实覆盖行 → API 读回 → `finally` 删除恢复 + DE 对话框字段断言）
+  双主题绿、0 console error；截图 `coding-override-{light,dark}.png`。

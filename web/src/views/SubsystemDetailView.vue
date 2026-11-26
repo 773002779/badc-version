@@ -2,8 +2,17 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { createUnit, getMe, getSubsystem, listReleases, listUnits, updateSubsystem } from '../api'
-import type { ReleaseRecordRow, SubsystemView, UnitView } from '../api/types'
+import {
+  createUnit,
+  getCodingConn,
+  getMe,
+  getSubsystem,
+  listReleases,
+  listUnits,
+  saveCodingConn,
+  updateSubsystem
+} from '../api'
+import type { CodingConnView, ReleaseRecordRow, SubsystemView, UnitView } from '../api/types'
 import { ApiError } from '../api/http'
 import PageHeader from '../components/PageHeader.vue'
 import DataSection from '../components/DataSection.vue'
@@ -80,10 +89,61 @@ async function load() {
     // PART-01: the system's newest release records (server-side data scope applies).
     releases.value = records?.records ?? []
     releaseCount.value = records?.total ?? 0
+    // PART-05: this system's CODING connection override (best-effort — a caller without
+    // setting:manage gets 403 and the block stays read-only).
+    if (canManage.value) {
+      await loadOverride()
+    }
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : '加载失败'
   } finally {
     loading.value = false
+  }
+}
+
+// PART-05: the per-subsystem CODING connection override of this system. The engine resolves
+// GLOBAL→SUBSYSTEM per unit, so a system with its own tenant only overrides here.
+const connOverride = ref<CodingConnView | null>(null)
+const overrideError = ref<string | null>(null)
+const overrideSaving = ref(false)
+const overrideForm = reactive({ baseUrl: '', team: '', project: '', token: '' })
+
+async function loadOverride() {
+  overrideError.value = null
+  try {
+    const view = await getCodingConn(id)
+    connOverride.value = view
+    overrideForm.baseUrl = view.baseUrl ?? ''
+    overrideForm.team = view.team ?? ''
+    overrideForm.project = view.project ?? ''
+    overrideForm.token = ''
+  } catch (e) {
+    overrideError.value = e instanceof ApiError ? e.message : '读取连接覆盖失败'
+  }
+}
+
+async function saveOverride() {
+  if (!overrideForm.baseUrl.trim()) {
+    ElMessage.warning('覆盖连接的地址必填')
+    return
+  }
+  overrideSaving.value = true
+  try {
+    const view = await saveCodingConn(
+      {
+        baseUrl: overrideForm.baseUrl.trim(),
+        team: overrideForm.team.trim(),
+        project: overrideForm.project.trim(),
+        token: overrideForm.token.trim() || undefined
+      },
+      id
+    )
+    connOverride.value = view
+    ElMessage.success('CODING 连接覆盖已保存（引擎按 GLOBAL→系统 解析）')
+  } catch (e) {
+    ElMessage.error(e instanceof ApiError ? e.message : '保存失败')
+  } finally {
+    overrideSaving.value = false
   }
 }
 
@@ -181,6 +241,41 @@ async function submit() {
         </KeyValue>
         <KeyValue label="Git 仓库" :value="subsystem?.gitUrl" mono />
         <KeyValue label="描述" :value="subsystem?.description" />
+      </DataSection>
+
+      <!-- PART-05: this system's CODING connection override (the engine resolves GLOBAL→系统). -->
+      <DataSection class="coding-override" title="CODING 连接覆盖" :subtitle="connOverride && connOverride.configured ? '已配置' : '未配置（走全局连接）'" style="margin-bottom: 16px">
+        <el-alert v-if="overrideError" type="error" :closable="false" show-icon :title="overrideError" style="margin-bottom: 12px" />
+        <p class="weak small" style="margin: 0 0 12px">
+          为本系统配置独立的 CODING 租户（地址 / 团队 / 项目 / 凭证）；引擎调用按
+          <b>全局 → 系统覆盖</b> 的顺序解析，本系统下所有部署单元的构建、部署与检查都优先走这份连接。
+          留空凭证表示沿用已保存的凭证；删除覆盖需管理员在数据库操作。
+        </p>
+        <div v-if="canManage" class="conn-grid">
+          <label class="field span-2">
+            <span class="field-label">服务地址</span>
+            <input v-model="overrideForm.baseUrl" class="override-input" placeholder="https://coding.example.com" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span class="field-label">团队</span>
+            <input v-model="overrideForm.team" class="override-input" placeholder="团队标识" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span class="field-label">项目</span>
+            <input v-model="overrideForm.project" class="override-input" placeholder="项目标识" spellcheck="false" />
+          </label>
+          <label class="field span-2">
+            <span class="field-label">
+              访问凭证
+              <span v-if="connOverride && connOverride.tokenHint" class="weak">（已保存 {{ connOverride.tokenHint }}，留空不修改）</span>
+            </span>
+            <input v-model="overrideForm.token" type="password" class="override-input" placeholder="留空沿用已保存凭证" autocomplete="new-password" />
+          </label>
+          <div class="span-2">
+            <el-button type="primary" :loading="overrideSaving" @click="saveOverride">保存覆盖</el-button>
+          </div>
+        </div>
+        <div v-else class="weak small">需要 <code class="mono">setting:manage</code> 权限才能查看与修改连接覆盖。</div>
       </DataSection>
 
       <DataSection title="部署单元" :subtitle="`${units.length} 个`" flush>
@@ -309,5 +404,27 @@ async function submit() {
   .grid {
     grid-template-columns: 1fr !important;
   }
+}
+.override-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+.override-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.conn-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+}
+.conn-grid .span-2 {
+  grid-column: span 2;
 }
 </style>

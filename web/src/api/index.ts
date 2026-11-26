@@ -391,16 +391,30 @@ export const rejectWaiver = (itemId: number, waiverId: number, note: string) =>
 
 // ---------------------------------------------------- CODING connection (settings)
 
-/** The tenant-wide connection; `configured:false` when nothing has been saved yet. */
-export const getCodingConn = () => api<CodingConnView>('/api/v1/coding/conn')
+/**
+ * The tenant-wide connection, or — with `subsystemId` (PART-05) — that subsystem's override;
+ * `configured:false` when the requested row was never saved.
+ */
+export const getCodingConn = (subsystemId?: number) =>
+  api<CodingConnView>(`/api/v1/coding/conn${subsystemId ? qs({ subsystemId }) : ''}`)
 
-/** Saves the connection; a blank token keeps the stored credential. */
-export const saveCodingConn = (body: {
-  baseUrl: string
-  team: string
-  project: string
-  token?: string
-}) => api<CodingConnView>('/api/v1/coding/conn', { method: 'PUT', body: JSON.stringify(body) })
+/**
+ * Saves the GLOBAL connection, or — with `subsystemId` — that subsystem's override (the engine
+ * resolves GLOBAL→SUBSYSTEM per unit). A blank token keeps the stored credential.
+ */
+export const saveCodingConn = (
+  body: {
+    baseUrl: string
+    team: string
+    project: string
+    token?: string
+  },
+  subsystemId?: number
+) =>
+  api<CodingConnView>(`/api/v1/coding/conn${subsystemId ? qs({ subsystemId }) : ''}`, {
+    method: 'PUT',
+    body: JSON.stringify(body)
+  })
 
 /** Tests a draft (unsaved) or the stored connection; never persists anything. */
 export const testCodingConn = (

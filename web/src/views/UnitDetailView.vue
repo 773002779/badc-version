@@ -118,7 +118,7 @@ async function loadLib() {
 }
 
 const deDialog = ref(false)
-const deForm = reactive({ envKind: 'TEST', deName: '', envTag: '', deployBatchNo: 0 })
+const deForm = reactive({ envKind: 'TEST', deName: '', envTag: '', codingDeployTarget: '', deployBatchNo: 0 })
 
 // ---- CODING job candidates -------------------------------------------------
 // The picker asks the engine which jobs the system's project has. When the connection is
@@ -522,10 +522,13 @@ async function submitDe() {
       envKind: deForm.envKind,
       deName: deForm.deName.trim(),
       envTag: deForm.envTag || undefined,
+      // PART-05: the DE's explicit CODING-side deployment target; blank keeps the DE name.
+      codingDeployTarget: deForm.codingDeployTarget.trim() || undefined,
       deployBatchNo: deForm.deployBatchNo
     })
     deDialog.value = false
     deForm.deName = ''
+    deForm.codingDeployTarget = ''
     ElMessage.success('环境 DE 已添加')
     await load()
   } catch (e) {
@@ -1072,6 +1075,10 @@ async function submitDe() {
         </el-form-item>
         <el-form-item label="环境标签">
           <el-input v-model="deForm.envTag" placeholder="例如 sit2 / prod2" />
+        </el-form-item>
+        <!-- PART-05: the explicit CODING-side deployment target of this DE. -->
+        <el-form-item label="CODING 部署目标">
+          <el-input v-model="deForm.codingDeployTarget" placeholder="留空则用 DE 名称" />
         </el-form-item>
       </el-form>
       <template #footer>

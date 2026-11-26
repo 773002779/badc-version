@@ -788,3 +788,20 @@ Follow-up: 系统详情「CODING 项目」可编辑（P1 只有创建表单有�
   **单元详情「消息通知」块降级不做**（通知是发布单维度、列表接口只按 page/unreadOnly 过滤，按单元聚合需新
   join；通知中心已可查）——已接受残留。证据：5 个 `part01` 测试 + 全量 1043 绿；探针
   `verify-p1b-ui.mjs` 双主题绿（种子 `demo-redeploy.sql` + 插锁行验证占用态、管控入口跳转预选）。
+
+## PART-05 裁决（2026-11-27，CODING 多连接与部署目标映射）
+
+- Ruling R142: 连接解析：`GlobalCodingConnectionProvider` 实现 `CodingConnectionSource`（Supplier 子接口 +
+  `forUnit(unitId)`）：unit→subsystem→`SUBSYSTEM` 覆盖行，无覆盖/未知单元回退 GLOBAL；逐调用懒读。`CodingEngine`
+  的 `execute` 从 vars 的 `unitId` 走 `connectionFor`——**带 unitId 的 start 类调用**（build/deploy/check.start）
+  与 `listJobs(unitId,...)`（`CicdEngine` 新 default）按子系统解析；**query/logs/cancel（只有 externalId）与
+  `startPublish`（PublishCmd 无 unitId）保持 GLOBAL**（已接受残留：子系统独立 token 时其作业轮询/日志/取消可能 401）。
+  `coding_conn` 表与 upsert 本就支持，新增 `subsystemOrNull` 读。
+- Ruling R143: 部署目标映射：`DeployTarget`/`DeployCmd` 加 `codingDeployTarget`（取 `env_de.coding_deploy_target`）；
+  三个部署 handler **空值回退 deName**（未配置映射的 DE 行为与 PART-05 前完全一致，模板只有一个非空目标字段）；
+  `triggerDeploy` 放入 `codingDeployTarget` 变量，`coding-endpoints.yml` 的 `deploy.start` body 加
+  `"CodingDeployTarget":"{codingDeployTarget}"` 占位（真实 CODING 契约未验证，改配置不改代码）。
+- Ruling R144: HTTP/页面与证据：`GET/PUT /api/v1/coding/conn?subsystemId=`（`setting:manage`；GET 未保存答
+  `configured:false` 而非 40000）；系统详情「CODING 连接覆盖」块（原生 input——vue-tsc 对同文件多 reactive 的
+  el-input v-model 泛型推断污染的规避）；DE 添加表单加「CODING 部署目标」。证据：4 个解析测试 + 引擎映射断言
+  （显式值/回退 deName）、全量 1048 绿；探针 `verify-p05-ui.mjs` 双主题绿（保存真实覆盖行 → 读回 → finally 删除）。
