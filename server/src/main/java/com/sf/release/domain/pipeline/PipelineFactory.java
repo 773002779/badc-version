@@ -296,6 +296,69 @@ public final class PipelineFactory {
     }
 
     /**
+     * Pre-generates the instance of a <em>single-DE redeploy</em> (P6-G design §1): a
+     * {@code RERUN_FROM_NODE} execution that starts at {@code PROD_DEPLOY} and reuses the previous
+     * instance's image/commit.
+     *
+     * <p><strong>Only the target batch is retried.</strong> Unlike a normal production rerun
+     * ({@link #createRerun}, which leaves the failed batch <em>and every later batch</em>
+     * {@code PENDING}), a single-DE redeploy keeps only the DEs of the failed task's batch
+     * {@code PENDING}; every other production task — earlier successful batches and later batches
+     * that never ran — is pre-marked {@code SKIPPED}. That is the "same batch is retried as a
+     * whole, no half batch" rule: a single DE failure often shares its batch's configuration, and
+     * partially redeploying a batch would leave two versions in it.
+     *
+     * <p>The batch is expressed as the set of {@code targetDeIds} of the previous instance, not as
+     * a batch number: a new instance may renumber its batches (P6-C {@code REVERSE}), while the DE
+     * identity does not change. The earlier nodes are marked {@code SKIPPED} exactly like any
+     * from-node rerun.
+     *
+     * @param fromNode      the resume node; the production redeploy passes {@code PROD_DEPLOY}
+     * @param imageDigest   the previous instance's image, reused without rebuilding
+     * @param commitSha     the previous instance's commit, reused with the image
+     * @param targetDeIds   the DE ids of the failed task's batch; never empty
+     */
+    public static PipelineInstance createSingleDeRedeploy(ReleaseOrder order, ReleaseItem item,
+                                                          List<EnvDe> envDes, NodeType fromNode,
+                                                          String imageDigest, String commitSha,
+                                                          Set<Long> targetDeIds,
+                                                          Set<CheckType> enabledChecks,
+                                                          BatchOrder batchOrder) {
+        Objects.requireNonNull(fromNode, "fromNode must not be null");
+        Objects.requireNonNull(targetDeIds, "targetDeIds must not be null");
+        if (targetDeIds.isEmpty()) {
+            throw new IllegalArgumentException(
+                "a single-DE redeploy requires at least one target DE");
+        }
+        PipelineInstance base = createRerun(order, item, envDes, TriggerType.RERUN_FROM_NODE,
+            fromNode, imageDigest, commitSha, null, enabledChecks, batchOrder);
+        PipelineNode production = base.node(NodeType.PROD_DEPLOY);
+        if (production == null) {
+            throw new IllegalArgumentException(
+                "the online pipeline has no PROD_DEPLOY node");
+        }
+        PipelineNode filtered = new PipelineNode(production.id(), production.instanceId(),
+            production.nodeType(), production.seq(), production.status(),
+            production.startedAt(), production.finishedAt(),
+            production.tasks().stream()
+                .map(task -> targetDeIds.contains(task.targetId())
+                    ? task
+                    : skippedTask(task, "单 DE 重新部署只重试目标批次，其余批次跳过",
+                        base.createdAt()))
+                .toList());
+        List<PipelineNode> nodes = new ArrayList<>(base.nodes().size());
+        for (PipelineNode node : base.nodes()) {
+            nodes.add(node.nodeType() == NodeType.PROD_DEPLOY ? filtered : node);
+        }
+        // The filtered aggregate is a new instance: keep every identity/status field of the base
+        // rerun and replace only the production node's task statuses.
+        return new PipelineInstance(base.id(), base.orderId(), base.pipelineNo(), base.execType(),
+            TriggerType.RERUN_FROM_NODE, base.currentNode(), base.status(), base.imageDigest(),
+            base.commitSha(), base.startAt(), base.endAt(), base.createdAt(),
+            base.statusReason(), nodes);
+    }
+
+    /**
      * Pre-generates a daily release instance (P5-A design §3): the simplified
      * {@code BUILD → DAILY_DEPLOY} pipeline. It is not a 发布单, so the instance has
      * {@code orderId = 0}, {@link ExecType#DAILY}, no unit lock and no item state change; it

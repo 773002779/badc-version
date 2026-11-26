@@ -170,6 +170,7 @@ public class ReleaseQueryService {
 
     private static TaskView taskView(NodeTaskPO task) {
         return new TaskView(
+            task.getId() == null ? 0L : task.getId(),
             task.getTaskType(),
             task.getBatchNo() == null ? 0 : task.getBatchNo(),
             task.getTargetId() == null ? 0L : task.getTargetId(),
@@ -325,8 +326,13 @@ public class ReleaseQueryService {
         }
     }
 
-    /** One {@code node_task} row. {@code batchNo} is 0 outside the production deploy node. */
+    /**
+     * One {@code node_task} row. {@code id} is the row id the P6-G task actions
+     * ({@code redeploy}/{@code logs}) address. {@code batchNo} is 0 outside the production
+     * deploy node.
+     */
     public record TaskView(
+        long id,
         String taskType,
         int batchNo,
         long targetId,

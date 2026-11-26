@@ -133,7 +133,7 @@ public final class ReleaseDtos {
     }
 
     private static ReleaseTaskView taskOf(TaskView task) {
-        return new ReleaseTaskView(task.taskType(), task.batchNo(), task.targetId(),
+        return new ReleaseTaskView(task.id(), task.taskType(), task.batchNo(), task.targetId(),
             task.status(), task.durationMs(), task.resultSummary(), task.externalUrl());
     }
 
@@ -198,10 +198,12 @@ public final class ReleaseDtos {
     }
 
     /**
-     * One {@code node_task}: {@code batchNo} is the production batch (0 elsewhere),
-     * {@code targetId} the DE id or the check-type code.
+     * One {@code node_task}: {@code id} is the row id the P6-G task actions
+     * ({@code redeploy}/{@code logs}) address; {@code batchNo} is the production batch
+     * (0 elsewhere), {@code targetId} the DE id or the check-type code.
      */
     public record ReleaseTaskView(
+        long id,
         String taskType,
         int batchNo,
         long targetId,

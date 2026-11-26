@@ -491,6 +491,34 @@ public class PublishAppService {
         return new CreatedInstance(instance, instanceId);
     }
 
+    /**
+     * Creates and persists the instance of a single-DE redeploy (P6-G design §1). It behaves like
+     * {@link #createRerunInstance} (same lock bind, config read and pre-generation) but starts at
+     * {@code PROD_DEPLOY}, reuses the given image/commit and keeps only {@code targetDeIds}
+     * pending; see {@link PipelineFactory#createSingleDeRedeploy}.
+     *
+     * <p>Package-visible: {@code SingleDeRedeployService} is in this package and owns the
+     * transaction and the unit lock.
+     */
+    CreatedInstance createDeRedeployInstance(ReleaseOrder order, ReleaseItem item, long unitId,
+                                             NodeType fromNode, String imageDigest,
+                                             String commitSha, Set<Long> targetDeIds) {
+        List<EnvDe> envDes = loadEnvDes(unitId);
+        UnitPipelineConfig config = pipelineConfigs.configOfUnit(unitId);
+        Set<CheckType> enabledChecks =
+            UnitPipelineConfig.effectiveChecks(settings.enabledChecks(), config);
+        requireExecutableChecks(unitId, enabledChecks);
+        BatchOrder batchOrder = config == null ? BatchOrder.FORWARD : config.batchOrder();
+        PipelineInstance instance = PipelineFactory.createSingleDeRedeploy(order, item, envDes,
+            fromNode, imageDigest, commitSha, targetDeIds, enabledChecks, batchOrder);
+        long instanceId = persistInstance(instance, unitId, item.id());
+        log.info("single-DE redeploy pipeline created: itemId={}, unitId={}, publishNo={},"
+                + " pipelineNo={}, fromNode={}, imageDigest={}, targets={}",
+            item.id(), unitId, order.publishNo(), instance.pipelineNo(), fromNode,
+            imageDigest == null ? "<none>" : imageDigest, targetDeIds);
+        return new CreatedInstance(instance, instanceId);
+    }
+
     private List<EnvDe> loadEnvDes(long unitId) {
         return envDeMapper.selectList(Wrappers.<EnvDePO>lambdaQuery()
                 .eq(EnvDePO::getUnitId, unitId)
